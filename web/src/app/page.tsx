@@ -233,7 +233,7 @@ export default function Home() {
         </div>
 
         {user && (
-          <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 space-y-4">
+          <div className="space-y-4">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Patched games</p>
@@ -286,11 +286,11 @@ export default function Home() {
                 placeholder="https://awbw.amarriner.com/game.php?games_id=123456"
               />
             </div>
-          </section>
+          </div>
         )}
 
         {user && gameInfo && (
-          <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 space-y-3">
+          <div className="space-y-3">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Signal DM token</p>
