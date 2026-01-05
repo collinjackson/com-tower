@@ -3,13 +3,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   firebaseAvailable,
-  getFirebaseDb,
   signInWithGoogle,
   signOutFirebase,
   subscribeToAuth,
 } from '@/lib/firebase';
 import type { User } from 'firebase/auth';
-import { doc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, updateDoc, serverTimestamp, getFirestore } from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
 
 type GameInfo = {
@@ -28,6 +27,8 @@ export default function Home() {
   const [notifyMode, setNotifyMode] = useState<NotifyMode>('signal-dm');
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  const [lookupPending, setLookupPending] = useState(false);
+  const [confirmPending, setConfirmPending] = useState(false);
 
   useEffect(() => {
     if (!firebaseAvailable) return;
@@ -45,16 +46,12 @@ export default function Home() {
   const cleanGameName = (name: string) =>
     name.replace(/\s+AWBW\b/i, '').trim();
 
-  const lookupGame = async () => {
-    if (!gameLink.trim()) {
-      setStatus('Enter a game link or ID.');
-      return;
-    }
-    setSaving(true);
-    setStatus(null);
+  const lookupGame = async (link: string, includeAuth = false) => {
+    const pattern = /^https:\/\/awbw\.amarriner\.com\/game\.php\?games_id=\d+$/;
+    if (!pattern.test(link)) return;
     try {
       let idToken: string | null = null;
-      if (user) {
+      if (includeAuth && user) {
         try {
           idToken = await getAuth().currentUser?.getIdToken();
         } catch {
@@ -62,7 +59,7 @@ export default function Home() {
         }
       }
 
-      const res = await fetch(`/api/game/lookup?link=${encodeURIComponent(gameLink)}`, {
+      const res = await fetch(`/api/game/lookup?link=${encodeURIComponent(link)}`, {
         headers: idToken ? { Authorization: `Bearer ${idToken}` } : undefined,
       });
       if (!res.ok) {
@@ -76,56 +73,24 @@ export default function Home() {
         mapName: data.mapName || '',
       };
       setGameInfo(nextGame);
-
-      // Auto-save to Firestore on lookup so we cache the metadata.
-      if (firebaseAvailable && user) {
-        const db = getFirebaseDb();
-        const ref = doc(db, 'games', nextGame.gameId);
-        await setDoc(ref, {
-          ...nextGame,
-          signalToken: signalToken || '',
-          notifyMode,
-          inviterUid: user.uid,
-          updatedAt: serverTimestamp(),
-          createdAt: serverTimestamp(),
-        });
-        setStatus('Game looked up and cached in Firestore.');
-      } else {
-        setStatus('Game loaded (not cached; Firebase missing).');
-      }
+      setStatus(includeAuth ? 'Patched and cached on server.' : 'Game loaded.');
     } catch (err: unknown) {
       setStatus(err instanceof Error ? err.message : 'Lookup failed');
-    } finally {
-      setSaving(false);
     }
   };
 
-  const saveGame = async () => {
-    if (!gameInfo?.gameId) return;
-    setSaving(true);
-    setStatus(null);
-    try {
-      if (firebaseAvailable && user) {
-        const db = getFirebaseDb();
-        const ref = doc(db, 'games', gameInfo.gameId);
-        await setDoc(ref, {
-          ...gameInfo,
-          signalToken: signalToken || '',
-            notifyMode,
-          inviterUid: user.uid,
-          updatedAt: serverTimestamp(),
-          createdAt: serverTimestamp(),
-        });
-        setStatus('Saved to Firestore.');
-      } else {
-        setStatus('Saved locally (no Firebase config).');
-      }
-    } catch (err: unknown) {
-      setStatus(err instanceof Error ? err.message : 'Save failed');
-    } finally {
-      setSaving(false);
-    }
-  };
+  // Debounced lookup when link matches expected pattern.
+  useEffect(() => {
+    const pattern = /^https:\/\/awbw\.amarriner\.com\/game\.php\?games_id=\d+$/;
+    if (!gameLink || !pattern.test(gameLink)) return;
+    const handle = setTimeout(async () => {
+      setLookupPending(true);
+      setStatus('Looking up game…');
+      await lookupGame(gameLink, false);
+      setLookupPending(false);
+    }, 500);
+    return () => clearTimeout(handle);
+  }, [gameLink]);
 
   const saveSignalToken = async () => {
     if (!gameInfo?.gameId) return;
@@ -133,7 +98,7 @@ export default function Home() {
     setStatus(null);
     try {
       if (firebaseAvailable && user) {
-        const db = getFirebaseDb();
+        const db = getFirestore();
         const ref = doc(db, 'games', gameInfo.gameId);
         await updateDoc(ref, {
           signalToken,
@@ -155,7 +120,7 @@ export default function Home() {
     if (!gameInfo?.gameId) return;
     try {
       if (firebaseAvailable && user) {
-        const db = getFirebaseDb();
+        const db = getFirestore();
         const ref = doc(db, 'games', gameInfo.gameId);
         await updateDoc(ref, {
           notifyMode: mode,
@@ -174,7 +139,7 @@ export default function Home() {
           <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Com Tower</p>
           <h1 className="text-3xl font-semibold">AWBW turn notifications</h1>
           <p className="text-sm text-zinc-400">
-            Patch a game, cache it in Firestore, and set your Signal DM token for turn alerts.
+            Patch your AWBW game to receive turn alerts.
           </p>
         </div>
 
@@ -218,8 +183,8 @@ export default function Home() {
               <>
                 <div>
                   <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Patch game</p>
-                  <p className="text-lg font-semibold text-zinc-100">Lookup and save</p>
-                  <p className="text-sm text-zinc-400">Paste the AWBW game link. Name/map will be auto-looked up.</p>
+                  <p className="text-lg font-semibold text-zinc-100">Auto-lookup</p>
+                  <p className="text-sm text-zinc-400">Paste the AWBW game link.</p>
                 </div>
                 <input
                   value={gameLink}
@@ -227,13 +192,7 @@ export default function Home() {
                   className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
                   placeholder="https://awbw.amarriner.com/game.php?games_id=123456"
                 />
-                <button
-                  onClick={lookupGame}
-                  disabled={saving || !gameLink.trim()}
-                  className="w-full sm:w-auto rounded-xl bg-white text-black font-semibold px-4 py-3 shadow disabled:opacity-50"
-                >
-                  Lookup
-                </button>
+                {lookupPending && <p className="text-xs text-zinc-500">Looking up…</p>}
               </>
             ) : (
               <div className="space-y-2">
@@ -252,6 +211,21 @@ export default function Home() {
                     className="px-3 py-2 rounded-lg border border-zinc-700 text-zinc-300 hover:border-zinc-500"
                   >
                     Disconnect
+                  </button>
+                </div>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <button
+                    onClick={async () => {
+                      if (!gameLink) return;
+                      setConfirmPending(true);
+                      setStatus('Confirming patch…');
+                      await lookupGame(gameLink, true);
+                      setConfirmPending(false);
+                    }}
+                    disabled={confirmPending || lookupPending}
+                    className="px-4 py-3 rounded-xl bg-white text-black font-semibold shadow disabled:opacity-50"
+                  >
+                    Confirm patch
                   </button>
                 </div>
               </div>
