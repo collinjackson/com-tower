@@ -44,6 +44,7 @@ export default function Home() {
   const [patchedLoading, setPatchedLoading] = useState(false);
   const [userPhone, setUserPhone] = useState('');
   const [userPhoneLoading, setUserPhoneLoading] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
   useEffect(() => {
     if (!firebaseAvailable) return;
@@ -248,6 +249,12 @@ export default function Home() {
                   <>
                     <span>{user.email}</span>
                     <button
+                      onClick={() => setShowSettings((v) => !v)}
+                      className="px-3 py-2 rounded-lg border border-zinc-700 hover:border-zinc-500"
+                    >
+                      Settings
+                    </button>
+                    <button
                       onClick={signOutFirebase}
                       className="px-3 py-2 rounded-lg border border-zinc-700 hover:border-zinc-500"
                     >
@@ -269,56 +276,6 @@ export default function Home() {
             {statusLine && <p className="text-[11px] text-zinc-500">{statusLine}</p>}
           </div>
         </div>
-
-        {user && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Default Signal number</p>
-                <p className="text-sm text-zinc-400">
-                  Used for DM notifications unless you paste a group invite link.
-                </p>
-              </div>
-              {userPhoneLoading && <p className="text-xs text-zinc-500">Loading…</p>}
-            </div>
-            <div className="flex flex-col sm:flex-row gap-2">
-              <input
-                value={userPhone}
-                onChange={(e) => setUserPhone(e.target.value)}
-                className="flex-1 rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
-                placeholder="Your Signal phone (DM default)"
-              />
-              <button
-                onClick={async () => {
-                  if (!firebaseAvailable || !user) return;
-                  setSaving(true);
-                  setStatus(null);
-                  try {
-                    const db = getFirestore();
-                    const ref = doc(db, 'users', user.uid);
-                    await setDoc(
-                      ref,
-                      {
-                        signalPhone: userPhone.trim(),
-                        updatedAt: serverTimestamp(),
-                      },
-                      { merge: true }
-                    );
-                    setStatus('Default Signal number saved.');
-                  } catch (err: unknown) {
-                    setStatus(err instanceof Error ? err.message : 'Failed to save number');
-                  } finally {
-                    setSaving(false);
-                  }
-                }}
-                disabled={saving}
-                className="px-4 py-3 rounded-xl bg-white text-black font-semibold shadow disabled:opacity-50"
-              >
-                Save number
-              </button>
-            </div>
-          </div>
-        )}
 
         {user && !gameInfo && (
           <div className="space-y-4">
@@ -375,6 +332,63 @@ export default function Home() {
               />
             </div>
           </div>
+        )}
+
+        {user && showSettings && (
+          <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Settings</p>
+                <p className="text-sm text-zinc-400">Default Signal DM and session.</p>
+              </div>
+              <button
+                onClick={signOutFirebase}
+                className="px-3 py-2 rounded-lg border border-zinc-700 hover:border-zinc-500 text-xs"
+              >
+                Sign out
+              </button>
+            </div>
+            <div className="space-y-2">
+              <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Default Signal number</p>
+              {userPhoneLoading && <p className="text-xs text-zinc-500">Loading…</p>}
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input
+                  value={userPhone}
+                  onChange={(e) => setUserPhone(e.target.value)}
+                  className="flex-1 rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
+                  placeholder="Your Signal phone (DM default)"
+                />
+                <button
+                  onClick={async () => {
+                    if (!firebaseAvailable || !user) return;
+                    setSaving(true);
+                    setStatus(null);
+                    try {
+                      const db = getFirestore();
+                      const ref = doc(db, 'users', user.uid);
+                      await setDoc(
+                        ref,
+                        {
+                          signalPhone: userPhone.trim(),
+                          updatedAt: serverTimestamp(),
+                        },
+                        { merge: true }
+                      );
+                      setStatus('Default Signal number saved.');
+                    } catch (err: unknown) {
+                      setStatus(err instanceof Error ? err.message : 'Failed to save number');
+                    } finally {
+                      setSaving(false);
+                    }
+                  }}
+                  disabled={saving}
+                  className="px-4 py-3 rounded-xl bg-white text-black font-semibold shadow disabled:opacity-50"
+                >
+                  Save number
+                </button>
+              </div>
+            </div>
+          </section>
         )}
 
         {user && gameInfo && (
