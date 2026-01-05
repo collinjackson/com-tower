@@ -17,12 +17,14 @@ type GameInfo = {
   mapName: string;
 };
 
+type NotifyMode = 'none' | 'signal-dm';
+
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [gameLink, setGameLink] = useState('');
   const [gameInfo, setGameInfo] = useState<GameInfo | null>(null);
   const [signalToken, setSignalToken] = useState('');
-  const [notifyMe, setNotifyMe] = useState(true);
+  const [notifyMode, setNotifyMode] = useState<NotifyMode>('signal-dm');
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
 
@@ -77,7 +79,7 @@ export default function Home() {
         await setDoc(ref, {
           ...gameInfo,
           signalToken: signalToken || '',
-          notifyMe,
+            notifyMode,
           inviterUid: user.uid,
           updatedAt: serverTimestamp(),
           createdAt: serverTimestamp(),
@@ -116,16 +118,15 @@ export default function Home() {
     }
   };
 
-  const toggleNotifyMe = async () => {
-    const next = !notifyMe;
-    setNotifyMe(next);
+  const saveNotifyMode = async (mode: NotifyMode) => {
+    setNotifyMode(mode);
     if (!gameInfo?.gameId) return;
     try {
       if (firebaseAvailable && user) {
         const db = getFirebaseDb();
         const ref = doc(db, 'games', gameInfo.gameId);
         await updateDoc(ref, {
-          notifyMe: next,
+          notifyMode: mode,
           updatedAt: serverTimestamp(),
         });
       }
@@ -228,14 +229,6 @@ export default function Home() {
                 >
                   Save to Firestore
                 </button>
-                <button
-                  onClick={toggleNotifyMe}
-                  className={`px-4 py-3 rounded-xl border text-sm ${
-                    notifyMe ? 'bg-[#152029] border-[#20415a] text-[#c7e6ff]' : 'bg-black border-zinc-800 text-zinc-400'
-                  }`}
-                >
-                  {notifyMe ? 'Notify me on turn' : 'Notifications off'}
-                </button>
               </div>
             </div>
           )}
@@ -272,6 +265,35 @@ export default function Home() {
                   Clear
                 </button>
               )}
+            </div>
+
+            <div className="pt-3 space-y-2">
+              <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Notifications</p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => saveNotifyMode('signal-dm')}
+                  className={`flex-1 rounded-lg px-3 py-3 border text-sm ${
+                    notifyMode === 'signal-dm'
+                      ? 'bg-[#152029] border-[#20415a] text-[#c7e6ff]'
+                      : 'bg-black border-zinc-800 text-zinc-400'
+                  }`}
+                >
+                  Signal DM
+                </button>
+                <button
+                  onClick={() => saveNotifyMode('none')}
+                  className={`flex-1 rounded-lg px-3 py-3 border text-sm ${
+                    notifyMode === 'none'
+                      ? 'bg-[#152029] border-[#20415a] text-[#c7e6ff]'
+                      : 'bg-black border-zinc-800 text-zinc-400'
+                  }`}
+                >
+                  No notifications
+                </button>
+              </div>
+              <p className="text-xs text-zinc-500">
+                For this 1v1 demo, only your DM token is used. Other players stay silent.
+              </p>
             </div>
           </section>
         )}
