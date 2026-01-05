@@ -36,9 +36,9 @@ export default function Home() {
 
   const statusLine = useMemo(() => {
     if (!firebaseAvailable) return 'Firestore not configured; using local mock.';
-    if (!user) return 'Handshake pending. Sign in to patch.';
+    if (!user) return 'Sign in to start.';
     if (gameInfo) return 'Line is clean.';
-    return 'Awaiting patch.';
+    return 'Ready to patch a game.';
   }, [user, gameInfo]);
 
   const lookupGame = async () => {
@@ -184,8 +184,8 @@ export default function Home() {
           {!gameInfo ? (
             <>
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Step 1</p>
-                <p className="text-lg font-semibold text-zinc-100">Patch game</p>
+                <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Patch game</p>
+                <p className="text-lg font-semibold text-zinc-100">Lookup and save</p>
                 <p className="text-sm text-zinc-400">Paste the AWBW game link. Name/map will be auto-looked up.</p>
               </div>
               <input
@@ -214,7 +214,7 @@ export default function Home() {
                   onClick={() => {
                     setGameInfo(null);
                     setSignalToken('');
-                    setNotifyMe(true);
+                    setNotifyMode('signal-dm');
                   }}
                   className="px-3 py-2 rounded-lg border border-zinc-700 text-zinc-300 hover:border-zinc-500"
                 >
@@ -238,8 +238,8 @@ export default function Home() {
           <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 space-y-3">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Step 2</p>
-                <p className="text-lg font-semibold text-zinc-100">Signal DM token</p>
+                <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Signal DM token</p>
+                <p className="text-lg font-semibold text-zinc-100">DM auth</p>
                 <p className="text-sm text-zinc-400">Store your Signal auth/token for DM notifications.</p>
               </div>
             </div>
@@ -297,12 +297,6 @@ export default function Home() {
             </div>
           </section>
         )}
-
-        <section className="pt-4 border-t border-zinc-900 text-xs text-zinc-500 flex items-center gap-3">
-          <span>Repo is private for now</span>
-          <span>•</span>
-          <span>GPL (tentative)</span>
-        </section>
 
         {status && (
           <div className="text-xs text-amber-300 bg-[#1b1b26] border border-[#2a2a36] rounded-xl px-3 py-2">
