@@ -199,7 +199,7 @@ export default function Home() {
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Patched</p>
-                    <p className="text-lg font-semibold text-zinc-100">{gameInfo.gameName}</p>
+                    <p className="text-lg font-semibold text-zinc-100">{gameInfo.gameName.replace(/^Game\\s*-?\\s*/i, '')}</p>
                     <p className="text-sm text-zinc-400">{gameInfo.mapName || 'Map unknown'}</p>
                   </div>
                   <button
@@ -225,7 +225,7 @@ export default function Home() {
                     disabled={confirmPending || lookupPending}
                     className="px-4 py-3 rounded-xl bg-white text-black font-semibold shadow disabled:opacity-50"
                   >
-                    Confirm patch
+                    Set up notifications
                   </button>
                 </div>
               </div>
