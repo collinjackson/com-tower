@@ -234,77 +234,58 @@ export default function Home() {
 
         {user && (
           <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 space-y-4">
-            {!gameInfo && (
-              <>
-                <div>
-                  <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Patch game</p>
-                  <p className="text-lg font-semibold text-zinc-100">Auto-lookup</p>
-                  <p className="text-sm text-zinc-400">Pick an existing patch or paste a new AWBW link.</p>
-                </div>
-                {patchedLoading && <p className="text-xs text-zinc-500">Loading your patched games…</p>}
-                {!patchedLoading && patchedGames.length > 0 && (
-                  <div className="overflow-hidden rounded-xl border border-zinc-800">
-                    <table className="w-full text-sm text-zinc-300">
-                      <thead className="bg-zinc-950/80 text-zinc-400 text-xs uppercase tracking-wide">
-                        <tr>
-                          <th className="px-3 py-2 text-left font-medium">Game</th>
-                          <th className="px-3 py-2 text-left font-medium">Map</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {patchedGames.map((pg) => (
-                          <tr
-                            key={pg.gameId}
-                            className="hover:bg-zinc-900/80 cursor-pointer transition-colors"
-                            onClick={() => {
-                              setGameInfo(pg);
-                              setGameLink(`https://awbw.amarriner.com/game.php?games_id=${pg.gameId}`);
-                              setPatchedEnsured(true);
-                            }}
-                          >
-                            <td className="px-3 py-2">{pg.gameName}</td>
-                            <td className="px-3 py-2 text-zinc-400">{pg.mapName || 'Map unknown'}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-                <input
-                  value={gameLink}
-                  onChange={(e) => {
-                    setGameLink(e.target.value);
-                    setPatchedEnsured(false);
-                    setGameInfo(null);
-                  }}
-                  className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
-                  placeholder="https://awbw.amarriner.com/game.php?games_id=123456"
-                />
-                {lookupPending && <p className="text-xs text-zinc-500">Looking up…</p>}
-              </>
-            )}
-            {gameInfo && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Patched</p>
-                    <p className="text-lg font-semibold text-zinc-100">{gameInfo.gameName.replace(/^Game\\s*-?\\s*/i, '')}</p>
-                    <p className="text-sm text-zinc-400">{gameInfo.mapName || 'Map unknown'}</p>
-                  </div>
-                  <button
-                    onClick={() => {
-                      setGameInfo(null);
-                      setSignalToken('');
-                      setNotifyMode('signal-dm');
-                      setPatchedEnsured(false);
-                    }}
-                    className="px-3 py-2 rounded-lg border border-zinc-700 text-zinc-300 hover:border-zinc-500"
-                  >
-                    Disconnect
-                  </button>
-                </div>
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Patched games</p>
+                <p className="text-sm text-zinc-400">Select to manage notifications.</p>
+              </div>
+              {lookupPending && <p className="text-xs text-zinc-500">Looking up…</p>}
+            </div>
+
+            {patchedLoading && <p className="text-xs text-zinc-500">Loading your patched games…</p>}
+
+            {!patchedLoading && patchedGames.length > 0 && (
+              <div className="overflow-hidden rounded-xl border border-zinc-800">
+                <table className="w-full text-sm text-zinc-300">
+                  <thead className="bg-zinc-950/80 text-zinc-400 text-xs uppercase tracking-wide">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-medium">Game</th>
+                      <th className="px-3 py-2 text-left font-medium">Map</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {patchedGames.map((pg) => (
+                      <tr
+                        key={pg.gameId}
+                        className="hover:bg-zinc-900/80 cursor-pointer transition-colors"
+                        onClick={() => {
+                          setGameInfo(pg);
+                          setGameLink(`https://awbw.amarriner.com/game.php?games_id=${pg.gameId}`);
+                          setPatchedEnsured(true);
+                        }}
+                      >
+                        <td className="px-3 py-2">{pg.gameName}</td>
+                        <td className="px-3 py-2 text-zinc-400">{pg.mapName || 'Map unknown'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
+
+            <div className="space-y-2">
+              <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">New game</p>
+              <input
+                value={gameLink}
+                onChange={(e) => {
+                  setGameLink(e.target.value);
+                  setPatchedEnsured(false);
+                  setGameInfo(null);
+                }}
+                className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
+                placeholder="https://awbw.amarriner.com/game.php?games_id=123456"
+              />
+            </div>
           </section>
         )}
 
