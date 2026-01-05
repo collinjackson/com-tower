@@ -355,7 +355,7 @@ export default function Home() {
           </div>
         )}
 
-        {status && (
+        {status && !/Game loaded\./i.test(status) && (
           <div className="text-xs text-amber-300 bg-[#1b1b26] border border-[#2a2a36] rounded-xl px-3 py-2">
             {status}
           </div>
