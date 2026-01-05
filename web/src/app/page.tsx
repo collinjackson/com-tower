@@ -44,7 +44,7 @@ export default function Home() {
   const [patchedLoading, setPatchedLoading] = useState(false);
   const [userPhone, setUserPhone] = useState('');
   const [userPhoneLoading, setUserPhoneLoading] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
+  const [view, setView] = useState<'main' | 'settings'>('main');
 
   useEffect(() => {
     if (!firebaseAvailable) return;
@@ -248,18 +248,21 @@ export default function Home() {
                 user ? (
                   <>
                     <span>{user.email}</span>
-                    <button
-                      onClick={() => setShowSettings((v) => !v)}
-                      className="px-3 py-2 rounded-lg border border-zinc-700 hover:border-zinc-500"
-                    >
-                      Settings
-                    </button>
-                    <button
-                      onClick={signOutFirebase}
-                      className="px-3 py-2 rounded-lg border border-zinc-700 hover:border-zinc-500"
-                    >
-                      Sign out
-                    </button>
+                    {view === 'settings' ? (
+                      <button
+                        onClick={() => setView('main')}
+                        className="px-3 py-2 rounded-lg border border-zinc-700 hover:border-zinc-500"
+                      >
+                        Back
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => setView('settings')}
+                        className="px-3 py-2 rounded-lg border border-zinc-700 hover:border-zinc-500"
+                      >
+                        Settings
+                      </button>
+                    )}
                   </>
                 ) : (
                   <button
@@ -277,7 +280,7 @@ export default function Home() {
           </div>
         </div>
 
-        {user && !gameInfo && (
+        {user && view === 'main' && !gameInfo && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <div>
@@ -334,7 +337,7 @@ export default function Home() {
           </div>
         )}
 
-        {user && showSettings && (
+        {user && view === 'settings' && (
           <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 space-y-3">
             <div className="flex items-center justify-between">
               <div>
@@ -391,7 +394,7 @@ export default function Home() {
           </section>
         )}
 
-        {user && gameInfo && (
+        {user && view === 'main' && gameInfo && (
           <div className="space-y-4">
             <div className="flex items-start justify-between">
               <div>
