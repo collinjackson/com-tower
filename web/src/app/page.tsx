@@ -243,20 +243,43 @@ export default function Home() {
                 </div>
                 {patchedLoading && <p className="text-xs text-zinc-500">Loading your patched games…</p>}
                 {!patchedLoading && patchedGames.length > 0 && (
-                  <div className="flex flex-wrap gap-2">
-                    {patchedGames.map((pg) => (
-                      <button
-                        key={pg.gameId}
-                        onClick={() => {
-                          setGameInfo(pg);
-                          setGameLink(`https://awbw.amarriner.com/game.php?games_id=${pg.gameId}`);
-                          setPatchedEnsured(true);
-                        }}
-                        className="px-3 py-2 rounded-lg border border-zinc-700 text-zinc-300 hover:border-zinc-500"
-                      >
-                        {pg.gameName}
-                      </button>
-                    ))}
+                  <div className="overflow-hidden rounded-xl border border-zinc-800">
+                    <table className="w-full text-sm text-zinc-300">
+                      <thead className="bg-zinc-950/80 text-zinc-400 text-xs uppercase tracking-wide">
+                        <tr>
+                          <th className="px-3 py-2 text-left font-medium">Game</th>
+                          <th className="px-3 py-2 text-left font-medium">Map</th>
+                          <th className="px-3 py-2 text-left font-medium">Link</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {patchedGames.map((pg) => (
+                          <tr
+                            key={pg.gameId}
+                            className="hover:bg-zinc-900/60 cursor-pointer"
+                            onClick={() => {
+                              setGameInfo(pg);
+                              setGameLink(`https://awbw.amarriner.com/game.php?games_id=${pg.gameId}`);
+                              setPatchedEnsured(true);
+                            }}
+                          >
+                            <td className="px-3 py-2">{pg.gameName}</td>
+                            <td className="px-3 py-2">{pg.mapName || 'Map unknown'}</td>
+                            <td className="px-3 py-2">
+                              <a
+                                href={`https://awbw.amarriner.com/game.php?games_id=${pg.gameId}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-blue-300 hover:text-blue-200 underline"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                View
+                              </a>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 )}
                 <input
