@@ -1,15 +1,15 @@
-import { NextResponse } from 'next/server';
+import { NextResponse, NextRequest } from 'next/server';
 import { getAdminAuth, getAdminDb, adminAvailable } from '@/lib/firebase-admin';
 
 export async function POST(
-  req: Request,
-  { params }: { params: { id: string } }
+  req: NextRequest,
+  context: { params: Promise<{ id: string }> }
 ) {
   if (!adminAvailable) {
     return NextResponse.json({ error: 'Admin not configured' }, { status: 500 });
   }
 
-  const patchId = params.id;
+  const { id: patchId } = await context.params;
   if (!patchId) {
     return NextResponse.json({ error: 'Missing patch id' }, { status: 400 });
   }
