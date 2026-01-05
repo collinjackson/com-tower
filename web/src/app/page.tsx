@@ -41,6 +41,9 @@ export default function Home() {
     return 'Ready to patch a game.';
   }, [user, gameInfo]);
 
+  const cleanGameName = (name: string) =>
+    name.replace(/\s+AWBW\b/i, '').trim();
+
   const lookupGame = async () => {
     if (!gameLink.trim()) {
       setStatus('Enter a game link or ID.');
@@ -55,12 +58,29 @@ export default function Home() {
         throw new Error(errData.error || 'Lookup failed');
       }
       const data = await res.json();
-      setGameInfo({
+      const nextGame = {
         gameId: data.gameId,
-        gameName: data.gameName || `Game ${data.gameId}`,
+        gameName: cleanGameName(data.gameName || `Game ${data.gameId}`),
         mapName: data.mapName || '',
-      });
-      setStatus('Game loaded. Save to Firestore to cache.');
+      };
+      setGameInfo(nextGame);
+
+      // Auto-save to Firestore on lookup so we cache the metadata.
+      if (firebaseAvailable && user) {
+        const db = getFirebaseDb();
+        const ref = doc(db, 'games', nextGame.gameId);
+        await setDoc(ref, {
+          ...nextGame,
+          signalToken: signalToken || '',
+          notifyMode,
+          inviterUid: user.uid,
+          updatedAt: serverTimestamp(),
+          createdAt: serverTimestamp(),
+        });
+        setStatus('Game looked up and cached in Firestore.');
+      } else {
+        setStatus('Game loaded (not cached; Firebase missing).');
+      }
     } catch (err: unknown) {
       setStatus(err instanceof Error ? err.message : 'Lookup failed');
     } finally {
@@ -220,15 +240,6 @@ export default function Home() {
                     className="px-3 py-2 rounded-lg border border-zinc-700 text-zinc-300 hover:border-zinc-500"
                   >
                     Disconnect
-                  </button>
-                </div>
-                <div className="flex flex-col sm:flex-row gap-2">
-                  <button
-                    onClick={saveGame}
-                    disabled={saving}
-                    className="px-4 py-3 rounded-xl bg-white text-black font-semibold shadow disabled:opacity-50"
-                  >
-                    Save to Firestore
                   </button>
                 </div>
               </div>
