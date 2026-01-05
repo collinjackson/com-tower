@@ -287,7 +287,12 @@ export default function Home() {
         )}
 
         {user && gameInfo && (
-          <div className="space-y-3">
+          <div className="space-y-4">
+            <div>
+              <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Selected patch</p>
+              <p className="text-lg font-semibold text-zinc-100">{gameInfo.gameName}</p>
+              <p className="text-sm text-zinc-400">{gameInfo.mapName || 'Map unknown'}</p>
+            </div>
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Signal DM token</p>
