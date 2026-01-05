@@ -249,14 +249,13 @@ export default function Home() {
                         <tr>
                           <th className="px-3 py-2 text-left font-medium">Game</th>
                           <th className="px-3 py-2 text-left font-medium">Map</th>
-                          <th className="px-3 py-2 text-left font-medium">Link</th>
                         </tr>
                       </thead>
                       <tbody>
                         {patchedGames.map((pg) => (
                           <tr
                             key={pg.gameId}
-                            className="hover:bg-zinc-900/60 cursor-pointer"
+                            className="hover:bg-zinc-900/80 cursor-pointer transition-colors"
                             onClick={() => {
                               setGameInfo(pg);
                               setGameLink(`https://awbw.amarriner.com/game.php?games_id=${pg.gameId}`);
@@ -264,18 +263,7 @@ export default function Home() {
                             }}
                           >
                             <td className="px-3 py-2">{pg.gameName}</td>
-                            <td className="px-3 py-2">{pg.mapName || 'Map unknown'}</td>
-                            <td className="px-3 py-2">
-                              <a
-                                href={`https://awbw.amarriner.com/game.php?games_id=${pg.gameId}`}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="text-blue-300 hover:text-blue-200 underline"
-                                onClick={(e) => e.stopPropagation()}
-                              >
-                                View
-                              </a>
-                            </td>
+                            <td className="px-3 py-2 text-zinc-400">{pg.mapName || 'Map unknown'}</td>
                           </tr>
                         ))}
                       </tbody>
