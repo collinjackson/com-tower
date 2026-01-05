@@ -233,7 +233,7 @@ export default function Home() {
           </section>
         )}
 
-        {gameInfo && (
+        {user && gameInfo && (
           <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 space-y-3">
             <div className="flex items-center justify-between">
               <div>
