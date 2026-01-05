@@ -195,21 +195,16 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-black text-zinc-100 flex items-center justify-center">
       <main className="w-full max-w-3xl px-6 py-16 flex flex-col gap-8">
-        <div className="space-y-3">
-          <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Com Tower</p>
-          <h1 className="text-3xl font-semibold">AWBW turn notifications</h1>
-          <p className="text-sm text-zinc-400">
-            Patch your AWBW game to receive turn alerts.
-          </p>
-        </div>
-
-        <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Auth</p>
-              <p className="text-sm text-zinc-200">Inviter session</p>
-            </div>
-            <div className="flex items-center gap-2 text-xs text-zinc-400">
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-3">
+            <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Com Tower</p>
+            <h1 className="text-3xl font-semibold">AWBW turn notifications</h1>
+            <p className="text-sm text-zinc-400">
+              Patch your AWBW game to receive turn alerts.
+            </p>
+          </div>
+          <div className="flex flex-col items-end gap-2 text-xs text-zinc-400">
+            <div className="flex items-center gap-2">
               {firebaseAvailable ? (
                 user ? (
                   <>
@@ -233,9 +228,9 @@ export default function Home() {
                 <span className="text-amber-300">Firebase config missing</span>
               )}
             </div>
+            {statusLine && <p className="text-[11px] text-zinc-500">{statusLine}</p>}
           </div>
-          <p className="text-xs text-zinc-500">{statusLine}</p>
-        </section>
+        </div>
 
         {user && (
           <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 space-y-4">
