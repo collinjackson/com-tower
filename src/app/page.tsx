@@ -299,14 +299,7 @@ export default function Home() {
         )}
 
         <section className="pt-4 border-t border-zinc-900 text-xs text-zinc-500 flex items-center gap-3">
-          <a
-            href="https://github.com/your-github/com-tower"
-            target="_blank"
-            rel="noreferrer"
-            className="hover:text-zinc-200"
-          >
-            GitHub
-          </a>
+          <span>Repo is private for now</span>
           <span>•</span>
           <span>GPL (tentative)</span>
         </section>
