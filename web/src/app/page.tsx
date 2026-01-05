@@ -264,7 +264,7 @@ export default function Home() {
                           setPatchedEnsured(true);
                         }}
                       >
-                        <td className="px-3 py-2">{pg.gameName}</td>
+                        <td className="px-3 py-2">{pg.gameName.replace(/^Game\s*-?\s*/i, '')}</td>
                         <td className="px-3 py-2 text-zinc-400">{pg.mapName || 'Map unknown'}</td>
                       </tr>
                     ))}
