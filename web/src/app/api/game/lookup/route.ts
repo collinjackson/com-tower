@@ -1,4 +1,6 @@
 import { NextResponse } from 'next/server';
+import { adminAvailable, getAdminDb, getAdminAuth } from '@/lib/firebase-admin';
+import { FieldValue } from 'firebase-admin/firestore';
 
 function parseGameId(link: string | null) {
   if (!link) return '';
@@ -43,6 +45,51 @@ export async function GET(req: Request) {
     const html = await res.text();
     const gameName = extractGameName(html) || `Game ${gameId}`;
     const mapName = extractMapName(html) || '';
+
+    // Cache in Firestore on the server if admin creds are present.
+    // Also upsert a patch doc for the authenticated inviter (many-to-many).
+    let inviterUid: string | null = null;
+    if (adminAvailable) {
+      const authHeader = req.headers.get('authorization') || req.headers.get('Authorization');
+      if (authHeader?.startsWith('Bearer ')) {
+        const token = authHeader.slice('Bearer '.length);
+        try {
+          const decoded = await getAdminAuth().verifyIdToken(token);
+          inviterUid = decoded.uid;
+        } catch {
+          inviterUid = null;
+        }
+      }
+    }
+
+    if (adminAvailable) {
+      const db = getAdminDb();
+      await db.collection('games').doc(gameId).set(
+        {
+          gameId,
+          gameName,
+          mapName,
+          updatedAt: FieldValue.serverTimestamp(),
+          createdAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      if (inviterUid) {
+        const patchId = `${gameId}-${inviterUid}`;
+        await db.collection('patches').doc(patchId).set(
+          {
+            gameId,
+            inviterUid,
+            subscribers: [], // add on demand
+            updatedAt: FieldValue.serverTimestamp(),
+            createdAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+      }
+    }
+
     return NextResponse.json({
       gameId,
       gameName,
