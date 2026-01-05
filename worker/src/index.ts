@@ -1,8 +1,19 @@
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import WebSocket from 'ws';
+import { GoogleAuth, IdTokenClient } from 'google-auth-library';
 
 type Subscriber = { type: 'dm' | 'group'; handle: string };
+
+const auth = new GoogleAuth();
+const idTokenClients = new Map<string, IdTokenClient>();
+
+async function getIdTokenClient(url: string): Promise<IdTokenClient> {
+  if (idTokenClients.has(url)) return idTokenClients.get(url)!;
+  const client = await auth.getIdTokenClient(url);
+  idTokenClients.set(url, client);
+  return client;
+}
 
 function ensureFirebase() {
   if (getApps().length === 0) {
@@ -23,17 +34,22 @@ function buildAwbwSocketUrl(gameId: string) {
   return `${base}/node/game/${gameId}`;
 }
 
-function sendSignal(recipient: Subscriber, text: string) {
+async function sendSignal(recipient: Subscriber, text: string) {
   const bridgeUrl = process.env.SIGNAL_CLI_URL;
+  const botNumber = process.env.SIGNAL_BOT_NUMBER;
   if (!bridgeUrl) throw new Error('SIGNAL_CLI_URL not set');
-  return fetch(`${bridgeUrl}/v2/send`, {
+  if (!botNumber) throw new Error('SIGNAL_BOT_NUMBER not set');
+
+  const client = await getIdTokenClient(bridgeUrl);
+  return client.request({
+    url: `${bridgeUrl}/v2/send`,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      number: process.env.SIGNAL_BOT_NUMBER,
+    data: {
+      number: botNumber,
       message: text,
       recipients: [recipient.handle],
-    }),
+    },
   });
 }
 
