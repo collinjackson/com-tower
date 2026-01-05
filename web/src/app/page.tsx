@@ -86,9 +86,8 @@ export default function Home() {
   const statusLine = useMemo(() => {
     if (!firebaseAvailable) return 'Firestore not configured; using local mock.';
     if (!user) return 'Sign in to start.';
-    if (gameInfo) return 'Connected.';
-    return 'Loud and clear, awaiting link.';
-  }, [user, gameInfo]);
+    return null;
+  }, [user]);
 
   const cleanGameName = (name: string) =>
     name.replace(/\s+AWBW\b/i, '').trim();
