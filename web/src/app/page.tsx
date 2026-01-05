@@ -69,7 +69,7 @@ export default function Home() {
           const gData = gameDoc.data() as Partial<GameInfo> | undefined;
           results.push({
             gameId,
-            gameName: cleanGameName(gData?.gameName || `Game ${gameId}`),
+            gameName: (gData?.gameName || `Game ${gameId}`).trim(),
             mapName: gData?.mapName || '',
           });
         }
@@ -88,9 +88,6 @@ export default function Home() {
     if (!user) return 'Sign in to start.';
     return null;
   }, [user]);
-
-  const cleanGameName = (name: string) =>
-    name.replace(/\s+AWBW\b/i, '').trim();
 
   const lookupGame = async (link: string, includeAuth = false) => {
     const pattern = /^https:\/\/awbw\.amarriner\.com\/game\.php\?games_id=\d+$/;
@@ -115,7 +112,7 @@ export default function Home() {
       const data = await res.json();
       const nextGame = {
         gameId: data.gameId,
-        gameName: cleanGameName(data.gameName || `Game ${data.gameId}`),
+        gameName: (data.gameName || `Game ${data.gameId}`).trim(),
         mapName: data.mapName || '',
       };
       setGameInfo(nextGame);
@@ -264,7 +261,7 @@ export default function Home() {
                           setPatchedEnsured(true);
                         }}
                       >
-                        <td className="px-3 py-2">{pg.gameName.replace(/^Game\s*-?\s*/i, '')}</td>
+                        <td className="px-3 py-2">{pg.gameName}</td>
                         <td className="px-3 py-2 text-zinc-400">{pg.mapName || 'Map unknown'}</td>
                       </tr>
                     ))}
