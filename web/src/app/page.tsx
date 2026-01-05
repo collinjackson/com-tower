@@ -350,7 +350,7 @@ export default function Home() {
                 For this 1v1 demo, only your DM token is used. Other players stay silent.
               </p>
             </div>
-          </section>
+          </div>
         )}
 
         {status && (
