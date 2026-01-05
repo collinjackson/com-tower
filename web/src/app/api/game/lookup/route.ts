@@ -21,6 +21,14 @@ function extractGameName(html: string) {
   return hMatch ? hMatch[1].trim() : '';
 }
 
+function cleanGameName(name: string) {
+  return name
+    .replace(/\s+AWBW\b/i, '')
+    .replace(/^\s*Game\s*-?\s*/i, '')
+    .replace(/-\s*$/i, '')
+    .trim();
+}
+
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const link = searchParams.get('link');
@@ -43,7 +51,7 @@ export async function GET(req: Request) {
       );
     }
     const html = await res.text();
-    const gameName = extractGameName(html) || `Game ${gameId}`;
+    const gameName = cleanGameName(extractGameName(html) || `Game ${gameId}`);
     const mapName = extractMapName(html) || '';
 
     // Cache in Firestore on the server if admin creds are present.
