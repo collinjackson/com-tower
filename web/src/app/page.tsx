@@ -301,10 +301,23 @@ export default function Home() {
 
         {user && gameInfo && (
           <div className="space-y-4">
-            <div>
-              <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Selected game</p>
-              <p className="text-lg font-semibold text-zinc-100">{gameInfo.gameName}</p>
-              <p className="text-sm text-zinc-400">{gameInfo.mapName || 'Map unknown'}</p>
+            <div className="flex items-start justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Selected game</p>
+                <p className="text-lg font-semibold text-zinc-100">{gameInfo.gameName}</p>
+                <p className="text-sm text-zinc-400">{gameInfo.mapName || 'Map unknown'}</p>
+              </div>
+              <button
+                onClick={() => {
+                  setGameInfo(null);
+                  setSignalToken('');
+                  setNotifyMode('signal-dm');
+                  setPatchedEnsured(false);
+                }}
+                className="px-3 py-2 rounded-lg border border-zinc-700 text-zinc-300 hover:border-zinc-500 text-xs"
+              >
+                Back to list
+              </button>
             </div>
             <div className="flex items-center justify-between">
               <div>
