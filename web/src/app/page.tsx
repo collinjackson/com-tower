@@ -10,6 +10,7 @@ import {
 } from '@/lib/firebase';
 import type { User } from 'firebase/auth';
 import { doc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { getAuth } from 'firebase/auth';
 
 type GameInfo = {
   gameId: string;
@@ -52,7 +53,18 @@ export default function Home() {
     setSaving(true);
     setStatus(null);
     try {
-      const res = await fetch(`/api/game/lookup?link=${encodeURIComponent(gameLink)}`);
+      let idToken: string | null = null;
+      if (user) {
+        try {
+          idToken = await getAuth().currentUser?.getIdToken();
+        } catch {
+          idToken = null;
+        }
+      }
+
+      const res = await fetch(`/api/game/lookup?link=${encodeURIComponent(gameLink)}`, {
+        headers: idToken ? { Authorization: `Bearer ${idToken}` } : undefined,
+      });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.error || 'Lookup failed');
