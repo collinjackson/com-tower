@@ -155,13 +155,15 @@ export default function Home() {
       await ensurePatched();
       if (firebaseAvailable && user) {
         const idToken = await getAuth().currentUser?.getIdToken();
+        const trimmed = signalToken.trim();
+        const isGroup = /^https?:\/\//i.test(trimmed);
         const res = await fetch(`/api/patch/${gameInfo.gameId}-${user.uid}/subscribers`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
           },
-          body: JSON.stringify({ type: 'dm', handle: signalToken }),
+          body: JSON.stringify({ type: isGroup ? 'group' : 'dm', handle: trimmed }),
         });
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
@@ -306,16 +308,18 @@ export default function Home() {
             </div>
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Signal DM token</p>
-                <p className="text-lg font-semibold text-zinc-100">DM auth</p>
-                <p className="text-sm text-zinc-400">Store your Signal auth/token for DM notifications.</p>
+                <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Signal notifications</p>
+                <p className="text-lg font-semibold text-zinc-100">DM or group</p>
+                <p className="text-sm text-zinc-400">
+                  Enter your Signal phone for DMs, or paste a Signal group invite link (bot joins silently).
+                </p>
               </div>
             </div>
             <input
               value={signalToken}
               onChange={(e) => setSignalToken(e.target.value)}
               className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
-              placeholder="Signal auth token (kept server-side)"
+              placeholder="Signal phone (DM) or group invite link"
             />
             <div className="flex gap-2">
               <button
