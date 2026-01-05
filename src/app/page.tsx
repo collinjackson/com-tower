@@ -180,59 +180,61 @@ export default function Home() {
           <p className="text-xs text-zinc-500">{statusLine}</p>
         </section>
 
-        <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 space-y-4">
-          {!gameInfo ? (
-            <>
-              <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Patch game</p>
-                <p className="text-lg font-semibold text-zinc-100">Lookup and save</p>
-                <p className="text-sm text-zinc-400">Paste the AWBW game link. Name/map will be auto-looked up.</p>
-              </div>
-              <input
-                value={gameLink}
-                onChange={(e) => setGameLink(e.target.value)}
-                className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
-                placeholder="https://awbw.amarriner.com/game.php?games_id=123456"
-              />
-              <button
-                onClick={lookupGame}
-                disabled={saving || !gameLink.trim()}
-                className="w-full sm:w-auto rounded-xl bg-white text-black font-semibold px-4 py-3 shadow disabled:opacity-50"
-              >
-                Lookup
-              </button>
-            </>
-          ) : (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
+        {user && (
+          <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 space-y-4">
+            {!gameInfo ? (
+              <>
                 <div>
-                  <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Patched</p>
-                  <p className="text-lg font-semibold text-zinc-100">{gameInfo.gameName}</p>
-                  <p className="text-sm text-zinc-400">{gameInfo.mapName || 'Map unknown'}</p>
+                  <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Patch game</p>
+                  <p className="text-lg font-semibold text-zinc-100">Lookup and save</p>
+                  <p className="text-sm text-zinc-400">Paste the AWBW game link. Name/map will be auto-looked up.</p>
                 </div>
+                <input
+                  value={gameLink}
+                  onChange={(e) => setGameLink(e.target.value)}
+                  className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
+                  placeholder="https://awbw.amarriner.com/game.php?games_id=123456"
+                />
                 <button
-                  onClick={() => {
-                    setGameInfo(null);
-                    setSignalToken('');
-                    setNotifyMode('signal-dm');
-                  }}
-                  className="px-3 py-2 rounded-lg border border-zinc-700 text-zinc-300 hover:border-zinc-500"
+                  onClick={lookupGame}
+                  disabled={saving || !gameLink.trim()}
+                  className="w-full sm:w-auto rounded-xl bg-white text-black font-semibold px-4 py-3 shadow disabled:opacity-50"
                 >
-                  Disconnect
+                  Lookup
                 </button>
+              </>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Patched</p>
+                    <p className="text-lg font-semibold text-zinc-100">{gameInfo.gameName}</p>
+                    <p className="text-sm text-zinc-400">{gameInfo.mapName || 'Map unknown'}</p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setGameInfo(null);
+                      setSignalToken('');
+                      setNotifyMode('signal-dm');
+                    }}
+                    className="px-3 py-2 rounded-lg border border-zinc-700 text-zinc-300 hover:border-zinc-500"
+                  >
+                    Disconnect
+                  </button>
+                </div>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <button
+                    onClick={saveGame}
+                    disabled={saving}
+                    className="px-4 py-3 rounded-xl bg-white text-black font-semibold shadow disabled:opacity-50"
+                  >
+                    Save to Firestore
+                  </button>
+                </div>
               </div>
-              <div className="flex flex-col sm:flex-row gap-2">
-                <button
-                  onClick={saveGame}
-                  disabled={saving}
-                  className="px-4 py-3 rounded-xl bg-white text-black font-semibold shadow disabled:opacity-50"
-                >
-                  Save to Firestore
-                </button>
-              </div>
-            </div>
-          )}
-        </section>
+            )}
+          </section>
+        )}
 
         {gameInfo && (
           <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 space-y-3">
