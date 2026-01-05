@@ -86,8 +86,8 @@ export default function Home() {
   const statusLine = useMemo(() => {
     if (!firebaseAvailable) return 'Firestore not configured; using local mock.';
     if (!user) return 'Sign in to start.';
-    if (gameInfo) return 'Line is clean.';
-    return 'Ready to patch a game.';
+    if (gameInfo) return 'Connected.';
+    return 'Loud and clear, awaiting link.';
   }, [user, gameInfo]);
 
   const cleanGameName = (name: string) =>
@@ -100,7 +100,7 @@ export default function Home() {
       let idToken: string | null = null;
       if (includeAuth && user) {
         try {
-          idToken = await getAuth().currentUser?.getIdToken();
+          idToken = (await getAuth().currentUser?.getIdToken()) ?? null;
         } catch {
           idToken = null;
         }
