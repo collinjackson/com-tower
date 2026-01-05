@@ -195,10 +195,14 @@ export default function Home() {
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-3">
             <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Com Tower</p>
-            <h1 className="text-3xl font-semibold">AWBW turn notifications</h1>
-            <p className="text-sm text-zinc-400">
-              Patch your AWBW game to receive turn alerts.
-            </p>
+            {!user && (
+              <>
+                <h1 className="text-3xl font-semibold">AWBW turn notifications</h1>
+                <p className="text-sm text-zinc-400">
+                  Patch your AWBW game to receive turn alerts.
+                </p>
+              </>
+            )}
           </div>
           <div className="flex flex-col items-end gap-2 text-xs text-zinc-400">
             <div className="flex items-center gap-2">
@@ -289,7 +293,7 @@ export default function Home() {
         {user && gameInfo && (
           <div className="space-y-4">
             <div>
-              <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Selected patch</p>
+              <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Selected game</p>
               <p className="text-lg font-semibold text-zinc-100">{gameInfo.gameName}</p>
               <p className="text-sm text-zinc-400">{gameInfo.mapName || 'Map unknown'}</p>
             </div>
