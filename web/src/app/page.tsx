@@ -154,13 +154,20 @@ export default function Home() {
     try {
       await ensurePatched();
       if (firebaseAvailable && user) {
-        const db = getFirestore();
-        const ref = doc(db, 'games', gameInfo.gameId);
-        await updateDoc(ref, {
-          signalToken,
-          updatedAt: serverTimestamp(),
+        const idToken = await getAuth().currentUser?.getIdToken();
+        const res = await fetch(`/api/patch/${gameInfo.gameId}-${user.uid}/subscribers`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+          },
+          body: JSON.stringify({ type: 'dm', handle: signalToken }),
         });
-        setStatus('Signal token stored.');
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || 'Failed to store subscriber');
+        }
+        setStatus('Subscriber stored.');
       } else {
         setStatus('Stored locally (no Firebase config).');
       }
