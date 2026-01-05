@@ -13,6 +13,7 @@ import {
   doc,
   getDocs,
   getDoc,
+  setDoc,
   query,
   updateDoc,
   serverTimestamp,
@@ -41,12 +42,36 @@ export default function Home() {
   const [patchedEnsured, setPatchedEnsured] = useState(false);
   const [patchedGames, setPatchedGames] = useState<GameInfo[]>([]);
   const [patchedLoading, setPatchedLoading] = useState(false);
+  const [userPhone, setUserPhone] = useState('');
+  const [userPhoneLoading, setUserPhoneLoading] = useState(false);
 
   useEffect(() => {
     if (!firebaseAvailable) return;
     const unsub = subscribeToAuth(setUser);
     return () => unsub && unsub();
   }, []);
+
+  useEffect(() => {
+    const fetchProfile = async () => {
+      if (!firebaseAvailable || !user) {
+        setUserPhone('');
+        return;
+      }
+      setUserPhoneLoading(true);
+      try {
+        const db = getFirestore();
+        const ref = doc(db, 'users', user.uid);
+        const snap = await getDoc(ref);
+        const data = snap.data() as { signalPhone?: string } | undefined;
+        setUserPhone(data?.signalPhone || '');
+      } catch {
+        // ignore fetch errors; optional profile
+      } finally {
+        setUserPhoneLoading(false);
+      }
+    };
+    fetchProfile();
+  }, [user]);
 
   useEffect(() => {
     const loadPatched = async () => {
@@ -155,7 +180,10 @@ export default function Home() {
       await ensurePatched();
       if (firebaseAvailable && user) {
         const idToken = await getAuth().currentUser?.getIdToken();
-        const trimmed = signalToken.trim();
+        const trimmed = (signalToken || userPhone).trim();
+        if (!trimmed) {
+          throw new Error('Enter a Signal phone or group invite link.');
+        }
         const isGroup = /^https?:\/\//i.test(trimmed);
         const res = await fetch(`/api/patch/${gameInfo.gameId}-${user.uid}/subscribers`, {
           method: 'POST',
@@ -241,6 +269,56 @@ export default function Home() {
             {statusLine && <p className="text-[11px] text-zinc-500">{statusLine}</p>}
           </div>
         </div>
+
+        {user && (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Default Signal number</p>
+                <p className="text-sm text-zinc-400">
+                  Used for DM notifications unless you paste a group invite link.
+                </p>
+              </div>
+              {userPhoneLoading && <p className="text-xs text-zinc-500">Loading…</p>}
+            </div>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <input
+                value={userPhone}
+                onChange={(e) => setUserPhone(e.target.value)}
+                className="flex-1 rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
+                placeholder="Your Signal phone (DM default)"
+              />
+              <button
+                onClick={async () => {
+                  if (!firebaseAvailable || !user) return;
+                  setSaving(true);
+                  setStatus(null);
+                  try {
+                    const db = getFirestore();
+                    const ref = doc(db, 'users', user.uid);
+                    await setDoc(
+                      ref,
+                      {
+                        signalPhone: userPhone.trim(),
+                        updatedAt: serverTimestamp(),
+                      },
+                      { merge: true }
+                    );
+                    setStatus('Default Signal number saved.');
+                  } catch (err: unknown) {
+                    setStatus(err instanceof Error ? err.message : 'Failed to save number');
+                  } finally {
+                    setSaving(false);
+                  }
+                }}
+                disabled={saving}
+                className="px-4 py-3 rounded-xl bg-white text-black font-semibold shadow disabled:opacity-50"
+              >
+                Save number
+              </button>
+            </div>
+          </div>
+        )}
 
         {user && !gameInfo && (
           <div className="space-y-4">
