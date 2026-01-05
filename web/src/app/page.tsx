@@ -8,7 +8,17 @@ import {
   subscribeToAuth,
 } from '@/lib/firebase';
 import type { User } from 'firebase/auth';
-import { doc, updateDoc, serverTimestamp, getFirestore } from 'firebase/firestore';
+import {
+  collection,
+  doc,
+  getDocs,
+  getDoc,
+  query,
+  updateDoc,
+  serverTimestamp,
+  where,
+  getFirestore,
+} from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
 
 type GameInfo = {
@@ -28,13 +38,50 @@ export default function Home() {
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [lookupPending, setLookupPending] = useState(false);
-  const [confirmPending, setConfirmPending] = useState(false);
+  const [patchedEnsured, setPatchedEnsured] = useState(false);
+  const [patchedGames, setPatchedGames] = useState<GameInfo[]>([]);
+  const [patchedLoading, setPatchedLoading] = useState(false);
 
   useEffect(() => {
     if (!firebaseAvailable) return;
     const unsub = subscribeToAuth(setUser);
     return () => unsub && unsub();
   }, []);
+
+  useEffect(() => {
+    const loadPatched = async () => {
+      if (!firebaseAvailable || !user) {
+        setPatchedGames([]);
+        return;
+      }
+      setPatchedLoading(true);
+      try {
+        const db = getFirestore();
+        const patchesRef = collection(db, 'patches');
+        const q = query(patchesRef, where('inviterUid', '==', user.uid));
+        const snap = await getDocs(q);
+        const results: GameInfo[] = [];
+        for (const docSnap of snap.docs) {
+          const data = docSnap.data() as { gameId?: string };
+          const gameId = data.gameId;
+          if (!gameId) continue;
+          const gameDoc = await getDoc(doc(db, 'games', gameId));
+          const gData = gameDoc.data() as Partial<GameInfo> | undefined;
+          results.push({
+            gameId,
+            gameName: cleanGameName(gData?.gameName || `Game ${gameId}`),
+            mapName: gData?.mapName || '',
+          });
+        }
+        setPatchedGames(results);
+      } catch (err) {
+        console.error('load patched failed', err);
+      } finally {
+        setPatchedLoading(false);
+      }
+    };
+    loadPatched();
+  }, [user]);
 
   const statusLine = useMemo(() => {
     if (!firebaseAvailable) return 'Firestore not configured; using local mock.';
@@ -73,10 +120,22 @@ export default function Home() {
         mapName: data.mapName || '',
       };
       setGameInfo(nextGame);
-      setStatus(includeAuth ? 'Patched and cached on server.' : 'Game loaded.');
+      if (includeAuth) {
+        setPatchedEnsured(true);
+        setStatus('Patched and cached on server.');
+      } else {
+        setStatus('Game loaded.');
+      }
     } catch (err: unknown) {
       setStatus(err instanceof Error ? err.message : 'Lookup failed');
     }
+  };
+
+  const ensurePatched = async () => {
+    if (patchedEnsured) return;
+    if (!gameLink) return;
+    setStatus('Confirming patch…');
+    await lookupGame(gameLink, true);
   };
 
   // Debounced lookup when link matches expected pattern.
@@ -97,6 +156,7 @@ export default function Home() {
     setSaving(true);
     setStatus(null);
     try {
+      await ensurePatched();
       if (firebaseAvailable && user) {
         const db = getFirestore();
         const ref = doc(db, 'games', gameInfo.gameId);
@@ -119,6 +179,7 @@ export default function Home() {
     setNotifyMode(mode);
     if (!gameInfo?.gameId) return;
     try {
+      await ensurePatched();
       if (firebaseAvailable && user) {
         const db = getFirestore();
         const ref = doc(db, 'games', gameInfo.gameId);
@@ -179,22 +240,45 @@ export default function Home() {
 
         {user && (
           <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 space-y-4">
-            {!gameInfo ? (
+            {!gameInfo && (
               <>
                 <div>
                   <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Patch game</p>
                   <p className="text-lg font-semibold text-zinc-100">Auto-lookup</p>
-                  <p className="text-sm text-zinc-400">Paste the AWBW game link.</p>
+                  <p className="text-sm text-zinc-400">Pick an existing patch or paste a new AWBW link.</p>
                 </div>
+                {patchedLoading && <p className="text-xs text-zinc-500">Loading your patched games…</p>}
+                {!patchedLoading && patchedGames.length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {patchedGames.map((pg) => (
+                      <button
+                        key={pg.gameId}
+                        onClick={() => {
+                          setGameInfo(pg);
+                          setGameLink(`https://awbw.amarriner.com/game.php?games_id=${pg.gameId}`);
+                          setPatchedEnsured(true);
+                        }}
+                        className="px-3 py-2 rounded-lg border border-zinc-700 text-zinc-300 hover:border-zinc-500"
+                      >
+                        {pg.gameName}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <input
                   value={gameLink}
-                  onChange={(e) => setGameLink(e.target.value)}
+                  onChange={(e) => {
+                    setGameLink(e.target.value);
+                    setPatchedEnsured(false);
+                    setGameInfo(null);
+                  }}
                   className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
                   placeholder="https://awbw.amarriner.com/game.php?games_id=123456"
                 />
                 {lookupPending && <p className="text-xs text-zinc-500">Looking up…</p>}
               </>
-            ) : (
+            )}
+            {gameInfo && (
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <div>
@@ -207,25 +291,11 @@ export default function Home() {
                       setGameInfo(null);
                       setSignalToken('');
                       setNotifyMode('signal-dm');
+                      setPatchedEnsured(false);
                     }}
                     className="px-3 py-2 rounded-lg border border-zinc-700 text-zinc-300 hover:border-zinc-500"
                   >
                     Disconnect
-                  </button>
-                </div>
-                <div className="flex flex-col sm:flex-row gap-2">
-                  <button
-                    onClick={async () => {
-                      if (!gameLink) return;
-                      setConfirmPending(true);
-                      setStatus('Confirming patch…');
-                      await lookupGame(gameLink, true);
-                      setConfirmPending(false);
-                    }}
-                    disabled={confirmPending || lookupPending}
-                    className="px-4 py-3 rounded-xl bg-white text-black font-semibold shadow disabled:opacity-50"
-                  >
-                    Set up notifications
                   </button>
                 </div>
               </div>
