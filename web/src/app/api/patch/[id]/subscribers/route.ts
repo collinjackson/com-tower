@@ -72,10 +72,15 @@ export async function POST(
       handle: body.handle,
       funEnabled: !!body.funEnabled,
       scope: body.scope === 'my-turn' || body.scope === 'all' ? body.scope : 'all',
-      mentions: Array.isArray(body.mentions)
-        ? body.mentions.filter((m) => typeof m === 'string' && m.trim().length > 0)
-        : undefined,
     };
+    
+    // Only include mentions if it's a non-empty array (Firestore doesn't allow undefined)
+    const filteredMentions = Array.isArray(body.mentions)
+      ? body.mentions.filter((m) => typeof m === 'string' && m.trim().length > 0)
+      : [];
+    if (filteredMentions.length > 0) {
+      newSub.mentions = filteredMentions;
+    }
     
     // For groups, store the groupName for lookup
     if (body.type === 'group' && body.groupName) {
