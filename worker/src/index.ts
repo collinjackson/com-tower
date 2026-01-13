@@ -506,64 +506,101 @@ async function main() {
       if (url.pathname === '/list-groups') {
         const bridgeUrl = process.env.SIGNAL_CLI_URL;
         const botNumber = process.env.SIGNAL_BOT_NUMBER;
+        console.log(`[list-groups] Starting request. Bridge: ${bridgeUrl}, Bot: ${botNumber}`);
         if (!bridgeUrl || !botNumber) {
+          console.error(`[list-groups] Bridge not configured. bridgeUrl=${!!bridgeUrl}, botNumber=${!!botNumber}`);
           res.statusCode = 500;
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify({ error: 'Bridge not configured' }));
           return;
         }
+        const startTime = Date.now();
         try {
+          console.log(`[list-groups] Getting ID token client for ${bridgeUrl}`);
           const client = await getIdTokenClient(bridgeUrl);
           const numberPath = encodeURIComponent(botNumber);
-          console.log(`Listing groups for ${botNumber} via ${bridgeUrl}/v1/groups/${numberPath}`);
+          const requestUrl = `${bridgeUrl}/v1/groups/${numberPath}`;
+          console.log(`[list-groups] Making request to: ${requestUrl}`);
+          console.log(`[list-groups] Encoded number path: ${numberPath}`);
+          // Try with a longer timeout - Signal bridge can be slow
+          const timeoutMs = 30000; // 30 seconds
+          console.log(`[list-groups] Setting timeout to ${timeoutMs}ms`);
           
-          // Try with a timeout
-          const timeoutMs = 10000; // 10 seconds
           const groupsPromise = client.request({
-            url: `${bridgeUrl}/v1/groups/${numberPath}`,
+            url: requestUrl,
             method: 'GET',
             headers: { 'Content-Type': 'application/json' },
             timeout: timeoutMs,
           });
           
           const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Request timeout')), timeoutMs)
+            setTimeout(() => {
+              const elapsed = Date.now() - startTime;
+              console.error(`[list-groups] Request timed out after ${elapsed}ms`);
+              reject(new Error(`Request timeout after ${elapsed}ms`));
+            }, timeoutMs)
           );
           
+          console.log(`[list-groups] Racing promise and timeout...`);
           const groupsRes = await Promise.race([groupsPromise, timeoutPromise]) as any;
-          console.log(`Raw groups response:`, JSON.stringify(groupsRes, null, 2).substring(0, 500));
+          const elapsed = Date.now() - startTime;
+          console.log(`[list-groups] Request completed in ${elapsed}ms`);
+          console.log(`[list-groups] Response type: ${typeof groupsRes}, keys: ${groupsRes ? Object.keys(groupsRes).join(', ') : 'null'}`);
+          console.log(`[list-groups] Raw response data:`, JSON.stringify(groupsRes, null, 2).substring(0, 1000));
           
           // Try different response structures
           let groups = groupsRes?.data || groupsRes?.groups || groupsRes || [];
+          console.log(`[list-groups] Initial groups extraction: type=${typeof groups}, isArray=${Array.isArray(groups)}`);
+          
           if (!Array.isArray(groups)) {
             // Maybe it's wrapped differently
             if (groupsRes?.data && typeof groupsRes.data === 'object' && !Array.isArray(groupsRes.data)) {
-              // Try to extract array from object
+              console.log(`[list-groups] Trying to extract array from object data`);
               groups = Object.values(groupsRes.data).filter((g: any) => g && typeof g === 'object');
+              console.log(`[list-groups] Extracted ${groups.length} groups from object`);
             } else {
+              console.log(`[list-groups] Response is not an array, setting to empty`);
               groups = [];
             }
           }
           
-          console.log(`Received ${groups.length} groups from Signal bridge`);
+          console.log(`[list-groups] Final groups count: ${groups.length}`);
           if (groups.length > 0) {
-            console.log(`First group sample:`, JSON.stringify(groups[0], null, 2).substring(0, 300));
+            console.log(`[list-groups] First group:`, JSON.stringify(groups[0], null, 2).substring(0, 500));
           } else {
-            console.log(`Full response structure:`, Object.keys(groupsRes || {}));
+            console.log(`[list-groups] No groups found. Full response keys:`, Object.keys(groupsRes || {}));
+            if (groupsRes?.data) {
+              console.log(`[list-groups] Response.data type: ${typeof groupsRes.data}, value:`, JSON.stringify(groupsRes.data).substring(0, 200));
+            }
           }
           
           res.statusCode = 200;
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify({ groups: Array.isArray(groups) ? groups : [] }));
+          console.log(`[list-groups] Successfully returned ${groups.length} groups`);
         } catch (err: any) {
+          const elapsed = Date.now() - startTime;
           const errMsg = err?.response?.data || err?.message || String(err);
-          console.error(`Failed to list groups:`, errMsg);
+          const errCode = err?.code || err?.response?.status;
+          const errStatus = err?.response?.statusText;
+          console.error(`[list-groups] Error after ${elapsed}ms:`, {
+            message: errMsg,
+            code: errCode,
+            status: errStatus,
+            stack: err?.stack?.substring(0, 500),
+            response: err?.response ? {
+              status: err.response.status,
+              statusText: err.response.statusText,
+              data: JSON.stringify(err.response.data).substring(0, 500),
+            } : null,
+          });
           res.statusCode = 502;
           res.setHeader('Content-Type', 'application/json');
           res.end(
             JSON.stringify({
               error: errMsg,
-              details: 'The Signal bridge may be slow or the endpoint may not be working. Try again in a moment.',
+              code: errCode,
+              details: `Request failed after ${elapsed}ms. The Signal bridge may be slow or the endpoint may not be working.`,
             })
           );
         }
