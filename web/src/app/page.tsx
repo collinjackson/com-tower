@@ -676,11 +676,15 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                   <>
                     <div className="space-y-2">
                       <label className="text-xs uppercase tracking-[0.2em] text-zinc-400">
-                        Select group by name
+                        Group name
                       </label>
-                      {groupsLoading ? (
-                        <p className="text-xs text-zinc-500">Loading groups…</p>
-                      ) : groups.length === 0 ? (
+                      <div className="flex gap-2">
+                        <input
+                          value={selectedGroupName}
+                          onChange={(e) => setSelectedGroupName(e.target.value)}
+                          className="flex-1 rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
+                          placeholder="Enter the exact group name"
+                        />
                         <button
                           onClick={async () => {
                             if (!user) return;
@@ -696,34 +700,42 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                               if (res.ok) {
                                 const data = await res.json();
                                 setGroups(data.groups || []);
-                                if (data.groups && data.groups.length === 0) {
-                                  setStatus('No groups found. Make sure the bot is in at least one group.');
+                                if (data.groups && data.groups.length > 0) {
+                                  // Auto-select if only one group
+                                  if (data.groups.length === 1) {
+                                    setSelectedGroupName(data.groups[0].name || '');
+                                    setStatus(`Found 1 group: ${data.groups[0].name || 'unnamed'}`);
+                                  } else {
+                                    setStatus(`Found ${data.groups.length} groups. Select from dropdown or type name.`);
+                                  }
                                 } else {
-                                  setStatus(`Loaded ${data.groups?.length || 0} groups.`);
+                                  setStatus('No groups found. You can type the group name manually.');
                                 }
                               } else {
                                 const errData = await res.json().catch(() => ({}));
-                                setStatus(`Failed to load groups: ${errData.error || res.statusText}`);
+                                setStatus(`Could not load groups: ${errData.error || res.statusText}. You can type the group name manually.`);
                               }
                             } catch (err) {
                               console.error('Failed to load groups:', err);
-                              setStatus(err instanceof Error ? err.message : 'Failed to load groups');
+                              setStatus('Could not load groups. You can type the group name manually.');
                             } finally {
                               setGroupsLoading(false);
                             }
                           }}
                           disabled={groupsLoading}
-                          className="w-full rounded-xl px-4 py-3 bg-[#152029] border border-[#20415a] text-[#c7e6ff] text-sm disabled:opacity-50"
+                          className="px-4 py-3 rounded-xl bg-[#152029] border border-[#20415a] text-[#c7e6ff] text-sm disabled:opacity-50 whitespace-nowrap"
+                          title="Try to load groups from Signal (may be slow)"
                         >
-                          {groupsLoading ? 'Loading…' : 'Load groups'}
+                          {groupsLoading ? 'Loading…' : 'Load'}
                         </button>
-                      ) : (
+                      </div>
+                      {groups.length > 0 && (
                         <select
                           value={selectedGroupName}
                           onChange={(e) => setSelectedGroupName(e.target.value)}
                           className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
                         >
-                          <option value="">Choose a group…</option>
+                          <option value="">Or choose from loaded groups…</option>
                           {groups.map((g) => (
                             <option key={g.id || g.internal_id} value={g.name || ''}>
                               {g.name || `Group ${g.id || g.internal_id}`}
@@ -732,7 +744,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                         </select>
                       )}
                       <p className="text-[11px] text-zinc-500">
-                        Select the group the bot should send messages to. Make sure the bot is already in the group.
+                        Enter the exact group name as it appears in Signal. The bot must already be in the group.
                       </p>
                     </div>
                     <div className="space-y-2">

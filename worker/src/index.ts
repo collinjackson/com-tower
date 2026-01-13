@@ -515,21 +515,55 @@ async function main() {
         try {
           const client = await getIdTokenClient(bridgeUrl);
           const numberPath = encodeURIComponent(botNumber);
-          const groupsRes = await client.request({
+          console.log(`Listing groups for ${botNumber} via ${bridgeUrl}/v1/groups/${numberPath}`);
+          
+          // Try with a timeout
+          const timeoutMs = 10000; // 10 seconds
+          const groupsPromise = client.request({
             url: `${bridgeUrl}/v1/groups/${numberPath}`,
             method: 'GET',
             headers: { 'Content-Type': 'application/json' },
+            timeout: timeoutMs,
           });
-          const groups = (groupsRes as any)?.data || [];
+          
+          const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Request timeout')), timeoutMs)
+          );
+          
+          const groupsRes = await Promise.race([groupsPromise, timeoutPromise]) as any;
+          console.log(`Raw groups response:`, JSON.stringify(groupsRes, null, 2).substring(0, 500));
+          
+          // Try different response structures
+          let groups = groupsRes?.data || groupsRes?.groups || groupsRes || [];
+          if (!Array.isArray(groups)) {
+            // Maybe it's wrapped differently
+            if (groupsRes?.data && typeof groupsRes.data === 'object' && !Array.isArray(groupsRes.data)) {
+              // Try to extract array from object
+              groups = Object.values(groupsRes.data).filter((g: any) => g && typeof g === 'object');
+            } else {
+              groups = [];
+            }
+          }
+          
+          console.log(`Received ${groups.length} groups from Signal bridge`);
+          if (groups.length > 0) {
+            console.log(`First group sample:`, JSON.stringify(groups[0], null, 2).substring(0, 300));
+          } else {
+            console.log(`Full response structure:`, Object.keys(groupsRes || {}));
+          }
+          
           res.statusCode = 200;
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify({ groups: Array.isArray(groups) ? groups : [] }));
-        } catch (err) {
+        } catch (err: any) {
+          const errMsg = err?.response?.data || err?.message || String(err);
+          console.error(`Failed to list groups:`, errMsg);
           res.statusCode = 502;
           res.setHeader('Content-Type', 'application/json');
           res.end(
             JSON.stringify({
-              error: err instanceof Error ? err.message : String(err),
+              error: errMsg,
+              details: 'The Signal bridge may be slow or the endpoint may not be working. Try again in a moment.',
             })
           );
         }
