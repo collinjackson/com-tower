@@ -35,6 +35,7 @@ export async function POST(
     funEnabled?: boolean;
     scope?: 'my-turn' | 'all';
     mentions?: string[];
+    groupName?: string;
   };
   try {
     body = await req.json();
@@ -65,51 +66,6 @@ export async function POST(
   );
   const existingGroupId = existingSub?.groupId;
   
-  // If it's a group invite link, try to match it to an actual groupId
-  let groupId: string | undefined = existingGroupId; // Preserve existing if we can't match
-  let needsGroupSelection = false;
-  
-  if (body.type === 'group' && body.handle.includes('signal.group/#')) {
-    try {
-      // Call worker to list groups and try to match
-      const workerUrl = process.env.WORKER_URL || 'https://com-tower-worker-33713971134.us-central1.run.app';
-      const groupsRes = await fetch(`${workerUrl}/list-groups`);
-      if (groupsRes.ok) {
-        const groupsData = await groupsRes.json();
-        const groups = groupsData.groups || [];
-        
-        // Extract base64 from invite link
-        const inviteMatch = body.handle.match(/signal\.group\/#(.+)$/);
-        const inviteBase64 = inviteMatch ? inviteMatch[1] : null;
-        
-        // Try to match by invite_link field
-        for (const group of groups) {
-          const groupInviteLink = group.invite_link || '';
-          const groupBase64 = groupInviteLink.includes('#') 
-            ? groupInviteLink.split('#')[1] 
-            : groupInviteLink;
-          
-          if (groupInviteLink === body.handle || 
-              (inviteBase64 && groupBase64 === inviteBase64) ||
-              (inviteBase64 && groupBase64.includes(inviteBase64)) ||
-              (inviteBase64 && inviteBase64.includes(groupBase64))) {
-            groupId = group.id || (group.internal_id ? `group.${group.internal_id}` : undefined);
-            break;
-          }
-        }
-        
-        if (!groupId && !existingGroupId) {
-          needsGroupSelection = true;
-        }
-      }
-    } catch (err) {
-      console.error('Failed to match group:', err);
-      if (!existingGroupId) {
-        needsGroupSelection = true;
-      }
-    }
-  }
-  
   const newSub: any = {
     type: body.type,
     handle: body.handle,
@@ -120,16 +76,14 @@ export async function POST(
       : undefined,
   };
   
-  // Use matched groupId, or fall back to existing, or leave undefined
-  if (groupId) {
-    newSub.groupId = groupId;
-  } else if (existingGroupId) {
-    newSub.groupId = existingGroupId;
+  // For groups, store the groupName for lookup
+  if (body.type === 'group' && body.groupName) {
+    newSub.groupName = body.groupName;
   }
   
-  // Only set needsGroupSelection if we don't have a groupId at all
-  if (needsGroupSelection && !newSub.groupId) {
-    newSub.needsGroupSelection = true;
+  // Preserve existing groupId if present
+  if (existingGroupId) {
+    newSub.groupId = existingGroupId;
   }
   
   const nextSubs = [
@@ -148,8 +102,6 @@ export async function POST(
   return NextResponse.json({ 
     ok: true, 
     subscribers: nextSubs,
-    groupId,
-    needsGroupSelection,
   });
 }
 

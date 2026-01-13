@@ -5,7 +5,7 @@ import { GoogleAuth, IdTokenClient } from 'google-auth-library';
 import http from 'http';
 import { FieldValue } from 'firebase-admin/firestore';
 
-type Subscriber = { type: 'dm' | 'group'; handle: string; groupId?: string; mentions?: string[] };
+type Subscriber = { type: 'dm' | 'group'; handle: string; groupId?: string; groupName?: string; mentions?: string[] };
 type PatchData = {
   gameId: string;
   subscribers: Subscriber[];
@@ -42,113 +42,41 @@ async function getIdTokenClient(url: string): Promise<IdTokenClient> {
   return client;
 }
 
-async function getGroupIdFromList(sub: Subscriber): Promise<string | null> {
+async function getGroupIdByName(groupName: string): Promise<string> {
   const bridgeUrl = process.env.SIGNAL_CLI_URL;
   const botNumber = process.env.SIGNAL_BOT_NUMBER;
-  if (!bridgeUrl || !botNumber) return null;
-
-  try {
-    const client = await getIdTokenClient(bridgeUrl);
-    const numberPath = encodeURIComponent(botNumber);
-    const res = await client.request({
-      url: `${bridgeUrl}/v1/groups/${numberPath}`,
-      method: 'GET',
-      headers: { 'Content-Type': 'application/json' },
-    });
-    const groups = (res as any)?.data || [];
-    if (!Array.isArray(groups)) {
-      console.log('Groups list response is not an array:', groups);
-      return null;
-    }
-
-    console.log(`Found ${groups.length} groups for bot`);
-    
-    // Extract base64 part from invite link for matching
-    const inviteLink = sub.handle;
-    let inviteBase64: string | null = null;
-    if (inviteLink.includes('signal.group/#')) {
-      const match = inviteLink.match(/signal\.group\/#(.+)$/);
-      if (match) {
-        inviteBase64 = match[1];
-      }
-    }
-
-    // Match by invite_link field or by base64 part
-    for (const group of groups) {
-      const groupInviteLink = group.invite_link || '';
-      const groupBase64 = groupInviteLink.includes('#') 
-        ? groupInviteLink.split('#')[1] 
-        : groupInviteLink;
-      
-      if (groupInviteLink === inviteLink || 
-          (inviteBase64 && groupBase64 === inviteBase64) ||
-          (inviteBase64 && groupBase64.includes(inviteBase64)) ||
-          (inviteBase64 && inviteBase64.includes(groupBase64))) {
-        const foundId = group.id || (group.internal_id ? `group.${group.internal_id}` : null);
-        console.log(`Matched group by invite link: ${foundId}`);
-        return foundId;
-      }
-    }
-    
-    console.log(`No invite_link match found in ${groups.length} groups. Available groups:`, 
-      groups.map((g: any) => ({ id: g.id, name: g.name, invite_link: g.invite_link?.substring(0, 50) })));
-    return null;
-  } catch (err) {
-    console.error('Failed to list groups:', err);
-    return null;
-  }
-}
-
-async function joinGroupIfNeeded(sub: Subscriber): Promise<string> {
-  const bridgeUrl = process.env.SIGNAL_CLI_URL;
-  const botNumber = process.env.SIGNAL_BOT_NUMBER;
-  if (!bridgeUrl) throw new Error('SIGNAL_CLI_URL not set');
-  if (!botNumber) throw new Error('SIGNAL_BOT_NUMBER not set');
-
-  // If caller already provided a groupId (not a URL), reuse it.
-  if (sub.groupId && !/^https?:\/\//i.test(sub.groupId)) return sub.groupId;
-  // If handle itself looks like a group id, skip join and use it directly.
-  if (sub.handle && /^group\./i.test(sub.handle) && !/^https?:\/\//i.test(sub.handle)) {
-    return sub.handle;
+  if (!bridgeUrl || !botNumber) {
+    throw new Error('Signal bridge not configured');
   }
 
-  // First, try to get groupId from the groups list (bot is already in the group)
-  const groupIdFromList = await getGroupIdFromList(sub);
-  if (groupIdFromList) {
-    console.log(`Found groupId from groups list: ${groupIdFromList}`);
-    return groupIdFromList;
-  }
-
-  // If not found in list, try to join via invite link
   const client = await getIdTokenClient(bridgeUrl);
-  
-  // Extract base64 part from signal.group invite link if present
-  let inviteUri = sub.handle;
-  if (inviteUri.includes('signal.group/#')) {
-    const match = inviteUri.match(/signal\.group\/#(.+)$/);
-    if (match) {
-      inviteUri = match[1];
+  const numberPath = encodeURIComponent(botNumber);
+  const res = await client.request({
+    url: `${bridgeUrl}/v1/groups/${numberPath}`,
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  const groups = (res as any)?.data || [];
+  if (!Array.isArray(groups)) {
+    throw new Error(`Groups list response is not an array: ${JSON.stringify(groups)}`);
+  }
+
+  // Simple exact match by name
+  for (const group of groups) {
+    if (group.name === groupName) {
+      const groupId = group.id || (group.internal_id ? `group.${group.internal_id}` : null);
+      if (groupId) {
+        console.log(`Found group "${groupName}" with id: ${groupId}`);
+        return groupId;
+      }
     }
   }
   
-  try {
-    const res = await client.request({
-      url: `${bridgeUrl}/v1/groups/join`,
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      data: {
-        number: botNumber,
-        uri: inviteUri,
-      },
-    });
-    const gid = (res as any)?.data?.groupId || (res as any)?.data?.id;
-    if (!gid) throw new Error('Failed to join group (no groupId returned)');
-    return gid as string;
-  } catch (err: any) {
-    const errMsg = err?.response?.data || err?.message || String(err);
-    throw new Error(`Failed to join group: ${JSON.stringify(errMsg)}`);
-  }
+  throw new Error(
+    `Group "${groupName}" not found. Available groups: ${groups.map((g: any) => g.name || '(unnamed)').join(', ')}`
+  );
 }
+
 
 function ensureFirebase() {
   if (getApps().length === 0) {
@@ -508,39 +436,24 @@ async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId
       });
     }
     
-    // Otherwise, try to join or resolve
-    try {
-      groupId = await joinGroupIfNeeded(recipient);
-    } catch (joinErr) {
-      // If join fails, try getting groupId from groups list one more time (might have been a timing issue)
-      console.log(`Join failed, retrying groups list lookup: ${joinErr instanceof Error ? joinErr.message : String(joinErr)}`);
-      const listGroupId = await getGroupIdFromList(recipient);
-      if (listGroupId) {
-        groupId = listGroupId;
-        console.log(`Found groupId from groups list on retry: ${groupId}`);
-      } else {
-        // If we still don't have a groupId, throw the original join error
-        throw joinErr;
-      }
+    // Get groupId by name - simple and deterministic
+    if (!recipient.groupName) {
+      throw new Error('Group name is required. Please select the group by name when adding the subscriber.');
     }
     
-    // Cache the groupId on the patch to avoid re-joining
-    if (groupId) {
-      try {
-        const db = getFirestore();
-        await db
-          .collection('patches')
-          .doc(patchId)
-          .update({
-            subscribers: FieldValue.arrayUnion({ ...recipient, groupId }),
-          });
-      } catch (err) {
-        console.error('Failed to cache groupId on patch', err);
-      }
-    }
-
-    if (!groupId) {
-      throw new Error('Could not determine groupId for group send');
+    groupId = await getGroupIdByName(recipient.groupName);
+    
+    // Cache the groupId on the patch to avoid re-lookup
+    try {
+      const db = getFirestore();
+      await db
+        .collection('patches')
+        .doc(patchId)
+        .update({
+          subscribers: FieldValue.arrayUnion({ ...recipient, groupId }),
+        });
+    } catch (err) {
+      console.error('Failed to cache groupId on patch', err);
     }
 
     return client.request({
@@ -620,80 +533,6 @@ async function main() {
             })
           );
         }
-        return;
-      }
-      if (url.pathname === '/resolve-group') {
-        const invite = url.searchParams.get('invite');
-        if (!invite) {
-          res.statusCode = 400;
-          res.end(JSON.stringify({ error: 'missing invite' }));
-          return;
-        }
-        // Try join first
-        joinGroupIfNeeded({ type: 'group', handle: invite })
-          .then((gid) => {
-            res.statusCode = 200;
-            res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify({ groupId: gid }));
-          })
-          .catch(async (joinErr) => {
-            // If join fails, try sending a test message - sometimes the response contains groupId
-            const bridgeUrl = process.env.SIGNAL_CLI_URL;
-            const botNumber = process.env.SIGNAL_BOT_NUMBER;
-            if (!bridgeUrl || !botNumber) {
-              res.statusCode = 502;
-              res.setHeader('Content-Type', 'application/json');
-              res.end(
-                JSON.stringify({
-                  error: 'Bridge not configured',
-                  joinError: joinErr instanceof Error ? joinErr.message : String(joinErr),
-                })
-              );
-              return;
-            }
-            try {
-              const client = await getIdTokenClient(bridgeUrl);
-              // Try sending with invite link as groupId - might work if bot is already in group
-              const sendRes = await client.request({
-                url: `${bridgeUrl}/v2/send`,
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                data: {
-                  number: botNumber,
-                  message: 'test',
-                  groupId: invite,
-                },
-              });
-              // Check if response contains groupId
-              const responseData = (sendRes as any)?.data;
-              const extractedGroupId = responseData?.groupId || responseData?.id;
-              if (extractedGroupId) {
-                res.statusCode = 200;
-                res.setHeader('Content-Type', 'application/json');
-                res.end(JSON.stringify({ groupId: extractedGroupId }));
-                return;
-              }
-              // If send succeeded but no groupId, the invite link might work as-is
-              res.statusCode = 200;
-              res.setHeader('Content-Type', 'application/json');
-              res.end(
-                JSON.stringify({
-                  groupId: invite,
-                  note: 'Using invite link as groupId (send succeeded)',
-                })
-              );
-            } catch (sendErr) {
-              res.statusCode = 502;
-              res.setHeader('Content-Type', 'application/json');
-              res.end(
-                JSON.stringify({
-                  error: 'Both join and send failed',
-                  joinError: joinErr instanceof Error ? joinErr.message : String(joinErr),
-                  sendError: sendErr instanceof Error ? sendErr.message : String(sendErr),
-                })
-              );
-            }
-          });
         return;
       }
       if (url.pathname === '/set-group-id') {

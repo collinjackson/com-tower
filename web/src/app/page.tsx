@@ -63,9 +63,8 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
   const [funChoice, setFunChoice] = useState<'fun' | 'plain' | null>(null);
   const [scopeChoice, setScopeChoice] = useState<'my-turn' | 'all'>('all');
   const [mentionsRaw, setMentionsRaw] = useState('');
+  const [selectedGroupName, setSelectedGroupName] = useState('');
   const [groups, setGroups] = useState<any[]>([]);
-  const [selectedGroupId, setSelectedGroupId] = useState<string>('');
-  const [needsGroupSelection, setNeedsGroupSelection] = useState(false);
   const [groupsLoading, setGroupsLoading] = useState(false);
   const [currentSubscribers, setCurrentSubscribers] = useState<any[]>([]);
   const [subscribersLoading, setSubscribersLoading] = useState(false);
@@ -317,37 +316,15 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
             handle: trimmed,
             funEnabled: funChoice === 'fun',
             scope: scopeChoice,
-            ...(isGroup ? { mentions } : {}),
+            ...(isGroup ? { mentions, groupName: selectedGroupName || undefined } : {}),
           }),
         });
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
           throw new Error(errData.error || 'Failed to store subscriber');
         }
-        const resData = await res.json();
-        if (resData.needsGroupSelection && isGroup) {
-          setNeedsGroupSelection(true);
-          setGroupsLoading(true);
-          try {
-            const groupsRes = await fetch('/api/groups/list', {
-              headers: {
-                ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
-              },
-            });
-            if (groupsRes.ok) {
-              const groupsData = await groupsRes.json();
-              setGroups(groupsData.groups || []);
-            }
-          } catch (err) {
-            console.error('Failed to load groups:', err);
-          } finally {
-            setGroupsLoading(false);
-          }
-          setStatus('Please select the group from the list below.');
-        } else {
-          setNeedsGroupSelection(false);
-          setStatus('Subscriber stored.');
-        }
+        setStatus('Subscriber stored.');
+        setSelectedGroupName('');
         loadSubscribers();
       } else {
         setStatus('Stored locally (no Firebase config).');
@@ -377,37 +354,6 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
     }
   };
 
-  const saveSelectedGroup = async () => {
-    if (!gameInfo?.gameId || !user || !selectedGroupId || !signalToken.trim()) return;
-    setSaving(true);
-    setStatus(null);
-    try {
-      const idToken = await getAuth().currentUser?.getIdToken();
-      const encodedHandle = encodeURIComponent(signalToken.trim());
-      const res = await fetch(
-        `/api/patch/${gameInfo.gameId}-${user.uid}/subscribers/${encodedHandle}/groupId`,
-        {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
-          },
-          body: JSON.stringify({ groupId: selectedGroupId }),
-        }
-      );
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || 'Failed to set group ID');
-      }
-      setNeedsGroupSelection(false);
-      setStatus('Group selected and saved.');
-      loadSubscribers();
-    } catch (err: unknown) {
-      setStatus(err instanceof Error ? err.message : 'Failed to save group');
-    } finally {
-      setSaving(false);
-    }
-  };
 
   const loadSubscribers = async () => {
     if (!gameInfo?.gameId || !user || !firebaseAvailable) {
@@ -477,17 +423,17 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
     <div className="min-h-screen bg-black text-zinc-100 flex items-center justify-center">
       <main className="w-full max-w-3xl px-6 py-16 flex flex-col gap-8">
         <div className="flex items-start justify-between gap-4">
-          <div className="space-y-3">
-            <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Com Tower</p>
+        <div className="space-y-3">
+          <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Com Tower</p>
             {!user && (
               <>
-                <h1 className="text-3xl font-semibold">AWBW turn notifications</h1>
-                <p className="text-sm text-zinc-400">
+          <h1 className="text-3xl font-semibold">AWBW turn notifications</h1>
+          <p className="text-sm text-zinc-400">
                   Patch your AWBW game to receive turn alerts.
-                </p>
+          </p>
               </>
             )}
-          </div>
+        </div>
           <div className="flex flex-col items-end gap-2 text-xs text-zinc-400">
             <div className="flex items-center gap-2">
               {firebaseAvailable ? (
@@ -502,12 +448,12 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                         Back
                       </button>
                     ) : (
-                      <button
+                    <button
                         onClick={() => setView('settings')}
-                        className="px-3 py-2 rounded-lg border border-zinc-700 hover:border-zinc-500"
-                      >
+                      className="px-3 py-2 rounded-lg border border-zinc-700 hover:border-zinc-500"
+                    >
                         Settings
-                      </button>
+                    </button>
                     )}
                   </>
                 ) : (
@@ -529,7 +475,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
         {user && view === 'main' && !effectiveLockedId && !gameInfo && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
-              <div>
+                <div>
                 <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Patched games</p>
                 <p className="text-sm text-zinc-400">Select to manage notifications.</p>
               </div>
@@ -566,20 +512,20 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                     ))}
                   </tbody>
                 </table>
-              </div>
+                </div>
             )}
 
             <div className="space-y-2">
               <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">New game</p>
-              <input
-                value={gameLink}
+                <input
+                  value={gameLink}
                 onChange={(e) => {
                   setGameLink(e.target.value);
                   setPatchedEnsured(false);
                   setGameInfo(null);
                 }}
-                className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
-                placeholder="https://awbw.amarriner.com/game.php?games_id=123456"
+                  className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
+                  placeholder="https://awbw.amarriner.com/game.php?games_id=123456"
               />
             </div>
           </div>
@@ -645,117 +591,135 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
         {view === 'main' && gameInfo && (
           <div className="space-y-4">
             <div className="flex items-start justify-between">
-              <div>
+                  <div>
                 <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Selected game</p>
-                <p className="text-lg font-semibold text-zinc-100">{gameInfo.gameName}</p>
-                <p className="text-sm text-zinc-400">{gameInfo.mapName || 'Map unknown'}</p>
-              </div>
-              <button
-                onClick={() => {
+                    <p className="text-lg font-semibold text-zinc-100">{gameInfo.gameName}</p>
+                    <p className="text-sm text-zinc-400">{gameInfo.mapName || 'Map unknown'}</p>
+                  </div>
+                  <button
+                    onClick={() => {
                   router.push('/');
                   setLockedGameId(null);
-                  setGameInfo(null);
-                  setSignalToken('');
-                  setNotifyMode('signal-dm');
+                      setGameInfo(null);
+                      setSignalToken('');
+                      setNotifyMode('signal-dm');
                   setPatchedEnsured(false);
                   setExperimentalExtended(false);
-                }}
+                    }}
                 className="px-3 py-2 rounded-lg border border-zinc-700 text-zinc-300 hover:border-zinc-500 text-xs"
-              >
+                  >
                 Back to list
-              </button>
-            </div>
+                  </button>
+                </div>
             {user ? (
               <>
-                <div className="flex items-center justify-between">
-                  <div>
+            <div className="flex items-center justify-between">
+              <div>
                     <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Signal notifications</p>
                     <p className="text-lg font-semibold text-zinc-100">DM or group</p>
                     <p className="text-sm text-zinc-400">
                       Enter your Signal phone for DMs, or paste a Signal group invite link (bot joins silently).
                     </p>
-                  </div>
-                </div>
-                <input
-                  value={signalToken}
-                  onChange={(e) => setSignalToken(e.target.value)}
-                  className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
+              </div>
+            </div>
+            <input
+              value={signalToken}
+              onChange={(e) => setSignalToken(e.target.value)}
+              className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
                   placeholder="Signal phone (DM) or group invite link"
                 />
                 {/^https?:\/\//i.test(signalToken.trim()) || /^group\./i.test(signalToken.trim()) ? (
-                  <div className="space-y-2">
-                    <label className="text-xs uppercase tracking-[0.2em] text-zinc-400">
-                      Group mentions (optional)
-                    </label>
-                    <input
-                      value={mentionsRaw}
-                      onChange={(e) => setMentionsRaw(e.target.value)}
-                      className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
-                      placeholder="+15551234567, +15557654321"
-                    />
-                    <p className="text-[11px] text-zinc-500">
-                      We’ll @ these numbers in the group message. Use Signal-registered numbers,
-                      comma or space separated.
-                    </p>
-                  </div>
+                  <>
+                    <div className="space-y-2">
+                      <label className="text-xs uppercase tracking-[0.2em] text-zinc-400">
+                        Select group by name
+                      </label>
+                      {groupsLoading ? (
+                        <p className="text-xs text-zinc-500">Loading groups…</p>
+                      ) : groups.length === 0 ? (
+                        <button
+                          onClick={async () => {
+                            if (!user) return;
+                            setGroupsLoading(true);
+                            try {
+                              const idToken = await getAuth().currentUser?.getIdToken();
+                              const res = await fetch('/api/groups/list', {
+                                headers: {
+                                  ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+                                },
+                              });
+                              if (res.ok) {
+                                const data = await res.json();
+                                setGroups(data.groups || []);
+                              }
+                            } catch (err) {
+                              console.error('Failed to load groups:', err);
+                            } finally {
+                              setGroupsLoading(false);
+                            }
+                          }}
+                          className="w-full rounded-xl px-4 py-3 bg-[#152029] border border-[#20415a] text-[#c7e6ff] text-sm"
+                        >
+                          Load groups
+                        </button>
+                      ) : (
+                        <select
+                          value={selectedGroupName}
+                          onChange={(e) => setSelectedGroupName(e.target.value)}
+                          className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
+                        >
+                          <option value="">Choose a group…</option>
+                          {groups.map((g) => (
+                            <option key={g.id || g.internal_id} value={g.name || ''}>
+                              {g.name || `Group ${g.id || g.internal_id}`}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                      <p className="text-[11px] text-zinc-500">
+                        Select the group the bot should send messages to. Make sure the bot is already in the group.
+                      </p>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs uppercase tracking-[0.2em] text-zinc-400">
+                        Group mentions (optional)
+                      </label>
+                      <input
+                        value={mentionsRaw}
+                        onChange={(e) => setMentionsRaw(e.target.value)}
+                        className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
+                        placeholder="+15551234567, +15557654321"
+                      />
+                      <p className="text-[11px] text-zinc-500">
+                        We'll @ these numbers in the group message. Use Signal-registered numbers,
+                        comma or space separated.
+                      </p>
+                    </div>
+                  </>
                 ) : null}
                 <div className="flex gap-2 items-start">
-                  <button
-                    onClick={saveSignalToken}
+              <button
+                onClick={saveSignalToken}
                     disabled={saving || !(signalToken.trim() || userPhone.trim())}
-                    className="flex-1 rounded-xl px-4 py-3 bg-[#152029] border border-[#20415a] text-[#c7e6ff] disabled:opacity-50"
-                  >
+                className="flex-1 rounded-xl px-4 py-3 bg-[#152029] border border-[#20415a] text-[#c7e6ff] disabled:opacity-50"
+              >
                     Save notification number/link
-                  </button>
-                  {signalToken && (
-                    <button
-                      onClick={() => setSignalToken('')}
-                      className="px-3 py-2 rounded-lg border border-zinc-700 text-zinc-300 hover:border-zinc-500"
-                    >
-                      Clear
-                    </button>
-                  )}
+              </button>
+              {signalToken && (
+                <button
+                  onClick={() => setSignalToken('')}
+                  className="px-3 py-2 rounded-lg border border-zinc-700 text-zinc-300 hover:border-zinc-500"
+                >
+                  Clear
+                </button>
+              )}
                   {!signalToken && (
                     <p className="text-[11px] text-zinc-500 pt-3">
                       We just store your Signal number or group invite link—no other token needed.
                     </p>
                   )}
-                </div>
+            </div>
 
-                {needsGroupSelection && (
-                  <div className="space-y-2 rounded-xl border border-amber-800 bg-amber-950/20 p-4">
-                    <p className="text-sm font-semibold text-amber-200">
-                      Select the group to match your invite link
-                    </p>
-                    {groupsLoading ? (
-                      <p className="text-xs text-zinc-400">Loading groups…</p>
-                    ) : groups.length === 0 ? (
-                      <p className="text-xs text-zinc-400">No groups found. Make sure the bot is in the group.</p>
-                    ) : (
-                      <>
-                        <select
-                          value={selectedGroupId}
-                          onChange={(e) => setSelectedGroupId(e.target.value)}
-                          className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
-                        >
-                          <option value="">Choose a group…</option>
-                          {groups.map((g) => (
-                            <option key={g.id || g.internal_id} value={g.id || `group.${g.internal_id}`}>
-                              {g.name || g.id || `Group ${g.internal_id}`}
-                            </option>
-                          ))}
-                        </select>
-                        <button
-                          onClick={saveSelectedGroup}
-                          disabled={saving || !selectedGroupId}
-                          className="w-full rounded-xl px-4 py-3 bg-[#152029] border border-[#20415a] text-[#c7e6ff] disabled:opacity-50"
-                        >
-                          Save group selection
-                        </button>
-                      </>
-                    )}
-                  </div>
-                )}
 
                 {(subscribersLoading || currentSubscribers.length > 0) && (
                   <div className="space-y-2">
@@ -813,10 +777,10 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                   </div>
                 )}
 
-                <div className="pt-3 space-y-2">
-                  <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Notifications</p>
+            <div className="pt-3 space-y-2">
+              <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Notifications</p>
                   <div className="grid sm:grid-cols-2 gap-3">
-                    <button
+                <button
                       onClick={() => setScopeChoice('my-turn')}
                       className={`rounded-xl border px-3 py-3 text-left ${
                         scopeChoice === 'my-turn'
@@ -828,8 +792,8 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                       <p className="text-xs text-zinc-400">
                         DM me when it’s my move. Good for team games.
                       </p>
-                    </button>
-                    <button
+                </button>
+                <button
                       onClick={() => setScopeChoice('all')}
                       className={`rounded-xl border px-3 py-3 text-left ${
                         scopeChoice === 'all'
@@ -841,8 +805,8 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                       <p className="text-xs text-zinc-400">
                         Follow every turn in this game (spectator-friendly).
                       </p>
-                    </button>
-                  </div>
+                </button>
+              </div>
 
                   <div className="pt-4 space-y-2">
                     <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Message style</p>
