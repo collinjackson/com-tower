@@ -5,7 +5,15 @@ import { GoogleAuth, IdTokenClient } from 'google-auth-library';
 import http from 'http';
 import { FieldValue } from 'firebase-admin/firestore';
 
-type Subscriber = { type: 'dm' | 'group'; handle: string; groupId?: string; groupName?: string; mentions?: string[] };
+type Subscriber = { 
+  type: 'dm' | 'group'; 
+  handle: string; 
+  groupId?: string; 
+  groupName?: string; 
+  mentions?: string[];
+  // Mapping of AWBW username -> Signal phone number for this subscriber
+  playerPhoneMap?: Record<string, string>;
+};
 type PatchData = {
   gameId: string;
   subscribers: Subscriber[];
@@ -15,6 +23,7 @@ type PatchData = {
 type NextTurnMeta = {
   day?: number;
   playerName?: string;
+  playerId?: string | number;
   includeImage?: boolean;
   players?: string[];
   countries?: string[];
@@ -264,9 +273,15 @@ function startSocket(data: PatchData) {
         console.log(`Processing NextTurn for game ${data.gameId}, subscribers: ${data.subscribers.length}`);
         const next = parsed?.NextTurn || parsed?.nextTurn || parsed || {};
         console.log(`NextTurn payload: ${JSON.stringify(next)}`);
+        
+        // Extract player info from NextTurn - try different field names
+        const currentPlayerName = next.playerName || next.player_name || next.player || next.username || next.name;
+        const currentPlayerId = next.playerId || next.player_id || next.playerId || next.id;
+        
         const meta: NextTurnMeta = {
           day: next.day,
-          playerName: undefined,
+          playerName: currentPlayerName,
+          playerId: currentPlayerId,
           includeImage: false, // Temporarily disabled to troubleshoot basic chat sending
         };
         const db = getFirestore();
@@ -280,7 +295,7 @@ function startSocket(data: PatchData) {
           })
           .catch((err) => console.error('Pre-log message create failed', err));
 
-        Promise.all([loadPlayers(data.gameId).catch(() => ({ players: [], countries: [] })), loadGameName(data.gameId)])
+            Promise.all([loadPlayers(data.gameId).catch(() => ({ players: [], countries: [] })), loadGameName(data.gameId)])
           .then(([info, gameName]) =>
             buildMessage(data.gameId, {
               ...meta,
@@ -290,6 +305,8 @@ function startSocket(data: PatchData) {
             })
           )
           .then((payload) => {
+            // Add current player name to payload for mention lookup
+            (payload as any).currentPlayerName = meta.playerName;
             console.log(
               `Render payload for game ${data.gameId}: textLen=${payload.text.length}, imageData=${
                 payload.imageData ? payload.imageData.length : 0
@@ -373,9 +390,26 @@ async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId
   const client = await getIdTokenClient(bridgeUrl);
 
   let messageText = payload.text;
-  const mentionNumbers = Array.isArray(recipient.mentions)
-    ? recipient.mentions.filter((m) => typeof m === 'string' && m.trim().length > 0)
-    : [];
+  
+  // Determine who to mention: only the person whose turn it is (if we have the mapping)
+  let mentionNumbers: string[] = [];
+  if (recipient.type === 'group') {
+    // If we have a playerPhoneMap and know whose turn it is, use that
+    const currentPlayerName = (payload as any).currentPlayerName;
+    if (currentPlayerName && recipient.playerPhoneMap) {
+      const phone = recipient.playerPhoneMap[currentPlayerName];
+      if (phone) {
+        mentionNumbers = [phone];
+        console.log(`Mentioning ${currentPlayerName} (${phone}) for their turn`);
+      } else {
+        console.log(`No phone mapping found for player: ${currentPlayerName}`);
+      }
+    } else if (Array.isArray(recipient.mentions) && recipient.mentions.length > 0) {
+      // Fallback to explicit mentions if no player mapping
+      mentionNumbers = recipient.mentions.filter((m) => typeof m === 'string' && m.trim().length > 0);
+    }
+  }
+  
   const mentionPlaceholders: { start: number; length: number; number: string; name: string }[] =
     [];
 

@@ -37,6 +37,7 @@ export async function POST(
     mentions?: string[];
     groupName?: string;
     groupId?: string;
+    playerPhoneMap?: Record<string, string>; // AWBW username -> Signal phone number
   };
   try {
     body = await req.json();
@@ -83,7 +84,7 @@ export async function POST(
       newSub.mentions = filteredMentions;
     }
     
-    // For groups, store the groupName and groupId
+    // For groups, store the groupName, groupId, and playerPhoneMap
     if (body.type === 'group') {
       if (body.groupName) {
         newSub.groupName = body.groupName;
@@ -96,6 +97,10 @@ export async function POST(
       } else if (/^group\./i.test(body.handle)) {
         // If handle is already a groupId, use it
         newSub.groupId = body.handle;
+      }
+      // Store player-to-phone mapping if provided
+      if (body.playerPhoneMap && typeof body.playerPhoneMap === 'object') {
+        newSub.playerPhoneMap = body.playerPhoneMap;
       }
     }
     
