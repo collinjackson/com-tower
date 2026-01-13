@@ -33,3 +33,4 @@
 3. On `NextTurn`, worker calls `/api/notify/render` for text, sends via `signal-bridge`, and logs to `messages`.
 4. Frontend can show activity feed from `messages`.
 
+
