@@ -19,8 +19,12 @@ import {
   serverTimestamp,
   where,
   getFirestore,
+  onSnapshot,
+  orderBy,
+  limit as fsLimit,
 } from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
+import { useRouter } from 'next/navigation';
 
 type GameInfo = {
   gameId: string;
@@ -29,11 +33,19 @@ type GameInfo = {
 };
 
 type NotifyMode = 'none' | 'signal-dm';
+type ActivityItem = {
+  text: string;
+  recipient: string | null;
+  createdAt: string | null;
+  imageUrl?: string | null;
+  status?: string;
+};
 
-export default function Home() {
+export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
   const [user, setUser] = useState<User | null>(null);
   const [gameLink, setGameLink] = useState('');
   const [gameInfo, setGameInfo] = useState<GameInfo | null>(null);
+  const [lockedGameId, setLockedGameId] = useState<string | null>(initialGameId || null);
   const [signalToken, setSignalToken] = useState('');
   const [notifyMode, setNotifyMode] = useState<NotifyMode>('signal-dm');
   const [saving, setSaving] = useState(false);
@@ -45,6 +57,33 @@ export default function Home() {
   const [userPhone, setUserPhone] = useState('');
   const [userPhoneLoading, setUserPhoneLoading] = useState(false);
   const [view, setView] = useState<'main' | 'settings'>('main');
+  const [experimentalExtended, setExperimentalExtended] = useState(false);
+  const [activity, setActivity] = useState<ActivityItem[]>([]);
+  const [activityLoading, setActivityLoading] = useState(false);
+  const [funChoice, setFunChoice] = useState<'fun' | 'plain' | null>(null);
+  const [scopeChoice, setScopeChoice] = useState<'my-turn' | 'all'>('all');
+  const [mentionsRaw, setMentionsRaw] = useState('');
+  const [groups, setGroups] = useState<any[]>([]);
+  const [selectedGroupId, setSelectedGroupId] = useState<string>('');
+  const [needsGroupSelection, setNeedsGroupSelection] = useState(false);
+  const [groupsLoading, setGroupsLoading] = useState(false);
+  const [currentSubscribers, setCurrentSubscribers] = useState<any[]>([]);
+  const [subscribersLoading, setSubscribersLoading] = useState(false);
+  const router = useRouter();
+  const effectiveLockedId = lockedGameId || initialGameId || null;
+
+  // Seed detail view immediately when arriving via /game/[id]
+  useEffect(() => {
+    if (initialGameId && !gameInfo) {
+      setGameInfo({
+        gameId: initialGameId,
+        gameName: `Game ${initialGameId}`,
+        mapName: '',
+      });
+      setLockedGameId(initialGameId);
+      setGameLink(`https://awbw.amarriner.com/game.php?games_id=${initialGameId}`);
+    }
+  }, [initialGameId, gameInfo]);
 
   useEffect(() => {
     if (!firebaseAvailable) return;
@@ -108,6 +147,77 @@ export default function Home() {
     };
     loadPatched();
   }, [user]);
+
+  useEffect(() => {
+    if (!initialGameId) return;
+    const link = `https://awbw.amarriner.com/game.php?games_id=${initialGameId}`;
+    setGameLink(link);
+    setLockedGameId(initialGameId);
+    setPatchedEnsured(false);
+    lookupGame(link, false);
+  }, [initialGameId]);
+
+  useEffect(() => {
+    const loadPatchSettings = async () => {
+      if (!firebaseAvailable || !user || !gameInfo?.gameId) {
+        setExperimentalExtended(false);
+        return;
+      }
+      try {
+        const db = getFirestore();
+        const patchRef = doc(db, 'patches', `${gameInfo.gameId}-${user.uid}`);
+        const snap = await getDoc(patchRef);
+        const data = snap.data() as { experimentalExtended?: boolean } | undefined;
+        setExperimentalExtended(!!data?.experimentalExtended);
+      } catch {
+        setExperimentalExtended(false);
+      }
+    };
+    loadPatchSettings();
+  }, [firebaseAvailable, user, gameInfo?.gameId]);
+
+  // Live activity feed (Firestore only; surface errors)
+  useEffect(() => {
+    if (!firebaseAvailable) {
+      setActivity([]);
+      return;
+    }
+    if (!lockedGameId) {
+      setActivity([]);
+      return;
+    }
+    setActivityLoading(true);
+    const db = getFirestore();
+    const q = query(
+      collection(db, 'messages'),
+      where('gameId', '==', lockedGameId),
+      orderBy('createdAt', 'desc'),
+      fsLimit(50)
+    );
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const rows: ActivityItem[] = snap.docs.map((d) => {
+          const data = d.data() as any;
+          return {
+            text: data.text || '',
+            recipient: data.recipient || null,
+            createdAt: data.createdAt?.toDate?.().toISOString?.() || null,
+            imageUrl: data.imageUrl || null,
+            status: data.status || null,
+          };
+        });
+        setActivity(rows);
+        setActivityLoading(false);
+      },
+      (err) => {
+        console.error('Activity feed subscribe failed', err);
+        setStatus(err?.message || 'Activity feed failed');
+        setActivityLoading(false);
+      }
+    );
+    return () => unsub();
+  }, [firebaseAvailable, lockedGameId]);
 
   const statusLine = useMemo(() => {
     if (!firebaseAvailable) return 'Firestore not configured; using local mock.';
@@ -175,6 +285,10 @@ export default function Home() {
 
   const saveSignalToken = async () => {
     if (!gameInfo?.gameId) return;
+    if (!funChoice) {
+      setStatus('Pick a message style (fun or classic).');
+      return;
+    }
     setSaving(true);
     setStatus(null);
     try {
@@ -185,20 +299,56 @@ export default function Home() {
         if (!trimmed) {
           throw new Error('Enter a Signal phone or group invite link.');
         }
-        const isGroup = /^https?:\/\//i.test(trimmed);
+        const isGroup = /^https?:\/\//i.test(trimmed) || /^group\./i.test(trimmed);
+        const mentions = isGroup
+          ? mentionsRaw
+              .split(/[,\s]+/)
+              .map((m) => m.trim())
+              .filter((m) => m.length > 0)
+          : [];
         const res = await fetch(`/api/patch/${gameInfo.gameId}-${user.uid}/subscribers`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
           },
-          body: JSON.stringify({ type: isGroup ? 'group' : 'dm', handle: trimmed }),
+          body: JSON.stringify({
+            type: isGroup ? 'group' : 'dm',
+            handle: trimmed,
+            funEnabled: funChoice === 'fun',
+            scope: scopeChoice,
+            ...(isGroup ? { mentions } : {}),
+          }),
         });
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
           throw new Error(errData.error || 'Failed to store subscriber');
         }
-        setStatus('Subscriber stored.');
+        const resData = await res.json();
+        if (resData.needsGroupSelection && isGroup) {
+          setNeedsGroupSelection(true);
+          setGroupsLoading(true);
+          try {
+            const groupsRes = await fetch('/api/groups/list', {
+              headers: {
+                ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+              },
+            });
+            if (groupsRes.ok) {
+              const groupsData = await groupsRes.json();
+              setGroups(groupsData.groups || []);
+            }
+          } catch (err) {
+            console.error('Failed to load groups:', err);
+          } finally {
+            setGroupsLoading(false);
+          }
+          setStatus('Please select the group from the list below.');
+        } else {
+          setNeedsGroupSelection(false);
+          setStatus('Subscriber stored.');
+        }
+        loadSubscribers();
       } else {
         setStatus('Stored locally (no Firebase config).');
       }
@@ -226,6 +376,102 @@ export default function Home() {
       // ignore
     }
   };
+
+  const saveSelectedGroup = async () => {
+    if (!gameInfo?.gameId || !user || !selectedGroupId || !signalToken.trim()) return;
+    setSaving(true);
+    setStatus(null);
+    try {
+      const idToken = await getAuth().currentUser?.getIdToken();
+      const encodedHandle = encodeURIComponent(signalToken.trim());
+      const res = await fetch(
+        `/api/patch/${gameInfo.gameId}-${user.uid}/subscribers/${encodedHandle}/groupId`,
+        {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+          },
+          body: JSON.stringify({ groupId: selectedGroupId }),
+        }
+      );
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Failed to set group ID');
+      }
+      setNeedsGroupSelection(false);
+      setStatus('Group selected and saved.');
+      loadSubscribers();
+    } catch (err: unknown) {
+      setStatus(err instanceof Error ? err.message : 'Failed to save group');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const loadSubscribers = async () => {
+    if (!gameInfo?.gameId || !user || !firebaseAvailable) {
+      setCurrentSubscribers([]);
+      return;
+    }
+    setSubscribersLoading(true);
+    try {
+      const db = getFirestore();
+      const patchRef = doc(db, 'patches', `${gameInfo.gameId}-${user.uid}`);
+      const snap = await getDoc(patchRef);
+      if (snap.exists()) {
+        const data = snap.data() as { subscribers?: any[] };
+        setCurrentSubscribers(Array.isArray(data.subscribers) ? data.subscribers : []);
+      } else {
+        setCurrentSubscribers([]);
+      }
+    } catch (err) {
+      console.error('Failed to load subscribers:', err);
+      setCurrentSubscribers([]);
+    } finally {
+      setSubscribersLoading(false);
+    }
+  };
+
+  const deleteSubscriber = async (sub: { type: string; handle: string }) => {
+    if (!gameInfo?.gameId || !user) return;
+    if (!confirm(`Remove ${sub.type === 'group' ? 'group' : 'DM'} notification for ${sub.handle}?`)) {
+      return;
+    }
+    setSaving(true);
+    setStatus(null);
+    try {
+      const idToken = await getAuth().currentUser?.getIdToken();
+      const encodedHandle = encodeURIComponent(sub.handle);
+      const res = await fetch(
+        `/api/patch/${gameInfo.gameId}-${user.uid}/subscribers/${encodedHandle}?type=${sub.type}`,
+        {
+          method: 'DELETE',
+          headers: {
+            ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+          },
+        }
+      );
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Failed to delete subscriber');
+      }
+      setStatus('Subscriber removed.');
+      loadSubscribers();
+    } catch (err: unknown) {
+      setStatus(err instanceof Error ? err.message : 'Failed to delete subscriber');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  useEffect(() => {
+    if (gameInfo?.gameId && user) {
+      loadSubscribers();
+    } else {
+      setCurrentSubscribers([]);
+    }
+  }, [gameInfo?.gameId, user]);
 
   return (
     <div className="min-h-screen bg-black text-zinc-100 flex items-center justify-center">
@@ -280,7 +526,7 @@ export default function Home() {
           </div>
         </div>
 
-        {user && view === 'main' && !gameInfo && (
+        {user && view === 'main' && !effectiveLockedId && !gameInfo && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <div>
@@ -307,6 +553,8 @@ export default function Home() {
                         key={pg.gameId}
                         className="hover:bg-zinc-900/80 cursor-pointer transition-colors"
                         onClick={() => {
+                          router.push(`/game/${pg.gameId}`);
+                          setLockedGameId(pg.gameId);
                           setGameInfo(pg);
                           setGameLink(`https://awbw.amarriner.com/game.php?games_id=${pg.gameId}`);
                           setPatchedEnsured(true);
@@ -394,7 +642,7 @@ export default function Home() {
           </section>
         )}
 
-        {user && view === 'main' && gameInfo && (
+        {view === 'main' && gameInfo && (
           <div className="space-y-4">
             <div className="flex items-start justify-between">
               <div>
@@ -404,76 +652,273 @@ export default function Home() {
               </div>
               <button
                 onClick={() => {
+                  router.push('/');
+                  setLockedGameId(null);
                   setGameInfo(null);
                   setSignalToken('');
                   setNotifyMode('signal-dm');
                   setPatchedEnsured(false);
+                  setExperimentalExtended(false);
                 }}
                 className="px-3 py-2 rounded-lg border border-zinc-700 text-zinc-300 hover:border-zinc-500 text-xs"
               >
                 Back to list
               </button>
             </div>
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Signal notifications</p>
-                <p className="text-lg font-semibold text-zinc-100">DM or group</p>
-                <p className="text-sm text-zinc-400">
-                  Enter your Signal phone for DMs, or paste a Signal group invite link (bot joins silently).
-                </p>
-              </div>
-            </div>
-            <input
-              value={signalToken}
-              onChange={(e) => setSignalToken(e.target.value)}
-              className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
-              placeholder="Signal phone (DM) or group invite link"
-            />
-            <div className="flex gap-2">
-              <button
-                onClick={saveSignalToken}
-                disabled={saving}
-                className="flex-1 rounded-xl px-4 py-3 bg-[#152029] border border-[#20415a] text-[#c7e6ff] disabled:opacity-50"
-              >
-                Save token
-              </button>
-              {signalToken && (
-                <button
-                  onClick={() => setSignalToken('')}
-                  className="px-3 py-2 rounded-lg border border-zinc-700 text-zinc-300 hover:border-zinc-500"
-                >
-                  Clear
-                </button>
-              )}
-            </div>
+            {user ? (
+              <>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Signal notifications</p>
+                    <p className="text-lg font-semibold text-zinc-100">DM or group</p>
+                    <p className="text-sm text-zinc-400">
+                      Enter your Signal phone for DMs, or paste a Signal group invite link (bot joins silently).
+                    </p>
+                  </div>
+                </div>
+                <input
+                  value={signalToken}
+                  onChange={(e) => setSignalToken(e.target.value)}
+                  className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
+                  placeholder="Signal phone (DM) or group invite link"
+                />
+                {/^https?:\/\//i.test(signalToken.trim()) || /^group\./i.test(signalToken.trim()) ? (
+                  <div className="space-y-2">
+                    <label className="text-xs uppercase tracking-[0.2em] text-zinc-400">
+                      Group mentions (optional)
+                    </label>
+                    <input
+                      value={mentionsRaw}
+                      onChange={(e) => setMentionsRaw(e.target.value)}
+                      className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
+                      placeholder="+15551234567, +15557654321"
+                    />
+                    <p className="text-[11px] text-zinc-500">
+                      We’ll @ these numbers in the group message. Use Signal-registered numbers,
+                      comma or space separated.
+                    </p>
+                  </div>
+                ) : null}
+                <div className="flex gap-2 items-start">
+                  <button
+                    onClick={saveSignalToken}
+                    disabled={saving || !(signalToken.trim() || userPhone.trim())}
+                    className="flex-1 rounded-xl px-4 py-3 bg-[#152029] border border-[#20415a] text-[#c7e6ff] disabled:opacity-50"
+                  >
+                    Save notification number/link
+                  </button>
+                  {signalToken && (
+                    <button
+                      onClick={() => setSignalToken('')}
+                      className="px-3 py-2 rounded-lg border border-zinc-700 text-zinc-300 hover:border-zinc-500"
+                    >
+                      Clear
+                    </button>
+                  )}
+                  {!signalToken && (
+                    <p className="text-[11px] text-zinc-500 pt-3">
+                      We just store your Signal number or group invite link—no other token needed.
+                    </p>
+                  )}
+                </div>
 
-            <div className="pt-3 space-y-2">
-              <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Notifications</p>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => saveNotifyMode('signal-dm')}
-                  className={`flex-1 rounded-lg px-3 py-3 border text-sm ${
-                    notifyMode === 'signal-dm'
-                      ? 'bg-[#152029] border-[#20415a] text-[#c7e6ff]'
-                      : 'bg-black border-zinc-800 text-zinc-400'
-                  }`}
-                >
-                  Signal DM
-                </button>
-                <button
-                  onClick={() => saveNotifyMode('none')}
-                  className={`flex-1 rounded-lg px-3 py-3 border text-sm ${
-                    notifyMode === 'none'
-                      ? 'bg-[#152029] border-[#20415a] text-[#c7e6ff]'
-                      : 'bg-black border-zinc-800 text-zinc-400'
-                  }`}
-                >
-                  No notifications
-                </button>
-              </div>
-              <p className="text-xs text-zinc-500">
-                For this 1v1 demo, only your DM token is used. Other players stay silent.
-              </p>
+                {needsGroupSelection && (
+                  <div className="space-y-2 rounded-xl border border-amber-800 bg-amber-950/20 p-4">
+                    <p className="text-sm font-semibold text-amber-200">
+                      Select the group to match your invite link
+                    </p>
+                    {groupsLoading ? (
+                      <p className="text-xs text-zinc-400">Loading groups…</p>
+                    ) : groups.length === 0 ? (
+                      <p className="text-xs text-zinc-400">No groups found. Make sure the bot is in the group.</p>
+                    ) : (
+                      <>
+                        <select
+                          value={selectedGroupId}
+                          onChange={(e) => setSelectedGroupId(e.target.value)}
+                          className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
+                        >
+                          <option value="">Choose a group…</option>
+                          {groups.map((g) => (
+                            <option key={g.id || g.internal_id} value={g.id || `group.${g.internal_id}`}>
+                              {g.name || g.id || `Group ${g.internal_id}`}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          onClick={saveSelectedGroup}
+                          disabled={saving || !selectedGroupId}
+                          className="w-full rounded-xl px-4 py-3 bg-[#152029] border border-[#20415a] text-[#c7e6ff] disabled:opacity-50"
+                        >
+                          Save group selection
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {(subscribersLoading || currentSubscribers.length > 0) && (
+                  <div className="space-y-2">
+                    <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Current subscribers</p>
+                    {subscribersLoading ? (
+                      <p className="text-xs text-zinc-500">Loading subscribers…</p>
+                    ) : (
+                      <div className="rounded-xl border border-zinc-800 bg-zinc-950 divide-y divide-zinc-800">
+                      {currentSubscribers.map((sub, idx) => (
+                        <div key={idx} className="flex items-center justify-between p-3">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] uppercase tracking-wide px-2 py-1 rounded-full bg-zinc-800 text-zinc-300">
+                                {sub.type}
+                              </span>
+                              <span className="text-sm text-zinc-200 truncate">{sub.handle}</span>
+                            </div>
+                            <div className="flex items-center gap-3 mt-1 text-xs text-zinc-400">
+                              <span>{sub.scope === 'my-turn' ? 'Only my turn' : 'All turns'}</span>
+                              <span>•</span>
+                              <span>{sub.funEnabled ? 'Fun mode' : 'Classic'}</span>
+                              {sub.needsGroupSelection && (
+                                <>
+                                  <span>•</span>
+                                  <span className="text-amber-400">Needs group selection</span>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => deleteSubscriber(sub)}
+                            disabled={saving}
+                            className="ml-3 p-2 rounded-lg border border-zinc-700 text-zinc-400 hover:border-red-600 hover:text-red-400 disabled:opacity-50 transition-colors"
+                            title="Remove subscriber"
+                          >
+                            <svg
+                              xmlns="http://www.w3.org/2000/svg"
+                              className="h-4 w-4"
+                              fill="none"
+                              viewBox="0 0 24 24"
+                              stroke="currentColor"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                              />
+                            </svg>
+                          </button>
+                        </div>
+                      ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="pt-3 space-y-2">
+                  <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Notifications</p>
+                  <div className="grid sm:grid-cols-2 gap-3">
+                    <button
+                      onClick={() => setScopeChoice('my-turn')}
+                      className={`rounded-xl border px-3 py-3 text-left ${
+                        scopeChoice === 'my-turn'
+                          ? 'bg-[#13211f] border-[#1f3c35] text-[#b5f5e4]'
+                          : 'bg-black border-zinc-800 text-zinc-300'
+                      }`}
+                    >
+                      <p className="text-sm font-semibold">Only my turn</p>
+                      <p className="text-xs text-zinc-400">
+                        DM me when it’s my move. Good for team games.
+                      </p>
+                    </button>
+                    <button
+                      onClick={() => setScopeChoice('all')}
+                      className={`rounded-xl border px-3 py-3 text-left ${
+                        scopeChoice === 'all'
+                          ? 'bg-[#1a1b2f] border-[#2e315a] text-[#c7d0ff]'
+                          : 'bg-black border-zinc-800 text-zinc-300'
+                      }`}
+                    >
+                      <p className="text-sm font-semibold">All turns</p>
+                      <p className="text-xs text-zinc-400">
+                        Follow every turn in this game (spectator-friendly).
+                      </p>
+                    </button>
+                  </div>
+
+                  <div className="pt-4 space-y-2">
+                    <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Message style</p>
+                    <div className="grid sm:grid-cols-2 gap-3">
+                      <button
+                        onClick={() => setFunChoice('plain')}
+                        className={`rounded-xl border px-4 py-4 text-left ${
+                          funChoice === 'plain'
+                            ? 'bg-[#101010] border-zinc-500 text-zinc-50'
+                            : 'bg-black border-zinc-800 text-zinc-300'
+                        }`}
+                      >
+                        <p className="text-sm font-semibold">Classic</p>
+                        <p className="text-xs text-zinc-400">
+                          Straightforward turn pings, no images.
+                        </p>
+                        <div className="mt-2 text-[11px] text-zinc-500 border border-zinc-800 rounded-lg p-2">
+                          “Day 12 – You’re up. [Game link]”
+                        </div>
+                      </button>
+                      <button
+                        onClick={() => setFunChoice('fun')}
+                        className={`rounded-xl border px-4 py-4 text-left ${
+                          funChoice === 'fun'
+                            ? 'bg-[#13182a] border-[#2f3c7a] text-[#d5e0ff]'
+                            : 'bg-black border-zinc-800 text-zinc-300'
+                        }`}
+                      >
+                        <p className="text-sm font-semibold">Fun mode</p>
+                        <p className="text-xs text-zinc-400">
+                          AI caption + image with your faction vibe.
+                        </p>
+                        <div className="mt-2 text-[11px] text-zinc-500 border border-zinc-800 rounded-lg p-2">
+                          “Grit’s infantry raises the Com Tower flag under orange skies.”
+                        </div>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <p className="text-sm text-zinc-400">Sign in to configure notifications for this game.</p>
+            )}
+
+            <div className="pt-4 space-y-2">
+              <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Activity feed</p>
+              {activityLoading && <p className="text-xs text-zinc-500">Loading activity…</p>}
+              {!activityLoading && activity.length === 0 && (
+                <p className="text-xs text-zinc-500">No messages yet.</p>
+              )}
+              {!activityLoading && activity.length > 0 && (
+                <div className="space-y-2 rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+                  {activity.map((item, idx) => (
+                    <div key={idx} className="text-sm text-zinc-200 space-y-1">
+                      <div className="flex items-center gap-2">
+                        {item.status && (
+                          <span className="text-[10px] uppercase tracking-wide px-2 py-1 rounded-full bg-zinc-800 text-zinc-300">
+                            {item.status}
+                          </span>
+                        )}
+                        <p className="flex-1">{item.text || 'Pending…'}</p>
+                      </div>
+                      {item.imageUrl && (
+                        <img
+                          src={item.imageUrl}
+                          alt="Rendered turn"
+                          className="mt-1 rounded-lg border border-zinc-800 max-h-64 object-contain"
+                        />
+                      )}
+                      <div className="text-[11px] text-zinc-500 flex gap-3">
+                        {item.createdAt && <span>{new Date(item.createdAt).toLocaleString()}</span>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -486,4 +931,8 @@ export default function Home() {
       </main>
     </div>
   );
+}
+
+export default function Home() {
+  return <ComTowerApp />;
 }

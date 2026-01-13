@@ -29,7 +29,13 @@ export async function POST(
     return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
   }
 
-  let body: { type?: 'dm' | 'group'; handle?: string };
+  let body: {
+    type?: 'dm' | 'group';
+    handle?: string;
+    funEnabled?: boolean;
+    scope?: 'my-turn' | 'all';
+    mentions?: string[];
+  };
   try {
     body = await req.json();
   } catch {
@@ -52,9 +58,83 @@ export async function POST(
   }
 
   const subscribers = Array.isArray(data.subscribers) ? data.subscribers : [];
+  
+  // Check if there's an existing subscriber with the same handle/type to preserve groupId
+  const existingSub = subscribers.find(
+    (s) => s.type === body.type && s.handle === body.handle
+  );
+  const existingGroupId = existingSub?.groupId;
+  
+  // If it's a group invite link, try to match it to an actual groupId
+  let groupId: string | undefined = existingGroupId; // Preserve existing if we can't match
+  let needsGroupSelection = false;
+  
+  if (body.type === 'group' && body.handle.includes('signal.group/#')) {
+    try {
+      // Call worker to list groups and try to match
+      const workerUrl = process.env.WORKER_URL || 'https://com-tower-worker-33713971134.us-central1.run.app';
+      const groupsRes = await fetch(`${workerUrl}/list-groups`);
+      if (groupsRes.ok) {
+        const groupsData = await groupsRes.json();
+        const groups = groupsData.groups || [];
+        
+        // Extract base64 from invite link
+        const inviteMatch = body.handle.match(/signal\.group\/#(.+)$/);
+        const inviteBase64 = inviteMatch ? inviteMatch[1] : null;
+        
+        // Try to match by invite_link field
+        for (const group of groups) {
+          const groupInviteLink = group.invite_link || '';
+          const groupBase64 = groupInviteLink.includes('#') 
+            ? groupInviteLink.split('#')[1] 
+            : groupInviteLink;
+          
+          if (groupInviteLink === body.handle || 
+              (inviteBase64 && groupBase64 === inviteBase64) ||
+              (inviteBase64 && groupBase64.includes(inviteBase64)) ||
+              (inviteBase64 && inviteBase64.includes(groupBase64))) {
+            groupId = group.id || (group.internal_id ? `group.${group.internal_id}` : undefined);
+            break;
+          }
+        }
+        
+        if (!groupId && !existingGroupId) {
+          needsGroupSelection = true;
+        }
+      }
+    } catch (err) {
+      console.error('Failed to match group:', err);
+      if (!existingGroupId) {
+        needsGroupSelection = true;
+      }
+    }
+  }
+  
+  const newSub: any = {
+    type: body.type,
+    handle: body.handle,
+    funEnabled: !!body.funEnabled,
+    scope: body.scope === 'my-turn' || body.scope === 'all' ? body.scope : 'all',
+    mentions: Array.isArray(body.mentions)
+      ? body.mentions.filter((m) => typeof m === 'string' && m.trim().length > 0)
+      : undefined,
+  };
+  
+  // Use matched groupId, or fall back to existing, or leave undefined
+  if (groupId) {
+    newSub.groupId = groupId;
+  } else if (existingGroupId) {
+    newSub.groupId = existingGroupId;
+  }
+  
+  // Only set needsGroupSelection if we don't have a groupId at all
+  if (needsGroupSelection && !newSub.groupId) {
+    newSub.needsGroupSelection = true;
+  }
+  
   const nextSubs = [
     ...subscribers.filter((s) => !(s.type === body.type && s.handle === body.handle)),
-    { type: body.type, handle: body.handle },
+    newSub,
   ];
 
   await patchRef.set(
@@ -65,6 +145,11 @@ export async function POST(
     { merge: true }
   );
 
-  return NextResponse.json({ ok: true, subscribers: nextSubs });
+  return NextResponse.json({ 
+    ok: true, 
+    subscribers: nextSubs,
+    groupId,
+    needsGroupSelection,
+  });
 }
 

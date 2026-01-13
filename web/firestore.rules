@@ -24,6 +24,12 @@ service cloud.firestore {
                          && request.resource.data.signalPhone.matches('^\\+?[0-9]{7,15}$');
     }
 
+    // Messages: read-only for everyone (activity feeds); writes via server.
+    match /messages/{messageId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
     // Deny everything else.
     match /{document=**} {
       allow read, write: if false;
