@@ -295,7 +295,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
         if (!trimmed) {
           throw new Error('Enter a Signal phone or group invite link.');
         }
-        const isGroup = /^https?:\/\//i.test(trimmed) || /^group\./i.test(trimmed);
+        const isGroup = /^group\./i.test(trimmed);
         const mentions = isGroup
           ? mentionsRaw
               .split(/[,\s]+/)
@@ -310,10 +310,14 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
           },
           body: JSON.stringify({
             type: isGroup ? 'group' : 'dm',
-            handle: trimmed,
+            handle: trimmed, // For groups, this is the groupId
             funEnabled: funChoice === 'fun',
             scope: scopeChoice,
-            ...(isGroup ? { mentions, groupName: selectedGroupName || undefined } : {}),
+            ...(isGroup ? { 
+              mentions, 
+              groupName: selectedGroupName || undefined,
+              groupId: trimmed, // Store groupId directly
+            } : {}),
           }),
         });
         if (!res.ok) {
@@ -615,7 +619,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                     <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Signal notifications</p>
                     <p className="text-lg font-semibold text-zinc-100">DM or group</p>
                     <p className="text-sm text-zinc-400">
-                      Enter your Signal phone for DMs, or paste a Signal group invite link (bot joins silently).
+                      Enter your Signal phone for DMs, or paste a Signal group ID (starts with "group."). Use "Load groups" to find group IDs.
                     </p>
               </div>
             </div>
@@ -623,9 +627,9 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
               value={signalToken}
               onChange={(e) => setSignalToken(e.target.value)}
               className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
-                  placeholder="Signal phone (DM) or group invite link"
+                  placeholder="Signal phone (DM) or group ID (e.g., group.abc123...)"
                 />
-                {/^https?:\/\//i.test(signalToken.trim()) || /^group\./i.test(signalToken.trim()) ? (
+                {/^group\./i.test(signalToken.trim()) ? (
                   <>
                     <div className="space-y-2">
                       <label className="text-xs uppercase tracking-[0.2em] text-zinc-400">
@@ -685,19 +689,59 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                       {groups.length > 0 && (
                         <select
                           value={selectedGroupName}
-                          onChange={(e) => setSelectedGroupName(e.target.value)}
+                          onChange={async (e) => {
+                            const selectedName = e.target.value;
+                            setSelectedGroupName(selectedName);
+                            
+                            // Find the selected group and set its ID
+                            const selectedGroup = groups.find((g) => g.name === selectedName);
+                            if (selectedGroup) {
+                              const groupId = selectedGroup.id || (selectedGroup.internal_id ? `group.${selectedGroup.internal_id}` : null);
+                              if (groupId) {
+                                setSignalToken(groupId);
+                                
+                                // Automatically fetch members and populate mentions
+                                try {
+                                  const idToken = await getAuth().currentUser?.getIdToken();
+                                  const membersRes = await fetch(`/api/groups/members?groupId=${encodeURIComponent(groupId)}`, {
+                                    headers: {
+                                      ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+                                    },
+                                  });
+                                  if (membersRes.ok) {
+                                    const membersData = await membersRes.json();
+                                    if (membersData.members && Array.isArray(membersData.members) && membersData.members.length > 0) {
+                                      setMentionsRaw(membersData.members.join(', '));
+                                      setStatus(`Loaded ${membersData.members.length} members from "${selectedName}". Mentions auto-populated.`);
+                                    } else {
+                                      setStatus(`Group "${selectedName}" has no members or members couldn't be loaded.`);
+                                    }
+                                  } else {
+                                    const errData = await membersRes.json().catch(() => ({}));
+                                    setStatus(`Could not load members: ${errData.error || membersRes.statusText}`);
+                                  }
+                                } catch (err) {
+                                  console.error('Failed to load group members:', err);
+                                  setStatus('Could not load group members automatically.');
+                                }
+                              }
+                            }
+                          }}
                           className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
                         >
                           <option value="">Or choose from loaded groups…</option>
-                          {groups.map((g) => (
-                            <option key={g.id || g.internal_id} value={g.name || ''}>
-                              {g.name || `Group ${g.id || g.internal_id}`}
-                            </option>
-                          ))}
+                          {groups.map((g) => {
+                            const groupId = g.id || (g.internal_id ? `group.${g.internal_id}` : null);
+                            return (
+                              <option key={groupId || g.name} value={g.name || ''}>
+                                {g.name || `Group ${groupId || 'unnamed'}`}
+                              </option>
+                            );
+                          })}
                         </select>
                       )}
                       <p className="text-[11px] text-zinc-500">
-                        Enter the exact group name as it appears in Signal. The bot must already be in the group.
+                        Select a group from the dropdown to auto-fill the group ID and members. The bot must already be in the group.
                       </p>
                     </div>
                     <div className="space-y-2">
