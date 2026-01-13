@@ -28,3 +28,4 @@ Long-lived websocket listener for AWBW turn events. Reads game configs from Fire
 - A Signal identity zip was uploaded to `gs://comtower-signal-identity/signal-cli.zip`.
 - Assign your Cloud Run service account `roles/storage.objectViewer` on that bucket/object so the bridge can fetch it at startup.
 
+
