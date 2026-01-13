@@ -187,6 +187,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
     }
     setActivityLoading(true);
     const db = getFirestore();
+    // Try with orderBy first, fall back to without if it fails (might need index)
     const q = query(
       collection(db, 'messages'),
       where('gameId', '==', lockedGameId),
@@ -206,13 +207,56 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
             status: data.status || null,
           };
         });
+        // Sort by createdAt descending if orderBy didn't work
+        rows.sort((a, b) => {
+          if (!a.createdAt || !b.createdAt) return 0;
+          return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+        });
         setActivity(rows);
         setActivityLoading(false);
       },
-      (err) => {
+      (err: any) => {
         console.error('Activity feed subscribe failed', err);
-        setStatus(err?.message || 'Activity feed failed');
-        setActivityLoading(false);
+        // If orderBy fails, try without it
+        if (err?.code === 'failed-precondition' || err?.message?.includes('index')) {
+          console.log('Retrying activity feed without orderBy...');
+          const qSimple = query(
+            collection(db, 'messages'),
+            where('gameId', '==', lockedGameId),
+            fsLimit(50)
+          );
+          const unsubSimple = onSnapshot(
+            qSimple,
+            (snap) => {
+              const rows: ActivityItem[] = snap.docs.map((d) => {
+                const data = d.data() as any;
+                return {
+                  text: data.text || '',
+                  recipient: data.recipient || null,
+                  createdAt: data.createdAt?.toDate?.().toISOString?.() || null,
+                  imageUrl: data.imageUrl || null,
+                  status: data.status || null,
+                };
+              });
+              // Sort manually
+              rows.sort((a, b) => {
+                if (!a.createdAt || !b.createdAt) return 0;
+                return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+              });
+              setActivity(rows);
+              setActivityLoading(false);
+            },
+            (err2) => {
+              console.error('Activity feed subscribe failed (retry)', err2);
+              setStatus(err2?.message || 'Activity feed failed');
+              setActivityLoading(false);
+            }
+          );
+          return () => unsubSimple();
+        } else {
+          setStatus(err?.message || 'Activity feed failed');
+          setActivityLoading(false);
+        }
       }
     );
     return () => unsub();
@@ -641,6 +685,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                           onClick={async () => {
                             if (!user) return;
                             setGroupsLoading(true);
+                            setStatus(null);
                             try {
                               const idToken = await getAuth().currentUser?.getIdToken();
                               const res = await fetch('/api/groups/list', {
@@ -651,16 +696,26 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                               if (res.ok) {
                                 const data = await res.json();
                                 setGroups(data.groups || []);
+                                if (data.groups && data.groups.length === 0) {
+                                  setStatus('No groups found. Make sure the bot is in at least one group.');
+                                } else {
+                                  setStatus(`Loaded ${data.groups?.length || 0} groups.`);
+                                }
+                              } else {
+                                const errData = await res.json().catch(() => ({}));
+                                setStatus(`Failed to load groups: ${errData.error || res.statusText}`);
                               }
                             } catch (err) {
                               console.error('Failed to load groups:', err);
+                              setStatus(err instanceof Error ? err.message : 'Failed to load groups');
                             } finally {
                               setGroupsLoading(false);
                             }
                           }}
-                          className="w-full rounded-xl px-4 py-3 bg-[#152029] border border-[#20415a] text-[#c7e6ff] text-sm"
+                          disabled={groupsLoading}
+                          className="w-full rounded-xl px-4 py-3 bg-[#152029] border border-[#20415a] text-[#c7e6ff] text-sm disabled:opacity-50"
                         >
-                          Load groups
+                          {groupsLoading ? 'Loading…' : 'Load groups'}
                         </button>
                       ) : (
                         <select
