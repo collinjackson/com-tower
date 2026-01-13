@@ -894,6 +894,10 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                           src={item.imageUrl}
                           alt="Rendered turn"
                           className="mt-1 rounded-lg border border-zinc-800 max-h-64 object-contain"
+                          onError={(e) => {
+                            // Hide broken images
+                            (e.target as HTMLImageElement).style.display = 'none';
+                          }}
                         />
                       )}
                       <div className="text-[11px] text-zinc-500 flex gap-3">

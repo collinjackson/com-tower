@@ -186,8 +186,8 @@ async function buildMessage(gameId: string, meta: NextTurnMeta): Promise<RenderP
           players: meta.players,
           gameName,
           link,
-          enableFun: meta.includeImage,
-          includeImage: meta.includeImage,
+          enableFun: false, // Temporarily disabled to troubleshoot basic chat sending
+          includeImage: false, // Temporarily disabled to troubleshoot basic chat sending
         }),
       });
       if (res.ok) {
@@ -267,7 +267,7 @@ function startSocket(data: PatchData) {
         const meta: NextTurnMeta = {
           day: next.day,
           playerName: undefined,
-          includeImage: data.experimentalExtended,
+          includeImage: false, // Temporarily disabled to troubleshoot basic chat sending
         };
         const db = getFirestore();
         const msgRef = db.collection('messages').doc();
@@ -411,16 +411,17 @@ async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId
       length: m.length,
     }));
   }
-  if (payload.imageData && payload.imageContentType) {
-    console.log(
-      `Sending Signal attachment size=${payload.imageData.length} ct=${payload.imageContentType}`
-    );
-    // signal-cli-rest-api expects base64Attachments as plain base64 strings.
-    baseData.base64Attachments = [payload.imageData];
-    baseData.attachmentFilenames = [
-      payload.imageFilename || `image-${Date.now()}.png`,
-    ];
-  }
+  // Image sending temporarily disabled to troubleshoot basic chat sending
+  // if (payload.imageData && payload.imageContentType) {
+  //   console.log(
+  //     `Sending Signal attachment size=${payload.imageData.length} ct=${payload.imageContentType}`
+  //   );
+  //   // signal-cli-rest-api expects base64Attachments as plain base64 strings.
+  //   baseData.base64Attachments = [payload.imageData];
+  //   baseData.attachmentFilenames = [
+  //     payload.imageFilename || `image-${Date.now()}.png`,
+  //   ];
+  // }
 
   if (recipient.type === 'group') {
     let groupId: string | undefined = recipient.groupId;
