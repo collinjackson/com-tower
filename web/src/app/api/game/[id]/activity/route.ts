@@ -13,24 +13,50 @@ export async function GET(_: Request, context: { params: Promise<{ id: string }>
 
   try {
     const db = getAdminDb();
-    const snap = await db
-      .collection('messages')
-      .where('gameId', '==', gameId)
-      .orderBy('createdAt', 'desc')
-      .limit(50)
-      .get();
+    // Try with orderBy, fall back if index missing
+    let snap;
+    try {
+      snap = await db
+        .collection('messages')
+        .where('gameId', '==', gameId)
+        .orderBy('createdAt', 'desc')
+        .limit(50)
+        .get();
+    } catch (err: any) {
+      // If orderBy fails (missing index), try without it
+      if (err?.code === 'failed-precondition' || err?.message?.includes('index')) {
+        console.log('Activity API: orderBy failed, trying without it');
+        snap = await db
+          .collection('messages')
+          .where('gameId', '==', gameId)
+          .limit(50)
+          .get();
+      } else {
+        throw err;
+      }
+    }
 
     const messages = snap.docs.map((d) => {
       const data = d.data() as {
         text?: string;
         recipient?: string;
         createdAt?: { toDate: () => Date };
+        imageUrl?: string;
+        status?: string;
       };
       return {
         text: data.text || '',
         recipient: data.recipient || null,
         createdAt: data.createdAt ? data.createdAt.toDate().toISOString() : null,
+        imageUrl: data.imageUrl || null,
+        status: data.status || null,
       };
+    });
+
+    // Sort by createdAt descending (in case orderBy didn't work)
+    messages.sort((a, b) => {
+      if (!a.createdAt || !b.createdAt) return 0;
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
     });
 
     return NextResponse.json({ messages });
