@@ -36,6 +36,7 @@ export async function POST(
     scope?: 'my-turn' | 'all';
     mentions?: string[];
     groupName?: string;
+    groupId?: string;
   };
   try {
     body = await req.json();
@@ -82,14 +83,20 @@ export async function POST(
       newSub.mentions = filteredMentions;
     }
     
-    // For groups, store the groupName for lookup
-    if (body.type === 'group' && body.groupName) {
-      newSub.groupName = body.groupName;
-    }
-    
-    // Preserve existing groupId if present
-    if (existingGroupId) {
-      newSub.groupId = existingGroupId;
+    // For groups, store the groupName and groupId
+    if (body.type === 'group') {
+      if (body.groupName) {
+        newSub.groupName = body.groupName;
+      }
+      // Use provided groupId, or existing one, or handle as fallback
+      if (body.groupId) {
+        newSub.groupId = body.groupId;
+      } else if (existingGroupId) {
+        newSub.groupId = existingGroupId;
+      } else if (/^group\./i.test(body.handle)) {
+        // If handle is already a groupId, use it
+        newSub.groupId = body.handle;
+      }
     }
     
     const nextSubs = [
