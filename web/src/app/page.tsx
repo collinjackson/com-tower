@@ -177,90 +177,43 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
 
   // Live activity feed (Firestore only; surface errors)
   useEffect(() => {
-    if (!firebaseAvailable) {
-      setActivity([]);
-      return;
-    }
     if (!lockedGameId) {
       setActivity([]);
       return;
     }
     setActivityLoading(true);
-    const db = getFirestore();
-    // Try with orderBy first, fall back to without if it fails (might need index)
-    const q = query(
-      collection(db, 'messages'),
-      where('gameId', '==', lockedGameId),
-      orderBy('createdAt', 'desc'),
-      fsLimit(50)
-    );
-    const unsub = onSnapshot(
-      q,
-      (snap) => {
-        const rows: ActivityItem[] = snap.docs.map((d) => {
-          const data = d.data() as any;
-          return {
-            text: data.text || '',
-            recipient: data.recipient || null,
-            createdAt: data.createdAt?.toDate?.().toISOString?.() || null,
-            imageUrl: data.imageUrl || null,
-            status: data.status || null,
-          };
-        });
-        // Sort by createdAt descending if orderBy didn't work
-        rows.sort((a, b) => {
-          if (!a.createdAt || !b.createdAt) return 0;
-          return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-        });
-        setActivity(rows);
-        setActivityLoading(false);
-      },
-      (err: any) => {
-        console.error('Activity feed subscribe failed', err);
-        // If orderBy fails, try without it
-        if (err?.code === 'failed-precondition' || err?.message?.includes('index')) {
-          console.log('Retrying activity feed without orderBy...');
-          const qSimple = query(
-            collection(db, 'messages'),
-            where('gameId', '==', lockedGameId),
-            fsLimit(50)
-          );
-          const unsubSimple = onSnapshot(
-            qSimple,
-            (snap) => {
-              const rows: ActivityItem[] = snap.docs.map((d) => {
-                const data = d.data() as any;
-                return {
-                  text: data.text || '',
-                  recipient: data.recipient || null,
-                  createdAt: data.createdAt?.toDate?.().toISOString?.() || null,
-                  imageUrl: data.imageUrl || null,
-                  status: data.status || null,
-                };
-              });
-              // Sort manually
-              rows.sort((a, b) => {
-                if (!a.createdAt || !b.createdAt) return 0;
-                return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-              });
-              setActivity(rows);
-              setActivityLoading(false);
-            },
-            (err2) => {
-              console.error('Activity feed subscribe failed (retry)', err2);
-              setStatus(err2?.message || 'Activity feed failed');
-              setActivityLoading(false);
-            }
-          );
-          return () => unsubSimple();
+    
+    // Use API endpoint instead of direct Firestore to avoid auth issues
+    const fetchActivity = async () => {
+      try {
+        const res = await fetch(`/api/game/${lockedGameId}/activity`);
+        if (res.ok) {
+          const data = await res.json();
+          const rows: ActivityItem[] = (data.messages || []).map((m: any) => ({
+            text: m.text || '',
+            recipient: m.recipient || null,
+            createdAt: m.createdAt || null,
+            imageUrl: m.imageUrl || null,
+            status: m.status || null,
+          }));
+          setActivity(rows);
         } else {
-          setStatus(err?.message || 'Activity feed failed');
-          setActivityLoading(false);
+          console.error('Activity feed API failed:', res.status, res.statusText);
+          setActivity([]);
         }
+      } catch (err) {
+        console.error('Activity feed fetch failed:', err);
+        setActivity([]);
+      } finally {
+        setActivityLoading(false);
       }
-    );
-    return () => unsub();
-  }, [firebaseAvailable, lockedGameId]);
+    };
+    
+    fetchActivity();
+    // Poll every 5 seconds for updates
+    const interval = setInterval(fetchActivity, 5000);
+    return () => clearInterval(interval);
+  }, [lockedGameId]);
 
   const statusLine = useMemo(() => {
     if (!firebaseAvailable) return 'Firestore not configured; using local mock.';
