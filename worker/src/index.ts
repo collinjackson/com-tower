@@ -437,9 +437,32 @@ async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId
       });
     }
     
-    // Get groupId by name - simple and deterministic
+    // If handle is a groupId (starts with "group."), use it directly
+    if (/^group\./i.test(recipient.handle)) {
+      console.log(`Using handle as groupId: ${recipient.handle}`);
+      // Cache it for future use
+      try {
+        const db = getFirestore();
+        await db
+          .collection('patches')
+          .doc(patchId)
+          .update({
+            subscribers: FieldValue.arrayUnion({ ...recipient, groupId: recipient.handle }),
+          });
+      } catch (err) {
+        console.error('Failed to cache groupId on patch', err);
+      }
+      return client.request({
+        url: `${bridgeUrl}/v2/send`,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        data: { ...baseData, groupId: recipient.handle },
+      });
+    }
+    
+    // Fallback: Get groupId by name - simple and deterministic
     if (!recipient.groupName) {
-      throw new Error('Group name is required. Please select the group by name when adding the subscriber.');
+      throw new Error('Group ID or group name is required. Please provide a group ID (starts with "group.") or select the group by name.');
     }
     
     groupId = await getGroupIdByName(recipient.groupName);
@@ -604,6 +627,78 @@ async function main() {
               details: `Request failed after ${elapsed}ms. The Signal bridge may be slow or the endpoint may not be working.`,
             })
           );
+        }
+        return;
+      }
+      if (url.pathname === '/group-members') {
+        const groupId = url.searchParams.get('groupId');
+        if (!groupId) {
+          res.statusCode = 400;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: 'Missing groupId query parameter' }));
+          return;
+        }
+        const bridgeUrl = process.env.SIGNAL_CLI_URL;
+        const botNumber = process.env.SIGNAL_BOT_NUMBER;
+        if (!bridgeUrl || !botNumber) {
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: 'Bridge not configured' }));
+          return;
+        }
+        try {
+          const client = await getIdTokenClient(bridgeUrl);
+          const numberPath = encodeURIComponent(botNumber);
+          const groupsRes = await client.request({
+            url: `${bridgeUrl}/v1/groups/${numberPath}`,
+            method: 'GET',
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 30000,
+          });
+          const groups = (groupsRes as any)?.data || [];
+          if (!Array.isArray(groups)) {
+            throw new Error(`Groups list response is not an array`);
+          }
+          
+          // Find the group by ID (try both id and internal_id formats)
+          const group = groups.find((g: any) => {
+            const gId = g.id || (g.internal_id ? `group.${g.internal_id}` : null);
+            return gId === groupId || g.id === groupId || g.internal_id === groupId;
+          });
+          
+          if (!group) {
+            res.statusCode = 404;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: `Group with id "${groupId}" not found` }));
+            return;
+          }
+          
+          // Extract members - they might be in different fields
+          const members = group.members || group.member || group.participants || [];
+          const memberNumbers = Array.isArray(members)
+            ? members.map((m: any) => {
+                // Handle different member formats
+                if (typeof m === 'string') return m;
+                return m.number || m.phoneNumber || m.phone_number || m;
+              })
+            : [];
+          
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({
+            groupId,
+            groupName: group.name || '(unnamed)',
+            members: memberNumbers.filter((n: any) => n && typeof n === 'string'),
+            rawGroup: group, // Include full group object for debugging
+          }));
+        } catch (err: any) {
+          console.error('[group-members] Error:', err);
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({
+            error: err?.message || 'Failed to get group members',
+            details: err?.response?.data || err?.stack?.substring(0, 500),
+          }));
         }
         return;
       }
