@@ -330,6 +330,8 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
         }
         setStatus('Subscriber stored.');
         setSelectedGroupName('');
+        setSignalToken('');
+        setNotificationType(null);
         loadSubscribers();
       } else {
         setStatus('Stored locally (no Firebase config).');
