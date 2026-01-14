@@ -47,6 +47,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
   const [gameInfo, setGameInfo] = useState<GameInfo | null>(null);
   const [lockedGameId, setLockedGameId] = useState<string | null>(initialGameId || null);
   const [signalToken, setSignalToken] = useState('');
+  const [notificationType, setNotificationType] = useState<'dm' | 'group' | null>(null);
   const [notifyMode, setNotifyMode] = useState<NotifyMode>('signal-dm');
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -285,18 +286,21 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
       setStatus('Pick a message style (fun or classic).');
       return;
     }
+    if (!notificationType) {
+      setStatus('Select notification type (DM or Group).');
+      return;
+    }
     setSaving(true);
     setStatus(null);
     try {
       await ensurePatched();
       if (firebaseAvailable && user) {
         const idToken = await getAuth().currentUser?.getIdToken();
-        const trimmed = (signalToken || userPhone).trim();
+        const trimmed = (signalToken || (notificationType === 'dm' ? userPhone : '')).trim();
         if (!trimmed) {
-          throw new Error('Enter a Signal phone or group invite link.');
+          throw new Error(`Enter a ${notificationType === 'dm' ? 'Signal phone number' : 'group ID'}.`);
         }
-        const isGroup = /^group\./i.test(trimmed);
-        const mentions = isGroup
+        const mentions = notificationType === 'group'
           ? mentionsRaw
               .split(/[,\s]+/)
               .map((m) => m.trim())
@@ -309,11 +313,11 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
             ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
           },
           body: JSON.stringify({
-            type: isGroup ? 'group' : 'dm',
+            type: notificationType,
             handle: trimmed, // For groups, this is the groupId
             funEnabled: funChoice === 'fun',
             scope: scopeChoice,
-            ...(isGroup ? { 
+            ...(notificationType === 'group' ? { 
               mentions, 
               groupName: selectedGroupName || undefined,
               groupId: trimmed, // Store groupId directly
@@ -619,17 +623,71 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                     <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Signal notifications</p>
                     <p className="text-lg font-semibold text-zinc-100">DM or group</p>
                     <p className="text-sm text-zinc-400">
-                      Enter your Signal phone for DMs, or paste a Signal group ID (starts with "group."). Use "Load groups" to find group IDs.
+                      Choose notification type, then enter your Signal phone or group ID.
                     </p>
               </div>
             </div>
-            <input
-              value={signalToken}
-              onChange={(e) => setSignalToken(e.target.value)}
-              className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
-                  placeholder="Signal phone (DM) or group ID (e.g., group.abc123...)"
-                />
-                {/^group\./i.test(signalToken.trim()) ? (
+            
+            <div className="space-y-2">
+              <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Notification type</p>
+              <div className="grid sm:grid-cols-2 gap-3">
+                <button
+                  onClick={() => {
+                    setNotificationType('dm');
+                    setSignalToken('');
+                    setSelectedGroupName('');
+                    setMentionsRaw('');
+                  }}
+                  className={`rounded-xl border px-3 py-3 text-left ${
+                    notificationType === 'dm'
+                      ? 'bg-[#13211f] border-[#1f3c35] text-[#b5f5e4]'
+                      : 'bg-black border-zinc-800 text-zinc-300'
+                  }`}
+                >
+                  <p className="text-sm font-semibold">Direct Message (DM)</p>
+                  <p className="text-xs text-zinc-400">
+                    Send notifications to a phone number
+                  </p>
+                </button>
+                <button
+                  onClick={() => {
+                    setNotificationType('group');
+                    setSignalToken('');
+                    setSelectedGroupName('');
+                    setMentionsRaw('');
+                  }}
+                  className={`rounded-xl border px-3 py-3 text-left ${
+                    notificationType === 'group'
+                      ? 'bg-[#1a1b2f] border-[#2e315a] text-[#c7d0ff]'
+                      : 'bg-black border-zinc-800 text-zinc-300'
+                  }`}
+                >
+                  <p className="text-sm font-semibold">Group Chat</p>
+                  <p className="text-xs text-zinc-400">
+                    Send notifications to a Signal group
+                  </p>
+                </button>
+              </div>
+            </div>
+
+            {notificationType && (
+              <>
+                <div className="space-y-2">
+                  <label className="text-xs uppercase tracking-[0.2em] text-zinc-400">
+                    {notificationType === 'dm' ? 'Signal phone number' : 'Group ID'}
+                  </label>
+                  <input
+                    value={signalToken}
+                    onChange={(e) => setSignalToken(e.target.value)}
+                    className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
+                    placeholder={notificationType === 'dm' 
+                      ? 'Your Signal phone number (e.g., +15551234567)'
+                      : 'Group ID (e.g., group.CjQKICLkMKbor17qZpL...)'
+                    }
+                  />
+                </div>
+                
+                {notificationType === 'group' && (
                   <>
                     <div className="space-y-2">
                       <label className="text-xs uppercase tracking-[0.2em] text-zinc-400">
@@ -759,8 +817,9 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                         comma or space separated.
                       </p>
                     </div>
-                  </>
-                ) : null}
+                )}
+              </>
+            )}
                 <div className="flex gap-2 items-start">
               <button
                 onClick={saveSignalToken}
