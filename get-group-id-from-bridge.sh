@@ -21,7 +21,7 @@ if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
 fi
 
 GROUPS=$(echo "$RESPONSE" | jq '.groups // []')
-COUNT=$(echo "$GROUPS" | jq 'length')
+COUNT=$(echo "$RESPONSE" | jq '.groups // [] | length')
 
 if [ "$COUNT" -eq 0 ]; then
   echo "No groups found. This could mean:"
