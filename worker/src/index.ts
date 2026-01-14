@@ -236,6 +236,13 @@ async function buildMessage(gameId: string, meta: NextTurnMeta): Promise<RenderP
   return { text: parts.join(' ') };
 }
 
+// Track recent NextTurn events to prevent duplicate processing
+const recentNextTurns = new Map<string, number>(); // key: `${gameId}-${day}-${playerId}`, value: timestamp
+const NEXT_TURN_DEDUP_WINDOW_MS = 5000; // Ignore duplicate NextTurn events within 5 seconds
+
+// Track pending send requests for cancellation
+const pendingSends = new Map<string, AbortController>(); // key: `${gameId}-${subscriber.handle}`, value: AbortController
+
 function startSocket(data: PatchData) {
   const url = buildAwbwSocketUrl(data.gameId);
   console.log(`Connecting to ${url} for patch ${data.patchId} with ${data.subscribers?.length || 0} subscribers`);
@@ -270,13 +277,32 @@ function startSocket(data: PatchData) {
           console.log(`NextTurn received for game ${data.gameId} but no subscribers configured`);
           return;
         }
-        console.log(`Processing NextTurn for game ${data.gameId}, subscribers: ${data.subscribers.length}`);
         const next = parsed?.NextTurn || parsed?.nextTurn || parsed || {};
         console.log(`NextTurn payload: ${JSON.stringify(next)}`);
         
         // Extract player info from NextTurn - try different field names
         const currentPlayerName = next.playerName || next.player_name || next.player || next.username || next.name;
         const currentPlayerId = next.playerId || next.player_id || next.playerId || next.id;
+        const day = next.day;
+        
+        // Deduplication: Check if we've seen this exact NextTurn recently
+        const dedupKey = `${data.gameId}-${day}-${currentPlayerId}`;
+        const now = Date.now();
+        const lastSeen = recentNextTurns.get(dedupKey);
+        if (lastSeen && (now - lastSeen) < NEXT_TURN_DEDUP_WINDOW_MS) {
+          console.log(`Skipping duplicate NextTurn for game ${data.gameId}, day ${day}, player ${currentPlayerId} (seen ${now - lastSeen}ms ago)`);
+          return;
+        }
+        recentNextTurns.set(dedupKey, now);
+        
+        // Clean up old dedup entries (older than 1 minute)
+        for (const [key, timestamp] of recentNextTurns.entries()) {
+          if (now - timestamp > 60000) {
+            recentNextTurns.delete(key);
+          }
+        }
+        
+        console.log(`Processing NextTurn for game ${data.gameId}, subscribers: ${data.subscribers.length}`);
         
         const meta: NextTurnMeta = {
           day: next.day,
@@ -326,10 +352,26 @@ function startSocket(data: PatchData) {
               .update({ status: 'sending', sendStartedAt: FieldValue.serverTimestamp() })
               .catch((err) => console.error('Message log send-start update failed', err));
 
+            // Cancel any pending sends for this game/subscriber combination
+            data.subscribers.forEach((sub) => {
+              const pendingKey = `${data.gameId}-${sub.handle}`;
+              const pendingController = pendingSends.get(pendingKey);
+              if (pendingController) {
+                console.log(`Cancelling pending send for ${pendingKey}`);
+                pendingController.abort();
+                pendingSends.delete(pendingKey);
+              }
+            });
+
             Promise.all(
-              data.subscribers.map((sub) =>
-                sendSignal(sub, payload, data.patchId)
+              data.subscribers.map((sub) => {
+                const pendingKey = `${data.gameId}-${sub.handle}`;
+                const abortController = new AbortController();
+                pendingSends.set(pendingKey, abortController);
+                
+                return sendSignal(sub, payload, data.patchId, abortController.signal)
                   .then(() => {
+                    pendingSends.delete(pendingKey);
                     console.log(
                       `Signal ${sub.type === 'group' ? 'group ' : ''}sent to ${
                         sub.handle
@@ -337,10 +379,15 @@ function startSocket(data: PatchData) {
                     );
                   })
                   .catch((err) => {
+                    pendingSends.delete(pendingKey);
+                    if (err.name === 'AbortError') {
+                      console.log(`Send cancelled for ${pendingKey}`);
+                      return; // Don't throw for cancelled requests
+                    }
                     console.error('Signal send failed', err);
                     throw err;
-                  })
-              )
+                  });
+              })
             )
               .then(() =>
                 msgRef.update({
@@ -381,13 +428,18 @@ function startSocket(data: PatchData) {
   });
 }
 
-async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId: string) {
+async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId: string, abortSignal?: AbortSignal) {
   const bridgeUrl = process.env.SIGNAL_CLI_URL;
   const botNumber = process.env.SIGNAL_BOT_NUMBER;
   if (!bridgeUrl) throw new Error('SIGNAL_CLI_URL not set');
   if (!botNumber) throw new Error('SIGNAL_BOT_NUMBER not set');
 
   console.log(`[sendSignal] Sending to ${recipient.type} subscriber: handle=${recipient.handle}, groupId=${recipient.groupId || 'none'}`);
+
+  // Check if already aborted
+  if (abortSignal?.aborted) {
+    throw new Error('Request aborted');
+  }
 
   const client = await getIdTokenClient(bridgeUrl);
 
@@ -462,48 +514,78 @@ async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId
   if (recipient.type === 'group') {
     let groupId: string | undefined = recipient.groupId;
     
+    // Helper to extract group ID from various formats
+    const extractGroupId = (input: string): string => {
+      // If it's a Signal group URL, extract the base64 part after #
+      if (input.includes('signal.group/#')) {
+        const match = input.match(/signal\.group\/#(.+)/);
+        if (match && match[1]) {
+          return `group.${match[1]}`;
+        }
+      }
+      // If it's already in group.xxx format, return as-is
+      if (input.startsWith('group.')) {
+        return input;
+      }
+      // If it's just base64, add the prefix
+      if (!input.includes('/') && !input.includes('#')) {
+        return `group.${input}`;
+      }
+      // Otherwise return as-is
+      return input;
+    };
+    
     // If we already have a groupId stored, use it
     if (groupId) {
       console.log(`Using stored groupId: ${groupId}`);
+      const normalizedGroupId = extractGroupId(groupId);
+      console.log(`[sendSignal] Normalized groupId: ${normalizedGroupId}`);
       
-      // Try the groupId as-is first, but also try without "group." prefix if it has one
-      let groupIdToUse = groupId;
-      if (groupId.startsWith('group.')) {
-        // Try without the prefix - some APIs expect just the base64 part
-        const base64Part = groupId.substring(6); // Remove "group." prefix
-        console.log(`[sendSignal] Also trying without prefix: ${base64Part}`);
-        groupIdToUse = base64Part;
+      // Try without "group." prefix first (just the base64 part) - Signal bridge seems to prefer this
+      let groupIdToTry = normalizedGroupId;
+      if (normalizedGroupId.startsWith('group.')) {
+        groupIdToTry = normalizedGroupId.substring(6);
+        console.log(`[sendSignal] Trying base64 part only: ${groupIdToTry}`);
       }
       
-      const groupPayload = { ...baseData, groupId: groupIdToUse };
+      const groupPayload = { ...baseData, groupId: groupIdToTry };
       console.log(`[sendSignal] Group payload: ${JSON.stringify(groupPayload).substring(0, 500)}`);
       
       try {
+        if (abortSignal?.aborted) throw new Error('Request aborted');
         return await client.request({
           url: `${bridgeUrl}/v2/send`,
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           data: groupPayload,
+          timeout: 10000, // 10 second timeout for sends
+          signal: abortSignal,
         });
       } catch (err: any) {
-        // If it fails and we tried with prefix, try without (or vice versa)
-        if (groupId.startsWith('group.') && groupIdToUse === groupId) {
-          console.log(`[sendSignal] Retrying with base64 part only (no "group." prefix)`);
-          const base64Part = groupId.substring(6);
+        if (abortSignal?.aborted || err.name === 'AbortError') {
+          throw new Error('Request aborted');
+        }
+        // If it fails and we tried without prefix, try with "group." prefix
+        if (groupIdToTry === normalizedGroupId.substring(6)) {
+          if (abortSignal?.aborted) throw new Error('Request aborted');
+          console.log(`[sendSignal] Retrying with "group." prefix: ${normalizedGroupId}`);
           return client.request({
             url: `${bridgeUrl}/v2/send`,
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            data: { ...baseData, groupId: base64Part },
+            data: { ...baseData, groupId: normalizedGroupId },
+            timeout: 10000,
+            signal: abortSignal,
           });
         }
         throw err;
       }
     }
     
-    // If handle is a groupId (starts with "group."), use it directly
-    if (/^group\./i.test(recipient.handle)) {
-      console.log(`Using handle as groupId: ${recipient.handle}`);
+    // If handle is a groupId or URL, extract and use it
+    const handleGroupId = extractGroupId(recipient.handle);
+    if (handleGroupId !== recipient.handle || /^group\./i.test(recipient.handle) || recipient.handle.includes('signal.group')) {
+      console.log(`Using handle as groupId: ${recipient.handle} -> ${handleGroupId}`);
       // Cache it for future use
       try {
         const db = getFirestore();
@@ -511,17 +593,48 @@ async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId
           .collection('patches')
           .doc(patchId)
           .update({
-            subscribers: FieldValue.arrayUnion({ ...recipient, groupId: recipient.handle }),
+            subscribers: FieldValue.arrayUnion({ ...recipient, groupId: handleGroupId }),
           });
       } catch (err) {
         console.error('Failed to cache groupId on patch', err);
       }
-      return client.request({
-        url: `${bridgeUrl}/v2/send`,
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        data: { ...baseData, groupId: recipient.handle },
-      });
+      
+      // Try without "group." prefix first (just the base64 part) - Signal bridge seems to prefer this
+      let groupIdToTry = handleGroupId;
+      if (handleGroupId.startsWith('group.')) {
+        groupIdToTry = handleGroupId.substring(6);
+        console.log(`[sendSignal] Trying base64 part only: ${groupIdToTry}`);
+      }
+      
+      try {
+        if (abortSignal?.aborted) throw new Error('Request aborted');
+        return await client.request({
+          url: `${bridgeUrl}/v2/send`,
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          data: { ...baseData, groupId: groupIdToTry },
+          timeout: 10000, // 10 second timeout for sends
+          signal: abortSignal,
+        });
+      } catch (err: any) {
+        if (abortSignal?.aborted || err.name === 'AbortError') {
+          throw new Error('Request aborted');
+        }
+        // If it fails and we tried without prefix, try with "group." prefix
+        if (groupIdToTry === handleGroupId.substring(6)) {
+          if (abortSignal?.aborted) throw new Error('Request aborted');
+          console.log(`[sendSignal] Retrying with "group." prefix: ${handleGroupId}`);
+          return client.request({
+            url: `${bridgeUrl}/v2/send`,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            data: { ...baseData, groupId: handleGroupId },
+            timeout: 10000,
+            signal: abortSignal,
+          });
+        }
+        throw err;
+      }
     }
     
     // Fallback: Get groupId by name - simple and deterministic
@@ -544,19 +657,25 @@ async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId
       console.error('Failed to cache groupId on patch', err);
     }
 
+    if (abortSignal?.aborted) throw new Error('Request aborted');
     return client.request({
       url: `${bridgeUrl}/v2/send`,
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       data: { ...baseData, groupId },
+      timeout: 10000,
+      signal: abortSignal,
     });
   }
 
+  if (abortSignal?.aborted) throw new Error('Request aborted');
   return client.request({
     url: `${bridgeUrl}/v2/send`,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     data: { ...baseData, recipients: [recipient.handle] },
+    timeout: 10000,
+    signal: abortSignal,
   });
 }
 
