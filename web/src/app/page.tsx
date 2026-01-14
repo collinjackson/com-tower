@@ -819,6 +819,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                         comma or space separated.
                       </p>
                     </div>
+                  </>
                 )}
               </>
             )}
