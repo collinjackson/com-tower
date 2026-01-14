@@ -176,45 +176,75 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
     loadPatchSettings();
   }, [firebaseAvailable, user, gameInfo?.gameId]);
 
-  // Live activity feed (Firestore only; surface errors)
+  // Live activity feed using Firestore real-time subscription
   useEffect(() => {
-    if (!lockedGameId) {
+    if (!lockedGameId || !firebaseAvailable) {
       setActivity([]);
+      setActivityLoading(false);
       return;
     }
     setActivityLoading(true);
     
-    // Use API endpoint instead of direct Firestore to avoid auth issues
-    const fetchActivity = async () => {
-      try {
-        const res = await fetch(`/api/game/${lockedGameId}/activity`);
-        if (res.ok) {
-          const data = await res.json();
-          const rows: ActivityItem[] = (data.messages || []).map((m: any) => ({
-            text: m.text || '',
-            recipient: m.recipient || null,
-            createdAt: m.createdAt || null,
-            imageUrl: m.imageUrl || null,
-            status: m.status || null,
-          }));
+    try {
+      const db = getFirestore();
+      const messagesRef = collection(db, 'messages');
+      const q = query(
+        messagesRef,
+        where('gameId', '==', lockedGameId),
+        orderBy('createdAt', 'desc'),
+        fsLimit(50)
+      );
+      
+      const unsubscribe = onSnapshot(
+        q,
+        (snapshot) => {
+          const rows: ActivityItem[] = snapshot.docs.map((doc) => {
+            const data = doc.data();
+            return {
+              text: data.text || '',
+              recipient: null, // Don't expose recipient in public feed
+              createdAt: data.createdAt?.toDate?.()?.toISOString() || data.createdAt || null,
+              imageUrl: data.imageUrl || null,
+              status: data.status || null,
+            };
+          });
           setActivity(rows);
-        } else {
-          console.error('Activity feed API failed:', res.status, res.statusText);
-          setActivity([]);
+          setActivityLoading(false);
+        },
+        (err) => {
+          console.error('Activity feed subscribe failed', err);
+          setActivityLoading(false);
+          // Fallback to API if subscription fails
+          const fetchActivity = async () => {
+            try {
+              const res = await fetch(`/api/game/${lockedGameId}/activity`);
+              if (res.ok) {
+                const data = await res.json();
+                const rows: ActivityItem[] = (data.messages || []).map((m: any) => ({
+                  text: m.text || '',
+                  recipient: null,
+                  createdAt: m.createdAt || null,
+                  imageUrl: m.imageUrl || null,
+                  status: m.status || null,
+                }));
+                setActivity(rows);
+              }
+            } catch (fetchErr) {
+              console.error('Activity feed API fallback failed:', fetchErr);
+            }
+          };
+          fetchActivity();
         }
-      } catch (err) {
-        console.error('Activity feed fetch failed:', err);
-        setActivity([]);
-      } finally {
-        setActivityLoading(false);
-      }
-    };
-    
-    fetchActivity();
-    // Poll every 5 seconds for updates
-    const interval = setInterval(fetchActivity, 5000);
-    return () => clearInterval(interval);
-  }, [lockedGameId]);
+      );
+      
+      return () => {
+        unsubscribe();
+      };
+    } catch (err) {
+      console.error('Activity feed setup failed:', err);
+      setActivityLoading(false);
+    }
+  }, [lockedGameId, firebaseAvailable]);
 
   const statusLine = useMemo(() => {
     if (!firebaseAvailable) return 'Firestore not configured; using local mock.';
