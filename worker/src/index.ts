@@ -387,6 +387,8 @@ async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId
   if (!bridgeUrl) throw new Error('SIGNAL_CLI_URL not set');
   if (!botNumber) throw new Error('SIGNAL_BOT_NUMBER not set');
 
+  console.log(`[sendSignal] Sending to ${recipient.type} subscriber: handle=${recipient.handle}, groupId=${recipient.groupId || 'none'}`);
+
   const client = await getIdTokenClient(bridgeUrl);
 
   let messageText = payload.text;
@@ -463,12 +465,40 @@ async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId
     // If we already have a groupId stored, use it
     if (groupId) {
       console.log(`Using stored groupId: ${groupId}`);
-      return client.request({
-        url: `${bridgeUrl}/v2/send`,
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        data: { ...baseData, groupId },
-      });
+      
+      // Try the groupId as-is first, but also try without "group." prefix if it has one
+      let groupIdToUse = groupId;
+      if (groupId.startsWith('group.')) {
+        // Try without the prefix - some APIs expect just the base64 part
+        const base64Part = groupId.substring(6); // Remove "group." prefix
+        console.log(`[sendSignal] Also trying without prefix: ${base64Part}`);
+        groupIdToUse = base64Part;
+      }
+      
+      const groupPayload = { ...baseData, groupId: groupIdToUse };
+      console.log(`[sendSignal] Group payload: ${JSON.stringify(groupPayload).substring(0, 500)}`);
+      
+      try {
+        return await client.request({
+          url: `${bridgeUrl}/v2/send`,
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          data: groupPayload,
+        });
+      } catch (err: any) {
+        // If it fails and we tried with prefix, try without (or vice versa)
+        if (groupId.startsWith('group.') && groupIdToUse === groupId) {
+          console.log(`[sendSignal] Retrying with base64 part only (no "group." prefix)`);
+          const base64Part = groupId.substring(6);
+          return client.request({
+            url: `${bridgeUrl}/v2/send`,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            data: { ...baseData, groupId: base64Part },
+          });
+        }
+        throw err;
+      }
     }
     
     // If handle is a groupId (starts with "group."), use it directly
