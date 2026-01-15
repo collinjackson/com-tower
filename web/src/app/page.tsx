@@ -69,6 +69,9 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
   const [groupsLoading, setGroupsLoading] = useState(false);
   const [currentSubscribers, setCurrentSubscribers] = useState<any[]>([]);
   const [subscribersLoading, setSubscribersLoading] = useState(false);
+  const [inviteLink, setInviteLink] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
+  const [inviteLoading, setInviteLoading] = useState(false);
   const router = useRouter();
   const effectiveLockedId = lockedGameId || initialGameId || null;
 
@@ -297,6 +300,40 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
     await lookupGame(gameLink, true);
   };
 
+  const loadInviteLink = async () => {
+    if (!user || !gameInfo?.gameId) {
+      setInviteLink('');
+      setInviteCode('');
+      return;
+    }
+    setInviteLoading(true);
+    try {
+      await ensurePatched();
+      const idToken = await getAuth().currentUser?.getIdToken();
+      const res = await fetch(
+        `/api/patch/${gameInfo.gameId}-${user.uid}/invite`,
+        {
+          headers: {
+            ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+          },
+        }
+      );
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Failed to load invite link');
+      }
+      const data = await res.json();
+      setInviteLink(data.inviteUrl || '');
+      setInviteCode(data.inviteCode || '');
+    } catch (err: any) {
+      setInviteLink('');
+      setInviteCode('');
+      setStatus(err?.message || 'Could not load invite link');
+    } finally {
+      setInviteLoading(false);
+    }
+  };
+
   // Debounced lookup when link matches expected pattern.
   useEffect(() => {
     const pattern = /^https:\/\/awbw\.amarriner\.com\/game\.php\?games_id=\d+$/;
@@ -451,8 +488,11 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
   useEffect(() => {
     if (gameInfo?.gameId && user) {
       loadSubscribers();
+      loadInviteLink();
     } else {
       setCurrentSubscribers([]);
+      setInviteLink('');
+      setInviteCode('');
     }
   }, [gameInfo?.gameId, user]);
 
@@ -648,6 +688,39 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                 Back to list
                   </button>
                 </div>
+            {user && (
+              <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Invite link</p>
+                    <p className="text-sm text-zinc-400">Share with players so they can subscribe without signing in.</p>
+                  </div>
+                  {inviteLoading && <span className="text-[11px] text-zinc-500">Loading…</span>}
+                </div>
+                <div className="flex flex-col sm:flex-row gap-2 items-stretch">
+                  <input
+                    value={inviteLink || 'Invite link unavailable'}
+                    readOnly
+                    className="flex-1 rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm text-zinc-200 focus:outline-none"
+                  />
+                  <button
+                    onClick={async () => {
+                      if (!inviteLink) return;
+                      try {
+                        await navigator.clipboard.writeText(inviteLink);
+                        setStatus('Invite link copied.');
+                      } catch {
+                        setStatus('Copy failed—select and copy manually.');
+                      }
+                    }}
+                    className="px-4 py-3 rounded-xl bg-white text-black font-semibold shadow disabled:opacity-50"
+                    disabled={!inviteLink}
+                  >
+                    Copy link
+                  </button>
+                </div>
+              </section>
+            )}
             {user ? (
               <>
             <div className="flex items-center justify-between">
@@ -859,7 +932,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                     disabled={saving || !(signalToken.trim() || userPhone.trim())}
                 className="flex-1 rounded-xl px-4 py-3 bg-[#152029] border border-[#20415a] text-[#c7e6ff] disabled:opacity-50"
               >
-                    Save notification number/link
+                    Subscribe
               </button>
               {signalToken && (
                 <button
@@ -897,6 +970,18 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                               <span>{sub.scope === 'my-turn' ? 'Only my turn' : 'All turns'}</span>
                               <span>•</span>
                               <span>{sub.funEnabled ? 'Fun mode' : 'Classic'}</span>
+                              {sub.playerName && (
+                                <>
+                                  <span>•</span>
+                                  <span>Player {sub.playerName}</span>
+                                </>
+                              )}
+                              {sub.country && (
+                                <>
+                                  <span>•</span>
+                                  <span className="uppercase">{sub.country}</span>
+                                </>
+                              )}
                               {sub.needsGroupSelection && (
                                 <>
                                   <span>•</span>
