@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { adminAvailable, getAdminDb } from '@/lib/firebase-admin';
 
+const PHONE_REGEX = /^\+[0-9]{10,15}$/;
+
 function normalizePhone(raw: string) {
   const trimmed = raw.trim();
   if (!trimmed) return '';
@@ -50,6 +52,9 @@ export async function POST(
   const phone = normalizePhone(body.phone || '');
   if (!phone) {
     return NextResponse.json({ error: 'Phone required' }, { status: 400 });
+  }
+  if (!PHONE_REGEX.test(phone)) {
+    return NextResponse.json({ error: 'Enter a valid phone number with country code' }, { status: 400 });
   }
 
   try {

@@ -357,6 +357,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
       setStatus('Select notification type (DM or Group).');
       return;
     }
+    const phoneRegex = /^\+[0-9]{10,15}$/;
     setSaving(true);
     setStatus(null);
     try {
@@ -366,6 +367,9 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
         const trimmed = (signalToken || (notificationType === 'dm' ? userPhone : '')).trim();
         if (!trimmed) {
           throw new Error(`Enter a ${notificationType === 'dm' ? 'Signal phone number' : 'group ID'}.`);
+        }
+        if (notificationType === 'dm' && !phoneRegex.test(trimmed)) {
+          throw new Error('Enter a valid Signal number with country code (e.g., +15551234567).');
         }
         const mentions = notificationType === 'group'
           ? mentionsRaw
