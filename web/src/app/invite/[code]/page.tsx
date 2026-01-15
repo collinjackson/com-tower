@@ -1,6 +1,7 @@
 'use client';
 
 import { use, useEffect, useState } from 'react';
+import { parseAndNormalizePhone } from '@/lib/phone';
 
 type InviteInfo = {
   patchId: string;
@@ -71,22 +72,10 @@ export default function InvitePage({ params }: { params: Promise<{ code: string 
     load();
   }, [code]);
 
-  const normalizePhone = (value: string) => {
-    const digits = value.trim();
-    if (!digits) return '';
-    return digits.startsWith('+') ? digits : `+${digits}`;
-  };
-
-  const isValidPhone = (value: string) => /^\+[0-9]{10,15}$/.test(value);
-
   const submit = async () => {
-    const normalized = normalizePhone(phone);
+    const normalized = parseAndNormalizePhone(phone);
     if (!normalized) {
       setStatus('Enter your phone number first.');
-      return;
-    }
-    if (!isValidPhone(normalized)) {
-      setStatus('Enter a valid phone number with country code (e.g., +15551234567).');
       return;
     }
     setPhone(normalized);
