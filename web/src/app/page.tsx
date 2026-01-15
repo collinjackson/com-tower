@@ -1061,9 +1061,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                         }`}
                       >
                         <p className="text-sm font-semibold">Classic</p>
-                        <p className="text-xs text-zinc-400">
-                          Straightforward turn pings, no images.
-                        </p>
+                        <p className="text-xs text-zinc-400">Straightforward turn pings.</p>
                         <div className="mt-2 text-[11px] text-zinc-500 border border-zinc-800 rounded-lg p-2">
                           “Day 12 – You’re up. [Game link]”
                         </div>
@@ -1077,9 +1075,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                         }`}
                       >
                         <p className="text-sm font-semibold">Fun mode</p>
-                        <p className="text-xs text-zinc-400">
-                          AI caption + image with your faction vibe.
-                        </p>
+                        <p className="text-xs text-zinc-400">AI caption with your faction vibe.</p>
                         <div className="mt-2 text-[11px] text-zinc-500 border border-zinc-800 rounded-lg p-2">
                           “Grit’s infantry raises the Com Tower flag under orange skies.”
                         </div>
