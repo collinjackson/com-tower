@@ -77,7 +77,7 @@ export default function InvitePage({ params }: { params: Promise<{ code: string 
     return digits.startsWith('+') ? digits : `+${digits}`;
   };
 
-  const isValidPhone = (value: string) => /^\+[0-9]{7,15}$/.test(value);
+  const isValidPhone = (value: string) => /^\+[0-9]{10,15}$/.test(value);
 
   const submit = async () => {
     const normalized = normalizePhone(phone);
