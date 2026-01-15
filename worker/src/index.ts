@@ -28,6 +28,7 @@ type PatchData = {
 type NextTurnMeta = {
   day?: number;
   playerName?: string;
+  socketPlayerName?: string;
   playerId?: string | number;
   includeImage?: boolean;
   players?: string[];
@@ -207,10 +208,34 @@ async function loadPlayers(gameId: string): Promise<{ players: string[]; countri
   }
 }
 
+// Best-effort scrape of the current player from the game page to validate the socket payload
+async function scrapeCurrentPlayerName(gameId: string): Promise<string | undefined> {
+  try {
+    const res = await fetch(gameLink(gameId));
+    const html = await res.text();
+    // Try multiple patterns we have seen on AWBW pages
+    const patterns = [
+      /currentplayer["']?\s*:\s*["']([^"']+)["']/i, // JS variable
+      /Current\s+Turn[^<]*profile\.php\?username=([^"'>\s]+)/i, // Current Turn: link
+      /profile\.php\?username=([A-Za-z0-9_]+)[^<]{0,30}<'?s\s+turn/i, // "<name>'s turn"
+    ];
+    for (const pat of patterns) {
+      const m = html.match(pat);
+      if (m && m[1]) {
+        return m[1];
+      }
+    }
+  } catch (err) {
+    console.error('Current player scrape failed', err);
+  }
+  return undefined;
+}
+
 async function buildMessage(gameId: string, meta: NextTurnMeta): Promise<RenderPayload> {
   const link = gameLink(gameId);
   const gameName = meta.gameName || `Game ${gameId}`;
   const enableFun = !!meta.funEnabled;
+  const effectivePlayerName = meta.playerName || meta.socketPlayerName;
 
   if (renderUrl) {
     try {
@@ -224,7 +249,7 @@ async function buildMessage(gameId: string, meta: NextTurnMeta): Promise<RenderP
         body: JSON.stringify({
           gameId,
           day: meta.day,
-          playerName: meta.playerName,
+          playerName: effectivePlayerName,
           players: meta.players,
           gameName,
           link,
@@ -314,7 +339,8 @@ function startSocket(data: PatchData) {
         console.log(`NextTurn payload: ${JSON.stringify(next)}`);
         
         // Extract player info from NextTurn - try different field names
-        const currentPlayerName = next.playerName || next.player_name || next.player || next.username || next.name;
+        const socketPlayerName =
+          next.playerName || next.player_name || next.player || next.username || next.name;
         const currentPlayerId = next.playerId || next.player_id || next.playerId || next.id;
         const day = next.day;
         
@@ -335,19 +361,20 @@ function startSocket(data: PatchData) {
           }
         }
         
-        const deliverSubs = (data.subscribers || []).filter((s) =>
-          shouldNotify(s, currentPlayerName)
-        );
-        if (deliverSubs.length === 0) {
-          console.log(`NextTurn for ${data.gameId} but no matching subscribers for ${currentPlayerName || 'unknown player'}`);
+        // Scrape current player name from the page to double-check socket payload
+        const scrapedPlayerNamePromise = scrapeCurrentPlayerName(data.gameId).catch(() => undefined);
+
+        const candidateSubs = data.subscribers || [];
+        if (candidateSubs.length === 0) {
+          console.log(`NextTurn received for game ${data.gameId} but no subscribers configured`);
           return;
         }
 
-        console.log(`Processing NextTurn for game ${data.gameId}, subscribers: ${deliverSubs.length}`);
+        console.log(`Processing NextTurn for game ${data.gameId}, subscribers: ${candidateSubs.length}`);
         
         const meta: NextTurnMeta = {
           day: next.day,
-          playerName: currentPlayerName,
+          socketPlayerName,
           playerId: currentPlayerId,
           includeImage: false, // Temporarily disabled to troubleshoot basic chat sending
         };
@@ -358,18 +385,43 @@ function startSocket(data: PatchData) {
             gameId: data.gameId,
             status: 'processing',
             createdAt: FieldValue.serverTimestamp(),
-            recipients: deliverSubs.map((s) => s.handle),
+            recipients: candidateSubs.map((s) => s.handle),
           })
           .catch((err) => console.error('Pre-log message create failed', err));
 
-            Promise.all([loadPlayers(data.gameId).catch(() => ({ players: [], countries: [] })), loadGameName(data.gameId)])
-          .then(([info, gameName]) => {
+        Promise.all([
+          loadPlayers(data.gameId).catch(() => ({ players: [], countries: [] })),
+          loadGameName(data.gameId),
+          scrapedPlayerNamePromise,
+        ])
+          .then(([info, gameName, scrapedPlayerName]) => {
+            const effectivePlayerName = scrapedPlayerName || socketPlayerName;
+            const deliverSubs = candidateSubs.filter((s) =>
+              shouldNotify(s, effectivePlayerName)
+            );
+            if (deliverSubs.length === 0) {
+              console.log(
+                `NextTurn for ${data.gameId} but no matching subscribers after scrape for ${
+                  effectivePlayerName || socketPlayerName || 'unknown player'
+                }`
+              );
+              return;
+            }
             const baseMeta: NextTurnMeta = {
               ...meta,
               players: info.players,
               countries: info.countries,
               gameName,
+              playerName: effectivePlayerName,
             };
+            msgRef
+              .update({
+                socketPlayerName: socketPlayerName || null,
+                scrapedPlayerName: scrapedPlayerName || null,
+                effectivePlayerName: effectivePlayerName || null,
+                recipients: deliverSubs.map((s) => s.handle),
+              })
+              .catch((err) => console.error('Message log player update failed', err));
             const funSubs = deliverSubs.filter((s) => !!s.funEnabled);
             const classicSubs = deliverSubs.filter((s) => !s.funEnabled);
 
