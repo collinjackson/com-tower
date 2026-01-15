@@ -2,13 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { randomBytes } from 'crypto';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminAvailable, getAdminDb } from '@/lib/firebase-admin';
-
-function normalizePhone(raw: string) {
-  const trimmed = raw.trim();
-  if (!trimmed) return '';
-  if (trimmed.startsWith('+')) return trimmed;
-  return `+${trimmed}`;
-}
+import { parseAndNormalizePhone } from '@/lib/phone';
 
 function generateCode() {
   return String(Math.floor(100000 + Math.random() * 900000));
@@ -50,8 +44,8 @@ export async function POST(
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
-  const phone = normalizePhone(body.phone || '');
-  if (!phone.match(/^\+[0-9]{10,15}$/)) {
+  const phone = parseAndNormalizePhone(body.phone || '');
+  if (!phone) {
     return NextResponse.json({ error: 'Enter a valid phone number with country code' }, { status: 400 });
   }
 

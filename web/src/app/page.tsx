@@ -7,6 +7,7 @@ import {
   signOutFirebase,
   subscribeToAuth,
 } from '@/lib/firebase';
+import { parseAndNormalizePhone } from '@/lib/phone';
 import type { User } from 'firebase/auth';
 import {
   collection,
@@ -357,7 +358,6 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
       setStatus('Select notification type (DM or Group).');
       return;
     }
-    const phoneRegex = /^\+[0-9]{10,15}$/;
     setSaving(true);
     setStatus(null);
     try {
@@ -368,7 +368,9 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
         if (!trimmed) {
           throw new Error(`Enter a ${notificationType === 'dm' ? 'Signal phone number' : 'group ID'}.`);
         }
-        if (notificationType === 'dm' && !phoneRegex.test(trimmed)) {
+        const normalizedHandle =
+          notificationType === 'dm' ? parseAndNormalizePhone(trimmed) : trimmed;
+        if (notificationType === 'dm' && !normalizedHandle) {
           throw new Error('Enter a valid Signal number with country code (e.g., +15551234567).');
         }
         const mentions = notificationType === 'group'
@@ -385,7 +387,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
           },
           body: JSON.stringify({
             type: notificationType,
-            handle: trimmed, // For groups, this is the groupId
+            handle: normalizedHandle || trimmed, // For groups, this is the groupId
             funEnabled: funChoice === 'fun',
             scope: scopeChoice,
             ...(notificationType === 'group' ? { 
