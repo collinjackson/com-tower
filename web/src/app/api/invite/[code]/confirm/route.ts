@@ -1,14 +1,6 @@
 import { NextResponse } from 'next/server';
 import { adminAvailable, getAdminDb } from '@/lib/firebase-admin';
-
-const PHONE_REGEX = /^\+[0-9]{10,15}$/;
-
-function normalizePhone(raw: string) {
-  const trimmed = raw.trim();
-  if (!trimmed) return '';
-  if (trimmed.startsWith('+')) return trimmed;
-  return `+${trimmed}`;
-}
+import { parseAndNormalizePhone } from '@/lib/phone';
 
 async function getPatchByInviteCode(code: string) {
   const db = getAdminDb();
@@ -49,11 +41,8 @@ export async function POST(
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
-  const phone = normalizePhone(body.phone || '');
+  const phone = parseAndNormalizePhone(body.phone || '');
   if (!phone) {
-    return NextResponse.json({ error: 'Phone required' }, { status: 400 });
-  }
-  if (!PHONE_REGEX.test(phone)) {
     return NextResponse.json({ error: 'Enter a valid phone number with country code' }, { status: 400 });
   }
 
@@ -73,7 +62,7 @@ export async function POST(
     const subscribers = Array.isArray(patchData.subscribers) ? patchData.subscribers : [];
 
     const filtered = subscribers.filter(
-      (s) => !(s.type === 'dm' && normalizePhone(s.handle || '') === phone)
+      (s) => !(s.type === 'dm' && parseAndNormalizePhone(s.handle || '') === phone)
     );
 
     if (body.action === 'unsubscribe') {

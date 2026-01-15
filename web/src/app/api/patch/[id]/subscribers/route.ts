@@ -1,5 +1,6 @@
 import { NextResponse, NextRequest } from 'next/server';
 import { getAdminAuth, getAdminDb, adminAvailable } from '@/lib/firebase-admin';
+import { parseAndNormalizePhone } from '@/lib/phone';
 
 export async function POST(
   req: NextRequest,
@@ -63,18 +64,26 @@ export async function POST(
 
     const subscribers = Array.isArray(data.subscribers) ? data.subscribers : [];
     
+    // Normalize DM handles before deduping
+    const normalizedHandle =
+      body.type === 'dm' ? parseAndNormalizePhone(body.handle) : body.handle;
+    if (body.type === 'dm' && !normalizedHandle) {
+      return NextResponse.json({ error: 'Enter a valid phone number with country code' }, { status: 400 });
+    }
+    
     // Check if there's an existing subscriber with the same handle/type to preserve groupId
     const existingSub = subscribers.find(
-      (s) => s.type === body.type && s.handle === body.handle
+      (s) => s.type === body.type && s.handle === normalizedHandle
     );
     const existingGroupId = existingSub?.groupId;
     
     const newSub: any = {
       type: body.type,
-      handle: body.handle,
+      handle: normalizedHandle,
       funEnabled: !!body.funEnabled,
       scope: body.scope === 'my-turn' || body.scope === 'all' ? body.scope : 'all',
     };
+
     
     // Only include mentions if it's a non-empty array (Firestore doesn't allow undefined)
     const filteredMentions = Array.isArray(body.mentions)
@@ -101,6 +110,13 @@ export async function POST(
       // Store player-to-phone mapping if provided
       if (body.playerPhoneMap && typeof body.playerPhoneMap === 'object') {
         newSub.playerPhoneMap = body.playerPhoneMap;
+      }
+      
+      // If we don't have a groupId yet, try to resolve it from the handle/invite link
+      // This is done asynchronously - we save the subscriber first, then resolve in background
+      if (!newSub.groupId && body.handle) {
+        // Mark that we need to resolve the groupId
+        newSub.groupIdPending = true;
       }
     }
     
