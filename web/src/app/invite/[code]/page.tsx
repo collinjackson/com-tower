@@ -73,9 +73,10 @@ export default function InvitePage({ params }: { params: Promise<{ code: string 
   }, [code]);
 
   const submit = async () => {
-    const normalized = parseAndNormalizePhone(phone);
+    const candidate = phone && !phone.trim().startsWith('+') ? `+${phone.trim()}` : phone;
+    const normalized = parseAndNormalizePhone(candidate);
     if (!normalized) {
-      setStatus('Enter your phone number first.');
+      setStatus('Enter a valid Signal number with country code (e.g., +15551234567).');
       return;
     }
     setPhone(normalized);
