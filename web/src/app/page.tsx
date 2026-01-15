@@ -368,8 +368,12 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
         if (!trimmed) {
           throw new Error(`Enter a ${notificationType === 'dm' ? 'Signal phone number' : 'group ID'}.`);
         }
+        const dmCandidate =
+          notificationType === 'dm' && trimmed && !trimmed.startsWith('+')
+            ? `+${trimmed}`
+            : trimmed;
         const normalizedHandle =
-          notificationType === 'dm' ? parseAndNormalizePhone(trimmed) : trimmed;
+          notificationType === 'dm' ? parseAndNormalizePhone(dmCandidate) : trimmed;
         if (notificationType === 'dm' && !normalizedHandle) {
           throw new Error('Enter a valid Signal number with country code (e.g., +15551234567).');
         }
