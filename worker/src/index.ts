@@ -13,6 +13,11 @@ type Subscriber = {
   mentions?: string[];
   // Mapping of AWBW username -> Signal phone number for this subscriber
   playerPhoneMap?: Record<string, string>;
+  scope?: 'my-turn' | 'all';
+  playerName?: string;
+  country?: string;
+  funEnabled?: boolean;
+  lastVerifiedAt?: any;
 };
 type PatchData = {
   gameId: string;
@@ -28,6 +33,7 @@ type NextTurnMeta = {
   players?: string[];
   countries?: string[];
   gameName?: string;
+  funEnabled?: boolean;
 };
 type RenderPayload = {
   text: string;
@@ -43,6 +49,32 @@ const renderUrl = process.env.NOTIFY_RENDER_URL;
 const playersCache = new Map<string, { players: string[]; countries: string[] }>();
 const gameNameCache = new Map<string, string>();
 const MAX_INLINE_IMAGE_BYTES = 1_500_000; // 1.5 MB guard
+
+function shouldNotify(sub: Subscriber, currentPlayerName?: string) {
+  if (!sub) return false;
+  if (sub.scope === 'my-turn') {
+    if (!currentPlayerName) return false;
+    const target = (sub.playerName || '').toString().toLowerCase();
+    return target.length > 0 && target === String(currentPlayerName).toLowerCase();
+  }
+  return true;
+}
+
+function readJsonBody<T>(req: http.IncomingMessage): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+    req.on('end', () => {
+      try {
+        const raw = Buffer.concat(chunks).toString('utf8') || '{}';
+        resolve(JSON.parse(raw));
+      } catch (err) {
+        reject(err);
+      }
+    });
+    req.on('error', (err) => reject(err));
+  });
+}
 
 async function getIdTokenClient(url: string): Promise<IdTokenClient> {
   if (idTokenClients.has(url)) return idTokenClients.get(url)!;
@@ -178,6 +210,7 @@ async function loadPlayers(gameId: string): Promise<{ players: string[]; countri
 async function buildMessage(gameId: string, meta: NextTurnMeta): Promise<RenderPayload> {
   const link = gameLink(gameId);
   const gameName = meta.gameName || `Game ${gameId}`;
+  const enableFun = !!meta.funEnabled;
 
   if (renderUrl) {
     try {
@@ -195,8 +228,8 @@ async function buildMessage(gameId: string, meta: NextTurnMeta): Promise<RenderP
           players: meta.players,
           gameName,
           link,
-          enableFun: false, // Temporarily disabled to troubleshoot basic chat sending
-          includeImage: false, // Temporarily disabled to troubleshoot basic chat sending
+          enableFun,
+          includeImage: false, // Keep images off for now to focus on reliable sends
         }),
       });
       if (res.ok) {
@@ -302,7 +335,15 @@ function startSocket(data: PatchData) {
           }
         }
         
-        console.log(`Processing NextTurn for game ${data.gameId}, subscribers: ${data.subscribers.length}`);
+        const deliverSubs = (data.subscribers || []).filter((s) =>
+          shouldNotify(s, currentPlayerName)
+        );
+        if (deliverSubs.length === 0) {
+          console.log(`NextTurn for ${data.gameId} but no matching subscribers for ${currentPlayerName || 'unknown player'}`);
+          return;
+        }
+
+        console.log(`Processing NextTurn for game ${data.gameId}, subscribers: ${deliverSubs.length}`);
         
         const meta: NextTurnMeta = {
           day: next.day,
@@ -317,91 +358,117 @@ function startSocket(data: PatchData) {
             gameId: data.gameId,
             status: 'processing',
             createdAt: FieldValue.serverTimestamp(),
-            recipients: data.subscribers.map((s) => s.handle),
+            recipients: deliverSubs.map((s) => s.handle),
           })
           .catch((err) => console.error('Pre-log message create failed', err));
 
             Promise.all([loadPlayers(data.gameId).catch(() => ({ players: [], countries: [] })), loadGameName(data.gameId)])
-          .then(([info, gameName]) =>
-            buildMessage(data.gameId, {
+          .then(([info, gameName]) => {
+            const baseMeta: NextTurnMeta = {
               ...meta,
               players: info.players,
               countries: info.countries,
               gameName,
-            })
-          )
-          .then((payload) => {
-            // Add current player name to payload for mention lookup
-            (payload as any).currentPlayerName = meta.playerName;
-            console.log(
-              `Render payload for game ${data.gameId}: textLen=${payload.text.length}, imageData=${
-                payload.imageData ? payload.imageData.length : 0
-              }, imageUrl=${payload.imageUrl ? 'yes' : 'no'}`
-            );
-            msgRef
-              .update({
-                status: 'rendered',
-                text: payload.text,
-                imageUrl: payload.imageUrl || null,
-                imageDataPresent: !!payload.imageData,
-                renderedAt: FieldValue.serverTimestamp(),
-              })
-              .catch((err) => console.error('Message log render update failed', err));
+            };
+            const funSubs = deliverSubs.filter((s) => !!s.funEnabled);
+            const classicSubs = deliverSubs.filter((s) => !s.funEnabled);
 
-            msgRef
-              .update({ status: 'sending', sendStartedAt: FieldValue.serverTimestamp() })
-              .catch((err) => console.error('Message log send-start update failed', err));
-
-            // Cancel any pending sends for this game/subscriber combination
-            data.subscribers.forEach((sub) => {
-              const pendingKey = `${data.gameId}-${sub.handle}`;
-              const pendingController = pendingSends.get(pendingKey);
-              if (pendingController) {
-                console.log(`Cancelling pending send for ${pendingKey}`);
-                pendingController.abort();
-                pendingSends.delete(pendingKey);
-              }
-            });
-
-            Promise.all(
-              data.subscribers.map((sub) => {
-                const pendingKey = `${data.gameId}-${sub.handle}`;
-                const abortController = new AbortController();
-                pendingSends.set(pendingKey, abortController);
-                
-                return sendSignal(sub, payload, data.patchId, abortController.signal)
-                  .then(() => {
-                    pendingSends.delete(pendingKey);
-                    console.log(
-                      `Signal ${sub.type === 'group' ? 'group ' : ''}sent to ${
-                        sub.handle
-                      } for game ${data.gameId} (NextTurn)`
-                    );
-                  })
-                  .catch((err) => {
-                    pendingSends.delete(pendingKey);
-                    if (err.name === 'AbortError') {
-                      console.log(`Send cancelled for ${pendingKey}`);
-                      return; // Don't throw for cancelled requests
-                    }
-                    console.error('Signal send failed', err);
-                    throw err;
-                  });
-              })
-            )
-              .then(() =>
-                msgRef.update({
-                  status: 'sent',
-                  sentAt: FieldValue.serverTimestamp(),
-                })
-              )
-              .catch((err) =>
-                msgRef.update({
-                  status: 'failed',
-                  error: err instanceof Error ? err.message : String(err),
-                  sentAt: FieldValue.serverTimestamp(),
+            const payloadPromises: Array<Promise<[boolean, RenderPayload]>> = [];
+            if (classicSubs.length > 0) {
+              payloadPromises.push(
+                buildMessage(data.gameId, { ...baseMeta, funEnabled: false }).then((payload) => {
+                  (payload as any).currentPlayerName = meta.playerName;
+                  return [false, payload];
                 })
               );
+            }
+            if (funSubs.length > 0) {
+              payloadPromises.push(
+                buildMessage(data.gameId, { ...baseMeta, funEnabled: true }).then((payload) => {
+                  (payload as any).currentPlayerName = meta.playerName;
+                  return [true, payload];
+                })
+              );
+            }
+
+            return Promise.all(payloadPromises).then((entries) => {
+              const payloadMap = new Map<boolean, RenderPayload>(entries);
+              const logPayload = payloadMap.get(false) || payloadMap.get(true);
+              if (!logPayload) {
+                throw new Error('No payload generated for subscribers');
+              }
+              console.log(
+                `Render payload for game ${data.gameId}: textLen=${logPayload.text.length}, imageData=${
+                  logPayload.imageData ? logPayload.imageData.length : 0
+                }, imageUrl=${logPayload.imageUrl ? 'yes' : 'no'}, variants=${entries.length}`
+              );
+              msgRef
+                .update({
+                  status: 'rendered',
+                  text: logPayload.text,
+                  imageUrl: logPayload.imageUrl || null,
+                  imageDataPresent: !!logPayload.imageData,
+                  renderedAt: FieldValue.serverTimestamp(),
+                })
+                .catch((err) => console.error('Message log render update failed', err));
+
+              msgRef
+                .update({ status: 'sending', sendStartedAt: FieldValue.serverTimestamp() })
+                .catch((err) => console.error('Message log send-start update failed', err));
+
+              // Cancel any pending sends for this game/subscriber combination
+              deliverSubs.forEach((sub) => {
+                const pendingKey = `${data.gameId}-${sub.handle}`;
+                const pendingController = pendingSends.get(pendingKey);
+                if (pendingController) {
+                  console.log(`Cancelling pending send for ${pendingKey}`);
+                  pendingController.abort();
+                  pendingSends.delete(pendingKey);
+                }
+              });
+
+              Promise.all(
+                deliverSubs.map((sub) => {
+                  const pendingKey = `${data.gameId}-${sub.handle}`;
+                  const abortController = new AbortController();
+                  pendingSends.set(pendingKey, abortController);
+
+                  const payload = payloadMap.get(!!sub.funEnabled) || logPayload;
+
+                  return sendSignal(sub, payload, data.patchId, abortController.signal)
+                    .then(() => {
+                      pendingSends.delete(pendingKey);
+                      console.log(
+                        `Signal ${sub.type === 'group' ? 'group ' : ''}sent to ${
+                          sub.handle
+                        } for game ${data.gameId} (NextTurn, fun=${!!sub.funEnabled})`
+                      );
+                    })
+                    .catch((err) => {
+                      pendingSends.delete(pendingKey);
+                      if (err.name === 'AbortError') {
+                        console.log(`Send cancelled for ${pendingKey}`);
+                        return; // Don't throw for cancelled requests
+                      }
+                      console.error('Signal send failed', err);
+                      throw err;
+                    });
+                })
+              )
+                .then(() =>
+                  msgRef.update({
+                    status: 'sent',
+                    sentAt: FieldValue.serverTimestamp(),
+                  })
+                )
+                .catch((err) =>
+                  msgRef.update({
+                    status: 'failed',
+                    error: err instanceof Error ? err.message : String(err),
+                    sentAt: FieldValue.serverTimestamp(),
+                  })
+                );
+            });
           })
           .catch((err) => {
             console.error('Message build failed', err);
@@ -434,7 +501,15 @@ async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId
   if (!bridgeUrl) throw new Error('SIGNAL_CLI_URL not set');
   if (!botNumber) throw new Error('SIGNAL_BOT_NUMBER not set');
 
-  console.log(`[sendSignal] Sending to ${recipient.type} subscriber: handle=${recipient.handle}, groupId=${recipient.groupId || 'none'}`);
+  // Normalize DM handle to include leading '+' if missing (bridge rejects bare numbers)
+  const normalizedHandle =
+    recipient.type === 'dm' && /^\d+$/.test(recipient.handle)
+      ? `+${recipient.handle}`
+      : recipient.handle;
+
+  console.log(
+    `[sendSignal] Sending to ${recipient.type} subscriber: handle=${normalizedHandle}, groupId=${recipient.groupId || 'none'}`
+  );
 
   // Check if already aborted
   if (abortSignal?.aborted) {
@@ -512,171 +587,108 @@ async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId
   // }
 
   if (recipient.type === 'group') {
-    let groupId: string | undefined = recipient.groupId;
+    // Use the cached groupId if available, otherwise use handle
+    // The groupId should be resolved when the subscriber is added (via web API)
+    const groupId = recipient.groupId || recipient.handle;
     
-    // Helper to extract group ID from various formats
-    const extractGroupId = (input: string): string => {
-      // If it's a Signal group URL, extract the base64 part after #
-      if (input.includes('signal.group/#')) {
-        const match = input.match(/signal\.group\/#(.+)/);
-        if (match && match[1]) {
-          return `group.${match[1]}`;
-        }
-      }
-      // If it's already in group.xxx format, return as-is
-      if (input.startsWith('group.')) {
-        return input;
-      }
-      // If it's just base64, add the prefix
-      if (!input.includes('/') && !input.includes('#')) {
-        return `group.${input}`;
-      }
-      // Otherwise return as-is
-      return input;
-    };
-    
-    // If we already have a groupId stored, use it
-    if (groupId) {
-      console.log(`Using stored groupId: ${groupId}`);
-      const normalizedGroupId = extractGroupId(groupId);
-      console.log(`[sendSignal] Normalized groupId: ${normalizedGroupId}`);
-      
-      // Try without "group." prefix first (just the base64 part) - Signal bridge seems to prefer this
-      let groupIdToTry = normalizedGroupId;
-      if (normalizedGroupId.startsWith('group.')) {
-        groupIdToTry = normalizedGroupId.substring(6);
-        console.log(`[sendSignal] Trying base64 part only: ${groupIdToTry}`);
-      }
-      
-      const groupPayload = { ...baseData, groupId: groupIdToTry };
-      console.log(`[sendSignal] Group payload: ${JSON.stringify(groupPayload).substring(0, 500)}`);
-      
-      try {
-        if (abortSignal?.aborted) throw new Error('Request aborted');
-        return await client.request({
-          url: `${bridgeUrl}/v2/send`,
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          data: groupPayload,
-          timeout: 10000, // 10 second timeout for sends
-          signal: abortSignal,
-        });
-      } catch (err: any) {
-        if (abortSignal?.aborted || err.name === 'AbortError') {
-          throw new Error('Request aborted');
-        }
-        // If it fails and we tried without prefix, try with "group." prefix
-        if (groupIdToTry === normalizedGroupId.substring(6)) {
-          if (abortSignal?.aborted) throw new Error('Request aborted');
-          console.log(`[sendSignal] Retrying with "group." prefix: ${normalizedGroupId}`);
-          return client.request({
-            url: `${bridgeUrl}/v2/send`,
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            data: { ...baseData, groupId: normalizedGroupId },
-            timeout: 10000,
-            signal: abortSignal,
-          });
-        }
-        throw err;
-      }
+    if (!groupId) {
+      throw new Error('Group subscriber missing groupId. Please resolve the group ID first.');
     }
     
-    // If handle is a groupId or URL, extract and use it
-    const handleGroupId = extractGroupId(recipient.handle);
-    if (handleGroupId !== recipient.handle || /^group\./i.test(recipient.handle) || recipient.handle.includes('signal.group')) {
-      console.log(`Using handle as groupId: ${recipient.handle} -> ${handleGroupId}`);
-      // Cache it for future use
-      try {
-        const db = getFirestore();
-        await db
-          .collection('patches')
-          .doc(patchId)
-          .update({
-            subscribers: FieldValue.arrayUnion({ ...recipient, groupId: handleGroupId }),
-          });
-      } catch (err) {
-        console.error('Failed to cache groupId on patch', err);
-      }
-      
-      // Try without "group." prefix first (just the base64 part) - Signal bridge seems to prefer this
-      let groupIdToTry = handleGroupId;
-      if (handleGroupId.startsWith('group.')) {
-        groupIdToTry = handleGroupId.substring(6);
-        console.log(`[sendSignal] Trying base64 part only: ${groupIdToTry}`);
-      }
-      
-      try {
-        if (abortSignal?.aborted) throw new Error('Request aborted');
-        return await client.request({
-          url: `${bridgeUrl}/v2/send`,
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          data: { ...baseData, groupId: groupIdToTry },
-          timeout: 10000, // 10 second timeout for sends
-          signal: abortSignal,
-        });
-      } catch (err: any) {
-        if (abortSignal?.aborted || err.name === 'AbortError') {
-          throw new Error('Request aborted');
-        }
-        // If it fails and we tried without prefix, try with "group." prefix
-        if (groupIdToTry === handleGroupId.substring(6)) {
-          if (abortSignal?.aborted) throw new Error('Request aborted');
-          console.log(`[sendSignal] Retrying with "group." prefix: ${handleGroupId}`);
-          return client.request({
-            url: `${bridgeUrl}/v2/send`,
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            data: { ...baseData, groupId: handleGroupId },
-            timeout: 10000,
-            signal: abortSignal,
-          });
-        }
-        throw err;
-      }
-    }
+    console.log(`[sendSignal] Using cached groupId: ${groupId.substring(0, 50)}...`);
     
-    // Fallback: Get groupId by name - simple and deterministic
-    if (!recipient.groupName) {
-      throw new Error('Group ID or group name is required. Please provide a group ID (starts with "group.") or select the group by name.');
-    }
-    
-    groupId = await getGroupIdByName(recipient.groupName);
-    
-    // Cache the groupId on the patch to avoid re-lookup
-    try {
-      const db = getFirestore();
-      await db
-        .collection('patches')
-        .doc(patchId)
-        .update({
-          subscribers: FieldValue.arrayUnion({ ...recipient, groupId }),
-        });
-    } catch (err) {
-      console.error('Failed to cache groupId on patch', err);
-    }
+    // signal-cli-rest-api expects "groupId" and also requires a non-empty recipients array.
+    // We'll use the clean base64 group id and set recipients to the botNumber to satisfy validation.
+    console.log(`[sendSignal] Group payload base: ${JSON.stringify(baseData).substring(0, 500)}`);
+    const cleanGroupId = groupId.startsWith('group.') ? groupId.substring(6) : groupId;
 
+    // Bridge insists on a non-empty recipients array. Use mention numbers if present; otherwise bot number.
+    const recipientsForSend =
+      mentionNumbers.length > 0 ? mentionNumbers : [botNumber];
+
+    const sendWithId = async (gid: string) => {
+      if (abortSignal?.aborted) throw new Error('Request aborted');
+      return client.request({
+        url: `${bridgeUrl}/v2/send`,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        data: { ...baseData, groupId: gid, recipients: recipientsForSend },
+        timeout: 30000,
+        signal: abortSignal,
+      });
+    };
+    const idsToTry = cleanGroupId === groupId ? [cleanGroupId] : [cleanGroupId, groupId];
+
+    try {
+      for (const gid of idsToTry) {
+        try {
+          console.log(`[sendSignal] Attempting group send with id=${gid.substring(0, 60)}...`);
+          return await sendWithId(gid);
+        } catch (err: any) {
+          const isTimeout = err?.message?.toString().includes('timeout');
+          if (abortSignal?.aborted || err.name === 'AbortError') {
+            throw new Error('Request aborted');
+          }
+          if (isTimeout) {
+            console.warn('[sendSignal] Group send timeout, retrying once...');
+            return await sendWithId(gid);
+          }
+          // If this was the last ID to try, rethrow; otherwise continue to next.
+          if (gid === idsToTry[idsToTry.length - 1]) {
+            // Log detailed bridge response to diagnose
+            const status = err?.response?.status;
+            const statusText = err?.response?.statusText;
+            const data = err?.response?.data;
+            console.error('[sendSignal] Group send failed', {
+              groupId: gid,
+              status,
+              statusText,
+              data: typeof data === 'string' ? data : JSON.stringify(data || {}),
+              message: err?.message,
+              raw: err?.response || err?.toString?.() || String(err),
+            });
+            throw err;
+          } else {
+            console.warn(`[sendSignal] Group send failed with id=${gid.substring(0, 60)}..., trying next id`);
+          }
+        }
+      }
+      // Should not reach here
+      throw new Error('Group send failed for all attempted IDs');
+    } catch (err: any) {
+      throw err;
+    }
+  }
+
+  if (abortSignal?.aborted) throw new Error('Request aborted');
+  const doSendDm = async () => {
     if (abortSignal?.aborted) throw new Error('Request aborted');
+    const dmRecipient =
+      normalizedHandle.startsWith('+') || normalizedHandle.startsWith('group.')
+        ? normalizedHandle
+        : `+${normalizedHandle}`;
     return client.request({
       url: `${bridgeUrl}/v2/send`,
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      data: { ...baseData, groupId },
-      timeout: 10000,
+      data: { ...baseData, recipients: [dmRecipient] },
+      timeout: 30000,
       signal: abortSignal,
     });
+  };
+  try {
+    return await doSendDm();
+  } catch (err: any) {
+    const isTimeout = err?.message?.toString().includes('timeout');
+    if (abortSignal?.aborted || err.name === 'AbortError') {
+      throw new Error('Request aborted');
+    }
+    if (isTimeout) {
+      console.warn('[sendSignal] DM send timeout, retrying once...');
+      return await doSendDm();
+    }
+    throw err;
   }
-
-  if (abortSignal?.aborted) throw new Error('Request aborted');
-  return client.request({
-    url: `${bridgeUrl}/v2/send`,
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    data: { ...baseData, recipients: [recipient.handle] },
-    timeout: 10000,
-    signal: abortSignal,
-  });
 }
 
 
@@ -710,6 +722,47 @@ async function main() {
   const server = http.createServer(async (_, res) => {
     try {
       const url = new URL(_.url || '/', 'http://localhost');
+      if (url.pathname === '/send-verification' && _.method === 'POST') {
+        const sharedSecret = process.env.INVITE_SHARED_SECRET;
+        if (sharedSecret) {
+          const headerSecret = _.headers['x-shared-secret'];
+          if (headerSecret !== sharedSecret) {
+            res.statusCode = 401;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'Unauthorized' }));
+            return;
+          }
+        }
+        try {
+          const body = await readJsonBody<{ phone?: string; message?: string }>(_ as any);
+          const phone = (body.phone || '').trim();
+          const message = (body.message || '').trim();
+          if (!phone || !message) {
+            res.statusCode = 400;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'phone and message required' }));
+            return;
+          }
+          await sendSignal(
+            { type: 'dm', handle: phone },
+            { text: message },
+            'verification'
+          );
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err: any) {
+          console.error('[send-verification] error', err);
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(
+            JSON.stringify({
+              error: err?.message || 'Failed to send verification',
+            })
+          );
+        }
+        return;
+      }
       if (url.pathname === '/list-groups') {
         const bridgeUrl = process.env.SIGNAL_CLI_URL;
         const botNumber = process.env.SIGNAL_BOT_NUMBER;
@@ -774,6 +827,16 @@ async function main() {
           console.log(`[list-groups] Final groups count: ${groups.length}`);
           if (groups.length > 0) {
             console.log(`[list-groups] First group:`, JSON.stringify(groups[0], null, 2).substring(0, 500));
+            // Log a concise summary of up to 5 groups for debugging
+            const summary = groups.slice(0, 5).map((g: any) => ({
+              name: g.name || '(unnamed)',
+              id: g.id || null,
+              internal_id: g.internal_id || null,
+            }));
+            console.log(`[list-groups] Summary (up to 5):`, JSON.stringify(summary));
+            if (groups.length > 5) {
+              console.log(`[list-groups] ...and ${groups.length - 5} more`);
+            }
           } else {
             console.log(`[list-groups] No groups found. Full response keys:`, Object.keys(groupsRes || {}));
             if (groupsRes?.data) {
