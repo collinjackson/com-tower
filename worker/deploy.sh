@@ -1,21 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Simple Cloud Run deploy helper for the worker.
-# Usage:
-#   export FIREBASE_PROJECT_ID=...
-#   export FIREBASE_CLIENT_EMAIL=...
-#   export FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n... \n-----END PRIVATE KEY-----\n"
-#   export SIGNAL_CLI_URL=https://signal-bridge-xyz-uc.a.run.app
-#   export SIGNAL_BOT_NUMBER=+15551234567
+# Cloud Run deploy helper for the worker.
+# Supports reading secrets from Secret Manager. If SECRET_* are set, they win.
+# Otherwise falls back to plain env values.
+#
+# Quick use (secrets recommended):
+#   export PROJECT_ID=com-tower
+#   export REGION=us-central1
+#   export SECRET_FIREBASE_PRIVATE_KEY=firebase-private-key
+#   export SECRET_FIREBASE_CLIENT_EMAIL=firebase-client-email
+#   export SECRET_FIREBASE_PROJECT_ID=firebase-project-id
+#   export SECRET_SIGNAL_CLI_URL=signal-cli-url
+#   export SECRET_SIGNAL_BOT_NUMBER=signal-bot-number
 #   # Optional:
-#   # export NOTIFY_RENDER_URL=https://com-tower.vercel.app/api/notify/render
-#   # export AWBW_WS_BASE=wss://awbw.amarriner.com
-#   # export RENDER_BYPASS_TOKEN=...
+#   # export SECRET_NOTIFY_RENDER_URL=notify-render-url
+#   # export SECRET_RENDER_BYPASS_TOKEN=render-bypass-token
+#   # export SECRET_AWBW_WS_BASE=awbw-ws-base
 #   ./deploy.sh
 #
-# You can override defaults:
-#   PROJECT_ID, REGION, SERVICE_NAME, MAX_INSTANCES, MIN_INSTANCES
+# If you don’t want secrets, set the non-secret envs instead:
+#   FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY, SIGNAL_CLI_URL, SIGNAL_BOT_NUMBER
+#   (and optionally NOTIFY_RENDER_URL, AWBW_WS_BASE, RENDER_BYPASS_TOKEN)
+#
+# Override defaults: PROJECT_ID, REGION, SERVICE_NAME, MAX_INSTANCES, MIN_INSTANCES
 
 PROJECT_ID="${PROJECT_ID:-com-tower}"
 REGION="${REGION:-us-central1}"
@@ -24,13 +32,48 @@ MIN_INSTANCES="${MIN_INSTANCES:-1}"
 MAX_INSTANCES="${MAX_INSTANCES:-5}"
 RENDER_URL="${NOTIFY_RENDER_URL:-https://com-tower.vercel.app/api/notify/render}"
 
-missing=0
-for var in FIREBASE_PROJECT_ID FIREBASE_CLIENT_EMAIL FIREBASE_PRIVATE_KEY SIGNAL_CLI_URL SIGNAL_BOT_NUMBER; do
-  if [[ -z "${!var:-}" ]]; then
-    echo "Missing required env: $var" >&2
+# Helper to emit either --set-secrets or --set-env-vars flags.
+flags=()
+
+add_secret_or_env() {
+  local var="$1"
+  local secret_var="SECRET_${var}"
+  if [[ -n "${!secret_var:-}" ]]; then
+    flags+=(--set-secrets "${var}=${!secret_var}:latest")
+  elif [[ -n "${!var:-}" ]]; then
+    flags+=(--set-env-vars "${var}=${!var}")
+  else
+    echo "Missing required config: set $var or $secret_var" >&2
     missing=1
   fi
-done
+}
+
+missing=0
+add_secret_or_env "FIREBASE_PROJECT_ID"
+add_secret_or_env "FIREBASE_CLIENT_EMAIL"
+add_secret_or_env "FIREBASE_PRIVATE_KEY"
+add_secret_or_env "SIGNAL_CLI_URL"
+add_secret_or_env "SIGNAL_BOT_NUMBER"
+
+# Optional configs
+if [[ -n "${SECRET_NOTIFY_RENDER_URL:-}" ]]; then
+  flags+=(--set-secrets "NOTIFY_RENDER_URL=${SECRET_NOTIFY_RENDER_URL}:latest")
+else
+  flags+=(--set-env-vars "NOTIFY_RENDER_URL=${RENDER_URL}")
+fi
+
+if [[ -n "${SECRET_RENDER_BYPASS_TOKEN:-}" ]]; then
+  flags+=(--set-secrets "RENDER_BYPASS_TOKEN=${SECRET_RENDER_BYPASS_TOKEN}:latest")
+elif [[ -n "${RENDER_BYPASS_TOKEN:-}" ]]; then
+  flags+=(--set-env-vars "RENDER_BYPASS_TOKEN=${RENDER_BYPASS_TOKEN}")
+fi
+
+if [[ -n "${SECRET_AWBW_WS_BASE:-}" ]]; then
+  flags+=(--set-secrets "AWBW_WS_BASE=${SECRET_AWBW_WS_BASE}:latest")
+else
+  flags+=(--set-env-vars "AWBW_WS_BASE=${AWBW_WS_BASE:-wss://awbw.amarriner.com}")
+fi
+
 if [[ $missing -eq 1 ]]; then
   exit 1
 fi
@@ -48,14 +91,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --min-instances="$MIN_INSTANCES" \
   --max-instances="$MAX_INSTANCES" \
   --allow-unauthenticated \
-  --set-env-vars "FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}" \
-  --set-env-vars "FIREBASE_CLIENT_EMAIL=${FIREBASE_CLIENT_EMAIL}" \
-  --set-env-vars "FIREBASE_PRIVATE_KEY=${FIREBASE_PRIVATE_KEY}" \
-  --set-env-vars "NOTIFY_RENDER_URL=${RENDER_URL}" \
-  --set-env-vars "SIGNAL_CLI_URL=${SIGNAL_CLI_URL}" \
-  --set-env-vars "SIGNAL_BOT_NUMBER=${SIGNAL_BOT_NUMBER}" \
-  --set-env-vars "AWBW_WS_BASE=${AWBW_WS_BASE:-wss://awbw.amarriner.com}" \
-  --set-env-vars "RENDER_BYPASS_TOKEN=${RENDER_BYPASS_TOKEN:-}" \
+  "${flags[@]}" \
   "$@"
 
 echo "Done. Confirm with: gcloud run services describe $SERVICE_NAME --project $PROJECT_ID --region $REGION"
