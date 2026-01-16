@@ -211,13 +211,14 @@ async function loadPlayers(gameId: string): Promise<{ players: string[]; countri
 // Best-effort scrape of the current player from the game page to validate the socket payload
 async function scrapeCurrentPlayerName(gameId: string): Promise<string | undefined> {
   try {
-    const res = await fetch(gameLink(gameId));
+    const res = await fetch(gameLink(gameId), { cache: 'no-store' as any });
     const html = await res.text();
     // Try multiple patterns we have seen on AWBW pages
     const patterns = [
-      /currentplayer["']?\s*:\s*["']([^"']+)["']/i, // JS variable
+      /currentplayer["']?\s*[:=]\s*["']([^"']+)["']/i, // JS variable
+      /currentPlayer["']?\s*[:=]\s*["']([^"']+)["']/i, // camelCase variant
       /Current\s+Turn[^<]*profile\.php\?username=([^"'>\s]+)/i, // Current Turn: link
-      /profile\.php\?username=([A-Za-z0-9_]+)[^<]{0,30}<'?s\s+turn/i, // "<name>'s turn"
+      /profile\.php\?username=([A-Za-z0-9_]+)[^<]{0,60}(?:['’]|&rsquo;|&#8217;|&#039;|&apos;)s\s+turn/i, // "<name>'s turn" with straight/curly/entity apostrophes
     ];
     for (const pat of patterns) {
       const m = html.match(pat);
@@ -395,6 +396,11 @@ function startSocket(data: PatchData) {
           scrapedPlayerNamePromise,
         ])
           .then(([info, gameName, scrapedPlayerName]) => {
+            if (scrapedPlayerName && socketPlayerName && scrapedPlayerName !== socketPlayerName) {
+              console.log(
+                `Player mismatch for game ${data.gameId}: socket=${socketPlayerName}, scraped=${scrapedPlayerName}`
+              );
+            }
             const effectivePlayerName = scrapedPlayerName || socketPlayerName;
             const deliverSubs = candidateSubs.filter((s) =>
               shouldNotify(s, effectivePlayerName)
