@@ -39,6 +39,11 @@ export async function GET(_: Request, context: { params: Promise<{ id: string }>
     const messages = snap.docs.map((d) => {
       const data = d.data() as {
         text?: string;
+        textClassic?: string | null;
+        textFun?: string | null;
+        recipientsClassic?: string[];
+        recipientsFun?: string[];
+        deliveries?: Array<{ handle: string; variant: string; status: string; error?: string }>;
         recipient?: string;
         createdAt?: { toDate: () => Date };
         imageUrl?: string;
@@ -46,6 +51,11 @@ export async function GET(_: Request, context: { params: Promise<{ id: string }>
       };
       return {
         text: data.text || '',
+        textClassic: data.textClassic || null,
+        textFun: data.textFun || null,
+        recipientsClassic: data.recipientsClassic || [],
+        recipientsFun: data.recipientsFun || [],
+        deliveries: data.deliveries || [],
         recipient: data.recipient || null,
         createdAt: data.createdAt ? data.createdAt.toDate().toISOString() : null,
         imageUrl: data.imageUrl || null,

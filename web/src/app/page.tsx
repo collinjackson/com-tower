@@ -36,6 +36,11 @@ type GameInfo = {
 type NotifyMode = 'none' | 'signal-dm';
 type ActivityItem = {
   text: string;
+  textClassic?: string | null;
+  textFun?: string | null;
+  recipientsClassic?: string[];
+  recipientsFun?: string[];
+  deliveries?: Array<{ handle: string; variant: string; status: string; error?: string }>;
   recipient: string | null;
   createdAt: string | null;
   imageUrl?: string | null;
@@ -206,6 +211,11 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
             const data = doc.data();
             return {
               text: data.text || '',
+              textClassic: data.textClassic || null,
+              textFun: data.textFun || null,
+              recipientsClassic: data.recipientsClassic || [],
+              recipientsFun: data.recipientsFun || [],
+              deliveries: data.deliveries || [],
               recipient: null, // Don't expose recipient in public feed
               createdAt: data.createdAt?.toDate?.()?.toISOString() || data.createdAt || null,
               imageUrl: data.imageUrl || null,
@@ -226,6 +236,11 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                 const data = await res.json();
                 const rows: ActivityItem[] = (data.messages || []).map((m: any) => ({
                   text: m.text || '',
+                  textClassic: m.textClassic || null,
+                  textFun: m.textFun || null,
+                  recipientsClassic: m.recipientsClassic || [],
+                  recipientsFun: m.recipientsFun || [],
+                  deliveries: m.deliveries || [],
                   recipient: null,
                   createdAt: m.createdAt || null,
                   imageUrl: m.imageUrl || null,
@@ -791,10 +806,10 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                   <label className="text-xs uppercase tracking-[0.2em] text-zinc-400">
                     {notificationType === 'dm' ? 'Signal phone number' : 'Group ID'}
                   </label>
-                  <input
-                    value={signalToken}
-                    onChange={(e) => setSignalToken(e.target.value)}
-                    className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
+            <input
+              value={signalToken}
+              onChange={(e) => setSignalToken(e.target.value)}
+              className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
                     placeholder={notificationType === 'dm' 
                       ? 'Your Signal phone number (e.g., +15551234567)'
                       : 'Group ID (e.g., group.CjQKICLkMKbor17qZpL...)'
@@ -808,7 +823,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                       <label className="text-xs uppercase tracking-[0.2em] text-zinc-400">
                         Group name
                       </label>
-                      <div className="flex gap-2">
+            <div className="flex gap-2">
                         <input
                           value={selectedGroupName}
                           onChange={(e) => setSelectedGroupName(e.target.value)}
@@ -956,7 +971,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                     <p className="text-[11px] text-zinc-500 pt-3">
                       We just store your Signal number or group invite link—no other token needed.
                     </p>
-                  )}
+              )}
             </div>
 
 
@@ -1114,7 +1129,24 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                             {item.status}
                           </span>
                         )}
-                        <p className="flex-1">{item.text || 'Pending…'}</p>
+                        {!item.textClassic && !item.textFun ? (
+                          <p className="flex-1">{item.text || 'Pending…'}</p>
+                        ) : (
+                          <div className="flex-1 space-y-1">
+                            {item.textClassic && (
+                              <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1">
+                                <span className="text-[10px] uppercase tracking-wide text-zinc-400">Classic</span>
+                                <p className="text-sm text-zinc-100">{item.textClassic}</p>
+                              </div>
+                            )}
+                            {item.textFun && (
+                              <div className="rounded-lg border border-indigo-900/60 bg-indigo-950/40 px-2 py-1">
+                                <span className="text-[10px] uppercase tracking-wide text-indigo-300">Fun</span>
+                                <p className="text-sm text-zinc-100">{item.textFun}</p>
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                       {item.imageUrl && (
                         <img
@@ -1126,6 +1158,58 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                             (e.target as HTMLImageElement).style.display = 'none';
                           }}
                         />
+                      )}
+                      {(!!item.recipientsClassic?.length || !!item.recipientsFun?.length) && (
+                        <div className="text-[11px] text-zinc-400 flex flex-col gap-1">
+                          {item.recipientsClassic?.length ? (
+                            <div className="flex flex-wrap gap-1">
+                              <span className="px-2 py-1 rounded-full bg-zinc-800 text-[10px] uppercase tracking-wide text-zinc-300">
+                                Classic
+                              </span>
+                              <span className="text-zinc-400">
+                                {item.recipientsClassic.join(', ')}
+                              </span>
+                            </div>
+                          ) : null}
+                          {item.recipientsFun?.length ? (
+                            <div className="flex flex-wrap gap-1">
+                              <span className="px-2 py-1 rounded-full bg-indigo-900/60 text-[10px] uppercase tracking-wide text-indigo-200">
+                                Fun
+                              </span>
+                              <span className="text-zinc-400">
+                                {item.recipientsFun.join(', ')}
+                              </span>
+                            </div>
+                          ) : null}
+                        </div>
+                      )}
+                      {!!item.deliveries?.length && (
+                        <div className="text-[11px] text-zinc-400 space-y-1">
+                          {item.deliveries.map((d, i) => (
+                            <div key={i} className="flex flex-wrap items-center gap-2">
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] uppercase tracking-wide ${
+                                  d.variant === 'fun'
+                                    ? 'bg-indigo-900/70 text-indigo-200'
+                                    : 'bg-zinc-800 text-zinc-200'
+                                }`}
+                              >
+                                {d.variant}
+                              </span>
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] uppercase tracking-wide ${
+                                  d.status === 'sent'
+                                    ? 'bg-emerald-900/70 text-emerald-200'
+                                    : 'bg-rose-900/60 text-rose-200'
+                                }`}
+                              >
+                                {d.status}
+                              </span>
+                              <span className="text-zinc-300">{d.handle}</span>
+                              {d.error && <span className="text-rose-200">{d.error}</span>}
+                            </div>
+                          ))}
+                        </div>
                       )}
                       <div className="text-[11px] text-zinc-500 flex gap-3">
                         {item.createdAt && <span>{new Date(item.createdAt).toLocaleString()}</span>}
