@@ -451,7 +451,9 @@ function startSocket(data: PatchData) {
 
             return Promise.all(payloadPromises).then((entries) => {
               const payloadMap = new Map<boolean, RenderPayload>(entries);
-              const logPayload = payloadMap.get(false) || payloadMap.get(true);
+              const logPayloadClassic = payloadMap.get(false);
+              const logPayloadFun = payloadMap.get(true);
+              const logPayload = logPayloadClassic || logPayloadFun;
               if (!logPayload) {
                 throw new Error('No payload generated for subscribers');
               }
@@ -464,6 +466,10 @@ function startSocket(data: PatchData) {
                 .update({
                   status: 'rendered',
                   text: logPayload.text,
+                  textClassic: logPayloadClassic?.text || null,
+                  textFun: logPayloadFun?.text || null,
+                  recipientsClassic: classicSubs.map((s) => s.handle),
+                  recipientsFun: funSubs.map((s) => s.handle),
                   imageUrl: logPayload.imageUrl || null,
                   imageDataPresent: !!logPayload.imageData,
                   renderedAt: FieldValue.serverTimestamp(),
@@ -473,6 +479,13 @@ function startSocket(data: PatchData) {
               msgRef
                 .update({ status: 'sending', sendStartedAt: FieldValue.serverTimestamp() })
                 .catch((err) => console.error('Message log send-start update failed', err));
+
+              const deliveries: Array<{
+                handle: string;
+                variant: 'fun' | 'classic';
+                status: 'sent' | 'failed';
+                error?: string;
+              }> = [];
 
               // Cancel any pending sends for this game/subscriber combination
               deliverSubs.forEach((sub) => {
@@ -492,10 +505,16 @@ function startSocket(data: PatchData) {
                   pendingSends.set(pendingKey, abortController);
 
                   const payload = payloadMap.get(!!sub.funEnabled) || logPayload;
+                  const variant: 'fun' | 'classic' = sub.funEnabled ? 'fun' : 'classic';
 
                   return sendSignal(sub, payload, data.patchId, abortController.signal)
                     .then(() => {
                       pendingSends.delete(pendingKey);
+                      deliveries.push({
+                        handle: sub.handle,
+                        variant,
+                        status: 'sent',
+                      });
                       console.log(
                         `Signal ${sub.type === 'group' ? 'group ' : ''}sent to ${
                           sub.handle
@@ -508,6 +527,12 @@ function startSocket(data: PatchData) {
                         console.log(`Send cancelled for ${pendingKey}`);
                         return; // Don't throw for cancelled requests
                       }
+                      deliveries.push({
+                        handle: sub.handle,
+                        variant,
+                        status: 'failed',
+                        error: err instanceof Error ? err.message : String(err),
+                      });
                       console.error('Signal send failed', err);
                       throw err;
                     });
@@ -517,6 +542,7 @@ function startSocket(data: PatchData) {
                   msgRef.update({
                     status: 'sent',
                     sentAt: FieldValue.serverTimestamp(),
+                    deliveries,
                   })
                 )
                 .catch((err) =>
@@ -524,6 +550,7 @@ function startSocket(data: PatchData) {
                     status: 'failed',
                     error: err instanceof Error ? err.message : String(err),
                     sentAt: FieldValue.serverTimestamp(),
+                    deliveries,
                   })
                 );
             });
