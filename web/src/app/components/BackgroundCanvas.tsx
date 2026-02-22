@@ -180,6 +180,7 @@ export function BackgroundCanvas() {
     let rafId: number;
 
     function applyResize() {
+      if (!canvas) return;
       const w = window.innerWidth;
       const h = Math.max(window.document.body.offsetHeight, 400);
       if (w === width && h === height) return;
