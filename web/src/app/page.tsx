@@ -87,6 +87,21 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
     });
     return combined.slice(0, 50);
   }, [activityMessages, activityPatch]);
+
+  const ACTIVITY_PAGE_SIZE = 15;
+  const [activityPage, setActivityPage] = useState(0);
+  const activityPaginated = useMemo(
+    () => activity.slice(activityPage * ACTIVITY_PAGE_SIZE, (activityPage + 1) * ACTIVITY_PAGE_SIZE),
+    [activity, activityPage]
+  );
+  const activityTotalPages = Math.max(1, Math.ceil(activity.length / ACTIVITY_PAGE_SIZE));
+  const canActivityPrev = activityPage > 0;
+  const canActivityNext = activityPage < activityTotalPages - 1;
+
+  useEffect(() => {
+    setActivityPage(0);
+  }, [lockedGameId]);
+
   const [funChoice, setFunChoice] = useState<'fun' | 'plain' | null>(null);
   const [scopeChoice, setScopeChoice] = useState<'my-turn' | 'all'>('all');
   const [frequencyChoice, setFrequencyChoice] = useState<NotifyFrequency>('hourly');
@@ -531,8 +546,8 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
   }, [gameInfo?.gameId, user]);
 
   return (
-    <div className="min-h-screen bg-black text-zinc-100 flex items-center justify-center">
-      <main className="w-full max-w-3xl px-6 py-16 flex flex-col gap-8">
+    <div className="min-h-screen bg-transparent text-zinc-100 flex items-center justify-center p-4">
+      <main className="w-full max-w-3xl px-6 py-16 flex flex-col gap-8 backdrop-blur-xl bg-white/10 rounded-3xl border border-white/10 shadow-2xl">
         <div className="flex items-start justify-between gap-4">
         <div className="space-y-3">
           <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Com Tower</p>
@@ -936,9 +951,10 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                 <p className="text-xs text-zinc-500">No activity yet. Changes to subscribers will appear here.</p>
               )}
               {(!activityLoading || !patchActivityLoading) && activity.length > 0 && (
-                <div className="space-y-2 rounded-xl border border-zinc-800 bg-zinc-950 p-3">
-                  {activity.map((item, idx) => (
-                    <div key={idx} className="text-sm text-zinc-200 space-y-1">
+                <div className="space-y-2">
+                  <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3 space-y-2">
+                  {activityPaginated.map((item, idx) => (
+                    <div key={activityPage * ACTIVITY_PAGE_SIZE + idx} className="text-sm text-zinc-200 space-y-1">
                       {item.kind === 'patch_activity' ? (
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="text-[10px] uppercase tracking-wide px-2 py-1 rounded-full bg-zinc-800 text-zinc-300">
@@ -1047,6 +1063,32 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                       )}
                     </div>
                   ))}
+                  </div>
+                  {activityTotalPages > 1 && (
+                    <div className="flex items-center justify-between gap-2 text-xs text-zinc-400">
+                      <span>
+                        {activityPage * ACTIVITY_PAGE_SIZE + 1}–{Math.min((activityPage + 1) * ACTIVITY_PAGE_SIZE, activity.length)} of {activity.length}
+                      </span>
+                      <div className="flex gap-1">
+                        <button
+                          type="button"
+                          onClick={() => setActivityPage((p) => Math.max(0, p - 1))}
+                          disabled={!canActivityPrev}
+                          className="rounded-lg border border-zinc-700 px-2 py-1.5 text-zinc-300 hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          Previous
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setActivityPage((p) => Math.min(activityTotalPages - 1, p + 1))}
+                          disabled={!canActivityNext}
+                          className="rounded-lg border border-zinc-700 px-2 py-1.5 text-zinc-300 hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          Next
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
