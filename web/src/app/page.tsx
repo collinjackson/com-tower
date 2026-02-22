@@ -302,9 +302,8 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
 
   const statusLine = useMemo(() => {
     if (!firebaseAvailable) return 'Firestore not configured; using local mock.';
-    if (!user) return 'Sign in to start.';
     return null;
-  }, [user]);
+  }, [firebaseAvailable]);
 
   const lookupGame = async (link: string, includeAuth = false) => {
     const pattern = /^https:\/\/awbw\.amarriner\.com\/game\.php\?games_id=\d+$/;
@@ -604,7 +603,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                 <>
                   <h1 className="text-3xl font-semibold">AWBW turn notifications</h1>
                   <p className="text-sm text-zinc-400">
-                    Subscribe to AWBW turn alerts.
+                    AWBW turn alerts via Signal.
                   </p>
                 </>
               )}
