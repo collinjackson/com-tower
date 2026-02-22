@@ -124,10 +124,64 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
   const [currentSubscribers, setCurrentSubscribers] = useState<any[]>([]);
   const [subscribersLoading, setSubscribersLoading] = useState(false);
   const [gamePlayers, setGamePlayers] = useState<string[]>([]);
+  const [updatedSubscriberKey, setUpdatedSubscriberKey] = useState<string | null>(null);
   const [inviteLink, setInviteLink] = useState('');
+  const [inviteLinkCopied, setInviteLinkCopied] = useState(false);
   const [inviteCode, setInviteCode] = useState('');
   const [inviteLoading, setInviteLoading] = useState(false);
+  const [captchaChallenges, setCaptchaChallenges] = useState<Array<{ phone: string; challengeToken: string; gameId: string | null }>>([]);
+  const [captchaChallengesLoading, setCaptchaChallengesLoading] = useState(false);
+  const [captchaSubmitting, setCaptchaSubmitting] = useState<string | null>(null);
+  const [captchaTokenByPhone, setCaptchaTokenByPhone] = useState<Record<string, string>>({});
   const router = useRouter();
+
+  useEffect(() => {
+    if (updatedSubscriberKey === null) return;
+    const t = setTimeout(() => setUpdatedSubscriberKey(null), 3000);
+    return () => clearTimeout(t);
+  }, [updatedSubscriberKey]);
+
+  useEffect(() => {
+    if (!inviteLinkCopied) return;
+    const t = setTimeout(() => setInviteLinkCopied(false), 2000);
+    return () => clearTimeout(t);
+  }, [inviteLinkCopied]);
+
+  useEffect(() => {
+    if (!user || !gameInfo?.gameId) {
+      setCaptchaChallenges([]);
+      return;
+    }
+    let cancelled = false;
+    setCaptchaChallengesLoading(true);
+    getAuth()
+      .currentUser?.getIdToken()
+      .then((idToken) => {
+        if (!idToken || cancelled) return;
+        return fetch('/api/admin/captcha-challenges', {
+          headers: { Authorization: `Bearer ${idToken}` },
+        });
+      })
+      .then((res) => (res?.ok ? res.json() : Promise.resolve({ challenges: [] })))
+      .then((data: { challenges?: Array<{ phone: string; challengeToken: string; gameId?: string | null }> }) => {
+        if (cancelled) return;
+        const list = data.challenges || [];
+        const forGame = list.filter(
+          (c) => c.gameId === gameInfo?.gameId
+        ) as Array<{ phone: string; challengeToken: string; gameId: string | null }>;
+        setCaptchaChallenges(forGame);
+      })
+      .catch(() => {
+        if (!cancelled) setCaptchaChallenges([]);
+      })
+      .finally(() => {
+        if (!cancelled) setCaptchaChallengesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user, gameInfo?.gameId]);
+
   const effectiveLockedId = lockedGameId || initialGameId || null;
 
   // Seed detail view immediately when arriving via /game/[id]
@@ -764,15 +818,28 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                       if (!inviteLink) return;
                       try {
                         await navigator.clipboard.writeText(inviteLink);
-                        setStatus('Invite link copied.');
+                        setInviteLinkCopied(true);
+                        setStatus(null);
                       } catch {
                         setStatus('Copy failed—select and copy manually.');
                       }
                     }}
-                    className="px-4 py-3 rounded-xl bg-white text-black font-semibold shadow disabled:opacity-50"
+                    className={`p-3 rounded-xl shadow disabled:opacity-50 flex items-center justify-center transition-colors ${
+                      inviteLinkCopied ? 'bg-emerald-500 text-white' : 'bg-white text-black'
+                    }`}
                     disabled={!inviteLink}
+                    title={inviteLinkCopied ? 'Copied!' : 'Copy link'}
+                    aria-label={inviteLinkCopied ? 'Copied!' : 'Copy link'}
                   >
-                    Copy link
+                    {inviteLinkCopied ? (
+                      <svg xmlns="http://www.w3.org/2000/svg" height="24" viewBox="0 0 24 24" width="24" className="w-6 h-6" fill="currentColor" aria-hidden>
+                        <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                      </svg>
+                    ) : (
+                      <svg xmlns="http://www.w3.org/2000/svg" height="24" viewBox="0 0 24 24" width="24" className="w-6 h-6" fill="currentColor" aria-hidden>
+                        <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/>
+                      </svg>
+                    )}
                   </button>
                 </div>
               </section>
@@ -785,13 +852,23 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                     <p className="text-xs text-zinc-500">Loading subscribers…</p>
                   ) : currentSubscribers.length > 0 ? (
                     <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 divide-y divide-zinc-800">
-                      {currentSubscribers.map((sub, idx) => (
+                      {currentSubscribers.map((sub, idx) => {
+                        const subKey = `${sub.type}-${sub.handle}`;
+                        const justUpdated = updatedSubscriberKey === subKey;
+                        return (
                         <div key={idx} className="flex items-center justify-between gap-3 p-3">
                           <div className="min-w-0 flex items-center gap-2 flex-wrap">
                             <span className="text-[10px] uppercase tracking-wide px-2 py-1 rounded-full bg-zinc-800 text-zinc-300 shrink-0">
                               {sub.type}
                             </span>
                             <span className="text-sm text-zinc-200 truncate">{sub.handle}</span>
+                            {justUpdated && (
+                              <span className="text-emerald-400 shrink-0" title="Updated" aria-hidden>
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                  <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                                </svg>
+                              </span>
+                            )}
                             {sub.country && (
                               <span className="text-xs text-zinc-500 uppercase">{sub.country}</span>
                             )}
@@ -827,7 +904,8 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                                     const errData = await res.json().catch(() => ({}));
                                     throw new Error(errData.error || 'Failed to update');
                                   }
-                                  setStatus('Updated.');
+                                  setUpdatedSubscriberKey(`${sub.type}-${sub.handle}`);
+                                  setStatus(null);
                                   loadSubscribers();
                                 } catch (err: unknown) {
                                   setStatus(err instanceof Error ? err.message : 'Update failed');
@@ -863,7 +941,8 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                                     const errData = await res.json().catch(() => ({}));
                                     throw new Error(errData.error || 'Failed to update');
                                   }
-                                  setStatus('Updated.');
+                                  setUpdatedSubscriberKey(`${sub.type}-${sub.handle}`);
+                                  setStatus(null);
                                   loadSubscribers();
                                 } catch (err: unknown) {
                                   setStatus(err instanceof Error ? err.message : 'Update failed');
@@ -902,7 +981,8 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                                     const errData = await res.json().catch(() => ({}));
                                     throw new Error(errData.error || 'Failed to update');
                                   }
-                                  setStatus('Updated.');
+                                  setUpdatedSubscriberKey(`${sub.type}-${sub.handle}`);
+                                  setStatus(null);
                                   loadSubscribers();
                                 } catch (err: unknown) {
                                   setStatus(err instanceof Error ? err.message : 'Update failed');
@@ -937,7 +1017,8 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                                     const errData = await res.json().catch(() => ({}));
                                     throw new Error(errData.error || 'Failed to update');
                                   }
-                                  setStatus('Updated.');
+                                  setUpdatedSubscriberKey(`${sub.type}-${sub.handle}`);
+                                  setStatus(null);
                                   loadSubscribers();
                                 } catch (err: unknown) {
                                   setStatus(err instanceof Error ? err.message : 'Update failed');
@@ -974,7 +1055,8 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                             </button>
                           </div>
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   ) : (
                     <p className="text-sm text-zinc-500">
@@ -985,6 +1067,90 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
               </>
             ) : (
               <p className="text-sm text-zinc-400">Sign in to configure notifications for this game.</p>
+            )}
+
+            {user && gameInfo?.gameId && (
+              <div className="pt-4 space-y-2">
+                {captchaChallengesLoading && captchaChallenges.length === 0 ? (
+                  <p className="text-xs text-zinc-500">Checking for CAPTCHA challenges…</p>
+                ) : captchaChallenges.length > 0 ? (
+                  <div className="rounded-2xl border border-amber-800 bg-amber-950/40 p-4 space-y-3">
+                    <p className="text-xs uppercase tracking-[0.2em] text-amber-300">Solve CAPTCHA</p>
+                    <p className="text-sm text-zinc-400">
+                      These numbers need a CAPTCHA solved to receive notifications. Paste the token from the Signal CAPTCHA link.
+                    </p>
+                    <div className="space-y-3">
+                      {captchaChallenges.map((c) => (
+                        <div key={c.phone} className="rounded-xl border border-zinc-800 bg-zinc-950 p-3 space-y-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-sm font-medium text-amber-200">{c.phone}</span>
+                            <span className="text-[10px] text-zinc-500 truncate max-w-[12rem]" title={c.challengeToken}>
+                              {c.challengeToken.slice(0, 20)}…
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap gap-2 items-end">
+                            <label className="flex-1 min-w-[200px] flex flex-col gap-1">
+                              <span className="text-[11px] text-zinc-400">CAPTCHA token or signalcaptcha:// link</span>
+                              <input
+                                type="text"
+                                value={captchaTokenByPhone[c.phone] ?? ''}
+                                onChange={(e) => setCaptchaTokenByPhone((prev) => ({ ...prev, [c.phone]: e.target.value }))}
+                                placeholder="Paste token or signalcaptcha://..."
+                                className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                                disabled={captchaSubmitting === c.phone}
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                const token = (captchaTokenByPhone[c.phone] ?? '').trim();
+                                if (!token) return;
+                                setCaptchaSubmitting(c.phone);
+                                setStatus(null);
+                                try {
+                                  const idToken = await getAuth().currentUser?.getIdToken();
+                                  const res = await fetch('/api/admin/captcha-challenges/submit', {
+                                    method: 'POST',
+                                    headers: {
+                                      'Content-Type': 'application/json',
+                                      ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+                                    },
+                                    body: JSON.stringify({
+                                      phone: c.phone,
+                                      challengeToken: c.challengeToken,
+                                      captchaToken: token,
+                                    }),
+                                  });
+                                  const data = await res.json().catch(() => ({}));
+                                  if (!res.ok) {
+                                    setStatus(data.error || 'Failed to submit CAPTCHA');
+                                    return;
+                                  }
+                                  setCaptchaTokenByPhone((prev) => {
+                                    const next = { ...prev };
+                                    delete next[c.phone];
+                                    return next;
+                                  });
+                                  setCaptchaChallenges((prev) => prev.filter((x) => x.phone !== c.phone));
+                                  setStatus('CAPTCHA submitted.');
+                                } catch (err) {
+                                  setStatus(err instanceof Error ? err.message : 'Submit failed');
+                                } finally {
+                                  setCaptchaSubmitting(null);
+                                }
+                              }}
+                              disabled={captchaSubmitting === c.phone || !(captchaTokenByPhone[c.phone] ?? '').trim()}
+                              className="px-4 py-2 rounded-lg bg-amber-600 text-amber-950 font-medium text-sm hover:bg-amber-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {captchaSubmitting === c.phone ? 'Submitting…' : 'Submit'}
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
             )}
 
             <div className="pt-4 space-y-2">
@@ -1013,7 +1179,15 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                       <>
                       <div className="flex items-center gap-2">
                         {item.status && (
-                          <span className="text-[10px] uppercase tracking-wide px-2 py-1 rounded-full bg-zinc-800 text-zinc-300">
+                          <span
+                            className={`text-[10px] uppercase tracking-wide px-2 py-1 rounded-full ${
+                              item.status === 'sent'
+                                ? 'bg-emerald-900/70 text-emerald-200'
+                                : item.status === 'partial-failed' || item.status === 'failed'
+                                  ? 'bg-amber-900/70 text-amber-200'
+                                  : 'bg-zinc-800 text-zinc-300'
+                            }`}
+                          >
                             {item.status}
                           </span>
                         )}
@@ -1072,31 +1246,40 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                         </div>
                       )}
                       {!!item.deliveries?.length && (
-                        <div className="text-[11px] text-zinc-400 space-y-1">
-                          {item.deliveries.map((d, i) => (
-                            <div key={i} className="flex flex-wrap items-center gap-2">
-                              <span
-                                className={`px-2 py-0.5 rounded-full text-[10px] uppercase tracking-wide ${
-                                  d.variant === 'fun'
-                                    ? 'bg-indigo-900/70 text-indigo-200'
-                                    : 'bg-zinc-800 text-zinc-200'
-                                }`}
-                              >
-                                {d.variant}
-                              </span>
-                              <span
-                                className={`px-2 py-0.5 rounded-full text-[10px] uppercase tracking-wide ${
-                                  d.status === 'sent'
-                                    ? 'bg-emerald-900/70 text-emerald-200'
-                                    : 'bg-rose-900/60 text-rose-200'
-                                }`}
-                              >
-                                {d.status}
-                              </span>
-                              <span className="text-zinc-300">{d.handle}</span>
-                              {d.error && <span className="text-rose-200">{d.error}</span>}
-                            </div>
-                          ))}
+                        <div className="text-[11px] space-y-1">
+                          {item.deliveries.map((d, i) => {
+                            const isFailed = d.status !== 'sent';
+                            return (
+                              <div key={i} className="flex flex-wrap items-center gap-2">
+                                <span
+                                  className={`px-2 py-0.5 rounded-full text-[10px] uppercase tracking-wide ${
+                                    d.variant === 'fun'
+                                      ? 'bg-indigo-900/70 text-indigo-200'
+                                      : 'bg-zinc-800 text-zinc-200'
+                                  }`}
+                                >
+                                  {d.variant}
+                                </span>
+                                <span
+                                  className={`px-2 py-0.5 rounded-full text-[10px] uppercase tracking-wide ${
+                                    d.status === 'sent'
+                                      ? 'bg-emerald-900/70 text-emerald-200'
+                                      : 'bg-rose-900/70 text-rose-200'
+                                  }`}
+                                >
+                                  {d.status}
+                                </span>
+                                <span className={isFailed ? 'text-amber-300 font-medium' : 'text-zinc-300'}>
+                                  {d.handle}
+                                </span>
+                                {d.error && (
+                                  <span className="text-rose-200" title={d.error}>
+                                    {d.error.includes('CAPTCHA') ? 'CAPTCHA required' : d.error}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
                       <div className="text-[11px] text-zinc-500 flex gap-3">
