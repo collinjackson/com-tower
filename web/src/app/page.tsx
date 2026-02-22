@@ -604,7 +604,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                 <>
                   <h1 className="text-3xl font-semibold">AWBW turn notifications</h1>
                   <p className="text-sm text-zinc-400">
-                    Patch your AWBW game to receive turn alerts.
+                    Subscribe to AWBW turn alerts.
                   </p>
                 </>
               )}
