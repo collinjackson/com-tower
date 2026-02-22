@@ -34,7 +34,10 @@ type GameInfo = {
 };
 
 type NotifyMode = 'none' | 'signal-dm';
+/** '' = every turn; hourly = at most once per hour (default when adding) */
+type NotifyFrequency = '' | 'hourly';
 type ActivityItem = {
+  kind?: 'message' | 'patch_activity';
   text: string;
   textClassic?: string | null;
   textFun?: string | null;
@@ -45,6 +48,11 @@ type ActivityItem = {
   createdAt: string | null;
   imageUrl?: string | null;
   status?: string;
+  /** Audit log: subscriber_added | subscriber_removed | subscriber_updated */
+  action?: string;
+  handle?: string;
+  type?: string;
+  details?: string;
 };
 
 export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
@@ -65,10 +73,23 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
   const [userPhoneLoading, setUserPhoneLoading] = useState(false);
   const [view, setView] = useState<'main' | 'settings'>('main');
   const [experimentalExtended, setExperimentalExtended] = useState(false);
-  const [activity, setActivity] = useState<ActivityItem[]>([]);
+  const [activityMessages, setActivityMessages] = useState<ActivityItem[]>([]);
+  const [activityPatch, setActivityPatch] = useState<ActivityItem[]>([]);
   const [activityLoading, setActivityLoading] = useState(false);
+  const [patchActivityLoading, setPatchActivityLoading] = useState(false);
+
+  const activity = useMemo(() => {
+    const combined = [...activityMessages, ...activityPatch];
+    combined.sort((a, b) => {
+      const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return tb - ta;
+    });
+    return combined.slice(0, 50);
+  }, [activityMessages, activityPatch]);
   const [funChoice, setFunChoice] = useState<'fun' | 'plain' | null>(null);
   const [scopeChoice, setScopeChoice] = useState<'my-turn' | 'all'>('all');
+  const [frequencyChoice, setFrequencyChoice] = useState<NotifyFrequency>('hourly');
   const [mentionsRaw, setMentionsRaw] = useState('');
   const [selectedGroupName, setSelectedGroupName] = useState('');
   const [groups, setGroups] = useState<any[]>([]);
@@ -185,85 +206,72 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
     loadPatchSettings();
   }, [firebaseAvailable, user, gameInfo?.gameId]);
 
-  // Live activity feed using Firestore real-time subscription
+  // Activity feed via API polling (avoids client Firestore permission errors and SDK assertion bugs)
   useEffect(() => {
-    if (!lockedGameId || !firebaseAvailable) {
-      setActivity([]);
+    if (!lockedGameId) {
+      setActivityMessages([]);
+      setActivityPatch([]);
       setActivityLoading(false);
+      setPatchActivityLoading(false);
       return;
     }
     setActivityLoading(true);
-    
-    try {
-      const db = getFirestore();
-      const messagesRef = collection(db, 'messages');
-      const q = query(
-        messagesRef,
-        where('gameId', '==', lockedGameId),
-        orderBy('createdAt', 'desc'),
-        fsLimit(50)
-      );
-      
-      const unsubscribe = onSnapshot(
-        q,
-        (snapshot) => {
-          const rows: ActivityItem[] = snapshot.docs.map((doc) => {
-            const data = doc.data();
-            return {
-              text: data.text || '',
-              textClassic: data.textClassic || null,
-              textFun: data.textFun || null,
-              recipientsClassic: data.recipientsClassic || [],
-              recipientsFun: data.recipientsFun || [],
-              deliveries: data.deliveries || [],
-              recipient: null, // Don't expose recipient in public feed
-              createdAt: data.createdAt?.toDate?.()?.toISOString() || data.createdAt || null,
-              imageUrl: data.imageUrl || null,
-              status: data.status || null,
-            };
-          });
-          setActivity(rows);
-          setActivityLoading(false);
-        },
-        (err) => {
-          console.error('Activity feed subscribe failed', err);
-          setActivityLoading(false);
-          // Fallback to API if subscription fails
-          const fetchActivity = async () => {
-            try {
-              const res = await fetch(`/api/game/${lockedGameId}/activity`);
-              if (res.ok) {
-                const data = await res.json();
-                const rows: ActivityItem[] = (data.messages || []).map((m: any) => ({
-                  text: m.text || '',
-                  textClassic: m.textClassic || null,
-                  textFun: m.textFun || null,
-                  recipientsClassic: m.recipientsClassic || [],
-                  recipientsFun: m.recipientsFun || [],
-                  deliveries: m.deliveries || [],
-                  recipient: null,
-                  createdAt: m.createdAt || null,
-                  imageUrl: m.imageUrl || null,
-                  status: m.status || null,
-                }));
-                setActivity(rows);
-              }
-            } catch (fetchErr) {
-              console.error('Activity feed API fallback failed:', fetchErr);
-            }
-          };
-          fetchActivity();
+    setPatchActivityLoading(true);
+
+    const ACTIVITY_POLL_MS = 15000;
+    const fetchActivity = async () => {
+      try {
+        let idToken: string | null = null;
+        if (user) {
+          try {
+            idToken = await getAuth().currentUser?.getIdToken() ?? null;
+          } catch {
+            idToken = null;
+          }
         }
-      );
-      
-      return () => {
-        unsubscribe();
-      };
-    } catch (err) {
-      console.error('Activity feed setup failed:', err);
-      setActivityLoading(false);
-    }
-  }, [lockedGameId, firebaseAvailable]);
+        const res = await fetch(`/api/game/${lockedGameId}/activity`, {
+          headers: idToken ? { Authorization: `Bearer ${idToken}` } : {},
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const messageRows: ActivityItem[] = (data.messages || []).map((m: any) => ({
+          kind: 'message',
+          text: m.text || '',
+          textClassic: m.textClassic ?? null,
+          textFun: m.textFun ?? null,
+          recipientsClassic: m.recipientsClassic || [],
+          recipientsFun: m.recipientsFun || [],
+          deliveries: m.deliveries || [],
+          recipient: null,
+          createdAt: m.createdAt ?? null,
+          imageUrl: m.imageUrl ?? null,
+          status: m.status ?? null,
+        }));
+        const patchRows: ActivityItem[] = (data.patchActivity || []).map((a: any) => ({
+          kind: 'patch_activity',
+          text: '',
+          recipient: null,
+          createdAt: a.createdAt ?? null,
+          action: a.action ?? null,
+          handle: a.handle ?? null,
+          type: a.type ?? null,
+          details: a.details ?? null,
+        }));
+        setActivityMessages(messageRows);
+        setActivityPatch(patchRows);
+      } catch (err) {
+        console.error('Activity feed fetch failed', err);
+      } finally {
+        setActivityLoading(false);
+        setPatchActivityLoading(false);
+      }
+    };
+
+    fetchActivity();
+    const interval = setInterval(fetchActivity, ACTIVITY_POLL_MS);
+
+    return () => clearInterval(interval);
+  }, [lockedGameId, user]);
 
   const statusLine = useMemo(() => {
     if (!firebaseAvailable) return 'Firestore not configured; using local mock.';
@@ -409,6 +417,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
             handle: normalizedHandle || trimmed, // For groups, this is the groupId
             funEnabled: funChoice === 'fun',
             scope: scopeChoice,
+            ...(frequencyChoice ? { notifyFrequency: frequencyChoice } : {}),
             ...(notificationType === 'group' ? { 
               mentions, 
               groupName: selectedGroupName || undefined,
@@ -574,15 +583,39 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
           </div>
         </div>
 
+        {user && view === 'main' && (
+          <nav className="flex items-center gap-2 text-sm">
+            {gameInfo ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    router.push('/');
+                    setLockedGameId(null);
+                    setGameInfo(null);
+                    setSignalToken('');
+                    setNotifyMode('signal-dm');
+                    setPatchedEnsured(false);
+                    setExperimentalExtended(false);
+                  }}
+                  className="text-xs uppercase tracking-[0.2em] text-zinc-400 hover:text-zinc-200 focus:outline-none focus:underline"
+                >
+                  Patched games
+                </button>
+                <span className="text-zinc-600" aria-hidden>/</span>
+                <span className="text-zinc-200 font-medium truncate max-w-[200px] sm:max-w-none" title={gameInfo.mapName || undefined}>
+                  {gameInfo.gameName}
+                </span>
+              </>
+            ) : (
+              <span className="text-xs uppercase tracking-[0.2em] text-zinc-400">Patched games</span>
+            )}
+          </nav>
+        )}
+
         {user && view === 'main' && !effectiveLockedId && !gameInfo && (
           <div className="space-y-4">
-            <div className="flex items-center justify-between">
-                <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Patched games</p>
-                <p className="text-sm text-zinc-400">Select to manage notifications.</p>
-              </div>
-              {lookupPending && <p className="text-xs text-zinc-500">Looking up…</p>}
-            </div>
+            {lookupPending && <p className="text-xs text-zinc-500">Looking up…</p>}
 
             {patchedLoading && <p className="text-xs text-zinc-500">Loading your patched games…</p>}
 
@@ -692,27 +725,6 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
 
         {view === 'main' && gameInfo && (
           <div className="space-y-4">
-            <div className="flex items-start justify-between">
-                  <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Selected game</p>
-                    <p className="text-lg font-semibold text-zinc-100">{gameInfo.gameName}</p>
-                    <p className="text-sm text-zinc-400">{gameInfo.mapName || 'Map unknown'}</p>
-                  </div>
-                  <button
-                    onClick={() => {
-                  router.push('/');
-                  setLockedGameId(null);
-                      setGameInfo(null);
-                      setSignalToken('');
-                      setNotifyMode('signal-dm');
-                  setPatchedEnsured(false);
-                  setExperimentalExtended(false);
-                    }}
-                className="px-3 py-2 rounded-lg border border-zinc-700 text-zinc-300 hover:border-zinc-500 text-xs"
-                  >
-                Back to list
-                  </button>
-                </div>
             {user && (
               <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 space-y-2">
                 <div className="flex items-center justify-between">
@@ -748,366 +760,170 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
             )}
             {user ? (
               <>
-            <div className="flex items-center justify-between">
-              <div>
-                    <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Signal notifications</p>
-                    <p className="text-lg font-semibold text-zinc-100">DM or group</p>
-                    <p className="text-sm text-zinc-400">
-                      Choose notification type, then enter your Signal phone or group ID.
-                    </p>
-              </div>
-            </div>
-            
-            <div className="space-y-2">
-              <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Notification type</p>
-              <div className="grid sm:grid-cols-2 gap-3">
-                <button
-                  onClick={() => {
-                    setNotificationType('dm');
-                    setSignalToken('');
-                    setSelectedGroupName('');
-                    setMentionsRaw('');
-                  }}
-                  className={`rounded-xl border px-3 py-3 text-left ${
-                    notificationType === 'dm'
-                      ? 'bg-[#13211f] border-[#1f3c35] text-[#b5f5e4]'
-                      : 'bg-black border-zinc-800 text-zinc-300'
-                  }`}
-                >
-                  <p className="text-sm font-semibold">Direct Message (DM)</p>
-                  <p className="text-xs text-zinc-400">
-                    Send notifications to a phone number
-                  </p>
-                </button>
-                <button
-                  onClick={() => {
-                    setNotificationType('group');
-                    setSignalToken('');
-                    setSelectedGroupName('');
-                    setMentionsRaw('');
-                  }}
-                  className={`rounded-xl border px-3 py-3 text-left ${
-                    notificationType === 'group'
-                      ? 'bg-[#1a1b2f] border-[#2e315a] text-[#c7d0ff]'
-                      : 'bg-black border-zinc-800 text-zinc-300'
-                  }`}
-                >
-                  <p className="text-sm font-semibold">Group Chat</p>
-                  <p className="text-xs text-zinc-400">
-                    Send notifications to a Signal group
-                  </p>
-                </button>
-              </div>
-            </div>
-
-            {notificationType && (
-              <>
-                <div className="space-y-2">
-                  <label className="text-xs uppercase tracking-[0.2em] text-zinc-400">
-                    {notificationType === 'dm' ? 'Signal phone number' : 'Group ID'}
-                  </label>
-            <input
-              value={signalToken}
-              onChange={(e) => setSignalToken(e.target.value)}
-              className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
-                    placeholder={notificationType === 'dm' 
-                      ? 'Your Signal phone number (e.g., +15551234567)'
-                      : 'Group ID (e.g., group.CjQKICLkMKbor17qZpL...)'
-                    }
-                  />
-                </div>
-                
-                {notificationType === 'group' && (
-                  <>
-                    <div className="space-y-2">
-                      <label className="text-xs uppercase tracking-[0.2em] text-zinc-400">
-                        Group name
-                      </label>
-            <div className="flex gap-2">
-                        <input
-                          value={selectedGroupName}
-                          onChange={(e) => setSelectedGroupName(e.target.value)}
-                          className="flex-1 rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
-                          placeholder="Enter the exact group name"
-                        />
-                        <button
-                          onClick={async () => {
-                            if (!user) return;
-                            setGroupsLoading(true);
-                            setStatus(null);
-                            try {
-                              const idToken = await getAuth().currentUser?.getIdToken();
-                              const res = await fetch('/api/groups/list', {
-                                headers: {
-                                  ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
-                                },
-                              });
-                              if (res.ok) {
-                                const data = await res.json();
-                                setGroups(data.groups || []);
-                                if (data.groups && data.groups.length > 0) {
-                                  // Auto-select if only one group
-                                  if (data.groups.length === 1) {
-                                    setSelectedGroupName(data.groups[0].name || '');
-                                    setStatus(`Found 1 group: ${data.groups[0].name || 'unnamed'}`);
-                                  } else {
-                                    setStatus(`Found ${data.groups.length} groups. Select from dropdown or type name.`);
-                                  }
-                                } else {
-                                  setStatus('No groups found. You can type the group name manually.');
-                                }
-                              } else {
-                                const errData = await res.json().catch(() => ({}));
-                                setStatus(`Could not load groups: ${errData.error || res.statusText}. You can type the group name manually.`);
-                              }
-                            } catch (err) {
-                              console.error('Failed to load groups:', err);
-                              setStatus('Could not load groups. You can type the group name manually.');
-                            } finally {
-                              setGroupsLoading(false);
-                            }
-                          }}
-                          disabled={groupsLoading}
-                          className="px-4 py-3 rounded-xl bg-[#152029] border border-[#20415a] text-[#c7e6ff] text-sm disabled:opacity-50 whitespace-nowrap"
-                          title="Try to load groups from Signal (may be slow)"
-                        >
-                          {groupsLoading ? 'Loading…' : 'Load'}
-                        </button>
-                      </div>
-                      {groups.length > 0 && (
-                        <select
-                          value={selectedGroupName}
-                          onChange={async (e) => {
-                            const selectedName = e.target.value;
-                            setSelectedGroupName(selectedName);
-                            
-                            // Find the selected group and set its ID
-                            const selectedGroup = groups.find((g) => g.name === selectedName);
-                            if (selectedGroup) {
-                              const groupId = selectedGroup.id || (selectedGroup.internal_id ? `group.${selectedGroup.internal_id}` : null);
-                              if (groupId) {
-                                setSignalToken(groupId);
-                                
-                                // Automatically fetch members and populate mentions
+                <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 space-y-2">
+                  <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Current subscribers</p>
+                  {subscribersLoading ? (
+                    <p className="text-xs text-zinc-500">Loading subscribers…</p>
+                  ) : currentSubscribers.length > 0 ? (
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 divide-y divide-zinc-800">
+                      {currentSubscribers.map((sub, idx) => (
+                        <div key={idx} className="flex items-center justify-between gap-3 p-3">
+                          <div className="min-w-0 flex items-center gap-2 flex-wrap">
+                            <span className="text-[10px] uppercase tracking-wide px-2 py-1 rounded-full bg-zinc-800 text-zinc-300 shrink-0">
+                              {sub.type}
+                            </span>
+                            <span className="text-sm text-zinc-200 truncate">{sub.handle}</span>
+                            {sub.playerName && (
+                              <span className="text-xs text-zinc-500">Player {sub.playerName}</span>
+                            )}
+                            {sub.country && (
+                              <span className="text-xs text-zinc-500 uppercase">{sub.country}</span>
+                            )}
+                            {sub.needsGroupSelection && (
+                              <span className="text-xs text-amber-400">Needs group selection</span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <select
+                              value={sub.scope === 'my-turn' ? 'my-turn' : 'all'}
+                              onChange={async (e) => {
+                                const val = e.target.value as 'my-turn' | 'all';
+                                if (!gameInfo?.gameId || !user || !firebaseAvailable) return;
+                                setSaving(true);
+                                setStatus(null);
                                 try {
                                   const idToken = await getAuth().currentUser?.getIdToken();
-                                  const membersRes = await fetch(`/api/groups/members?groupId=${encodeURIComponent(groupId)}`, {
+                                  const res = await fetch(`/api/patch/${gameInfo.gameId}-${user.uid}/subscribers`, {
+                                    method: 'PATCH',
                                     headers: {
+                                      'Content-Type': 'application/json',
                                       ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
                                     },
+                                    body: JSON.stringify({ type: sub.type, handle: sub.handle, scope: val }),
                                   });
-                                  if (membersRes.ok) {
-                                    const membersData = await membersRes.json();
-                                    if (membersData.members && Array.isArray(membersData.members) && membersData.members.length > 0) {
-                                      setMentionsRaw(membersData.members.join(', '));
-                                      setStatus(`Loaded ${membersData.members.length} members from "${selectedName}". Mentions auto-populated.`);
-                                    } else {
-                                      setStatus(`Group "${selectedName}" has no members or members couldn't be loaded.`);
-                                    }
-                                  } else {
-                                    const errData = await membersRes.json().catch(() => ({}));
-                                    setStatus(`Could not load members: ${errData.error || membersRes.statusText}`);
+                                  if (!res.ok) {
+                                    const errData = await res.json().catch(() => ({}));
+                                    throw new Error(errData.error || 'Failed to update');
                                   }
-                                } catch (err) {
-                                  console.error('Failed to load group members:', err);
-                                  setStatus('Could not load group members automatically.');
+                                  setStatus('Updated.');
+                                  loadSubscribers();
+                                } catch (err: unknown) {
+                                  setStatus(err instanceof Error ? err.message : 'Update failed');
+                                } finally {
+                                  setSaving(false);
                                 }
-                              }
-                            }
-                          }}
-                          className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
-                        >
-                          <option value="">Or choose from loaded groups…</option>
-                          {groups.map((g) => {
-                            const groupId = g.id || (g.internal_id ? `group.${g.internal_id}` : null);
-                            return (
-                              <option key={groupId || g.name} value={g.name || ''}>
-                                {g.name || `Group ${groupId || 'unnamed'}`}
-                              </option>
-                            );
-                          })}
-                        </select>
-                      )}
-                      <p className="text-[11px] text-zinc-500">
-                        Select a group from the dropdown to auto-fill the group ID and members. The bot must already be in the group.
-                      </p>
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs uppercase tracking-[0.2em] text-zinc-400">
-                        Group mentions (optional)
-                      </label>
-                      <input
-                        value={mentionsRaw}
-                        onChange={(e) => setMentionsRaw(e.target.value)}
-                        className="w-full rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
-                        placeholder="+15551234567, +15557654321"
-                      />
-                      <p className="text-[11px] text-zinc-500">
-                        We'll @ these numbers in the group message. Use Signal-registered numbers,
-                        comma or space separated.
-                      </p>
-                    </div>
-                  </>
-                )}
-              </>
-            )}
-                <div className="flex gap-2 items-start">
-              <button
-                onClick={saveSignalToken}
-                    disabled={saving || !(signalToken.trim() || userPhone.trim())}
-                className="flex-1 rounded-xl px-4 py-3 bg-[#152029] border border-[#20415a] text-[#c7e6ff] disabled:opacity-50"
-              >
-                    Subscribe
-              </button>
-              {signalToken && (
-                <button
-                  onClick={() => setSignalToken('')}
-                  className="px-3 py-2 rounded-lg border border-zinc-700 text-zinc-300 hover:border-zinc-500"
-                >
-                  Clear
-                </button>
-              )}
-                  {!signalToken && (
-                    <p className="text-[11px] text-zinc-500 pt-3">
-                      We just store your Signal number or group invite link—no other token needed.
-                    </p>
-              )}
-            </div>
-
-
-                {(subscribersLoading || currentSubscribers.length > 0) && (
-                  <div className="space-y-2">
-                    <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Current subscribers</p>
-                    {subscribersLoading ? (
-                      <p className="text-xs text-zinc-500">Loading subscribers…</p>
-                    ) : (
-                      <div className="rounded-xl border border-zinc-800 bg-zinc-950 divide-y divide-zinc-800">
-                      {currentSubscribers.map((sub, idx) => (
-                        <div key={idx} className="flex items-center justify-between p-3">
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span className="text-[10px] uppercase tracking-wide px-2 py-1 rounded-full bg-zinc-800 text-zinc-300">
-                                {sub.type}
-                              </span>
-                              <span className="text-sm text-zinc-200 truncate">{sub.handle}</span>
-                            </div>
-                            <div className="flex items-center gap-3 mt-1 text-xs text-zinc-400">
-                              <span>{sub.scope === 'my-turn' ? 'Only my turn' : 'All turns'}</span>
-                              <span>•</span>
-                              <span>{sub.funEnabled ? 'Fun mode' : 'Classic'}</span>
-                              {sub.playerName && (
-                                <>
-                                  <span>•</span>
-                                  <span>Player {sub.playerName}</span>
-                                </>
-                              )}
-                              {sub.country && (
-                                <>
-                                  <span>•</span>
-                                  <span className="uppercase">{sub.country}</span>
-                                </>
-                              )}
-                              {sub.needsGroupSelection && (
-                                <>
-                                  <span>•</span>
-                                  <span className="text-amber-400">Needs group selection</span>
-                                </>
-                              )}
-                            </div>
-                          </div>
-                          <button
-                            onClick={() => deleteSubscriber(sub)}
-                            disabled={saving}
-                            className="ml-3 p-2 rounded-lg border border-zinc-700 text-zinc-400 hover:border-red-600 hover:text-red-400 disabled:opacity-50 transition-colors"
-                            title="Remove subscriber"
-                          >
-                            <svg
-                              xmlns="http://www.w3.org/2000/svg"
-                              className="h-4 w-4"
-                              fill="none"
-                              viewBox="0 0 24 24"
-                              stroke="currentColor"
+                              }}
+                              disabled={saving}
+                              className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-200 focus:outline-none focus:ring-1 focus:ring-zinc-500"
                             >
-                              <path
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                strokeWidth={2}
-                                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                              />
-                            </svg>
-                          </button>
+                              <option value="all">All turns</option>
+                              <option value="my-turn">Only my turn</option>
+                            </select>
+                            <select
+                              value={sub.notifyFrequency === 'hourly' ? 'hourly' : ''}
+                              onChange={async (e) => {
+                                const val = e.target.value as '' | 'hourly';
+                                if (!gameInfo?.gameId || !user || !firebaseAvailable) return;
+                                setSaving(true);
+                                setStatus(null);
+                                try {
+                                  const idToken = await getAuth().currentUser?.getIdToken();
+                                  const res = await fetch(`/api/patch/${gameInfo.gameId}-${user.uid}/subscribers`, {
+                                    method: 'PATCH',
+                                    headers: {
+                                      'Content-Type': 'application/json',
+                                      ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+                                    },
+                                    body: JSON.stringify({
+                                      type: sub.type,
+                                      handle: sub.handle,
+                                      notifyFrequency: val === '' ? null : val,
+                                    }),
+                                  });
+                                  if (!res.ok) {
+                                    const errData = await res.json().catch(() => ({}));
+                                    throw new Error(errData.error || 'Failed to update');
+                                  }
+                                  setStatus('Updated.');
+                                  loadSubscribers();
+                                } catch (err: unknown) {
+                                  setStatus(err instanceof Error ? err.message : 'Update failed');
+                                } finally {
+                                  setSaving(false);
+                                }
+                              }}
+                              disabled={saving}
+                              className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-200 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+                            >
+                              <option value="">Once per turn</option>
+                              <option value="hourly">Hourly</option>
+                            </select>
+                            <select
+                              value={sub.funEnabled ? 'fun' : 'plain'}
+                              onChange={async (e) => {
+                                const val = e.target.value === 'fun';
+                                if (!gameInfo?.gameId || !user || !firebaseAvailable) return;
+                                setSaving(true);
+                                setStatus(null);
+                                try {
+                                  const idToken = await getAuth().currentUser?.getIdToken();
+                                  const res = await fetch(`/api/patch/${gameInfo.gameId}-${user.uid}/subscribers`, {
+                                    method: 'PATCH',
+                                    headers: {
+                                      'Content-Type': 'application/json',
+                                      ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+                                    },
+                                    body: JSON.stringify({ type: sub.type, handle: sub.handle, funEnabled: val }),
+                                  });
+                                  if (!res.ok) {
+                                    const errData = await res.json().catch(() => ({}));
+                                    throw new Error(errData.error || 'Failed to update');
+                                  }
+                                  setStatus('Updated.');
+                                  loadSubscribers();
+                                } catch (err: unknown) {
+                                  setStatus(err instanceof Error ? err.message : 'Update failed');
+                                } finally {
+                                  setSaving(false);
+                                }
+                              }}
+                              disabled={saving}
+                              className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-200 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+                            >
+                              <option value="plain">Classic</option>
+                              <option value="fun">Fun mode</option>
+                            </select>
+                            <button
+                              onClick={() => deleteSubscriber(sub)}
+                              disabled={saving}
+                              className="p-2 rounded-lg border border-zinc-700 text-zinc-400 hover:border-red-600 hover:text-red-400 disabled:opacity-50 transition-colors"
+                              title="Remove subscriber"
+                            >
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                className="h-4 w-4"
+                                fill="none"
+                                viewBox="0 0 24 24"
+                                stroke="currentColor"
+                              >
+                                <path
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  strokeWidth={2}
+                                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                                />
+                              </svg>
+                            </button>
+                          </div>
                         </div>
                       ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-            <div className="pt-3 space-y-2">
-              <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Notifications</p>
-                  <div className="grid sm:grid-cols-2 gap-3">
-                <button
-                      onClick={() => setScopeChoice('my-turn')}
-                      className={`rounded-xl border px-3 py-3 text-left ${
-                        scopeChoice === 'my-turn'
-                          ? 'bg-[#13211f] border-[#1f3c35] text-[#b5f5e4]'
-                          : 'bg-black border-zinc-800 text-zinc-300'
-                      }`}
-                    >
-                      <p className="text-sm font-semibold">Only my turn</p>
-                      <p className="text-xs text-zinc-400">
-                        DM me when it’s my move. Good for team games.
-                      </p>
-                </button>
-                <button
-                      onClick={() => setScopeChoice('all')}
-                      className={`rounded-xl border px-3 py-3 text-left ${
-                        scopeChoice === 'all'
-                          ? 'bg-[#1a1b2f] border-[#2e315a] text-[#c7d0ff]'
-                          : 'bg-black border-zinc-800 text-zinc-300'
-                      }`}
-                    >
-                      <p className="text-sm font-semibold">All turns</p>
-                      <p className="text-xs text-zinc-400">
-                        Follow every turn in this game (spectator-friendly).
-                      </p>
-                </button>
-              </div>
-
-                  <div className="pt-4 space-y-2">
-                    <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Message style</p>
-                    <div className="grid sm:grid-cols-2 gap-3">
-                      <button
-                        onClick={() => setFunChoice('plain')}
-                        className={`rounded-xl border px-4 py-4 text-left ${
-                          funChoice === 'plain'
-                            ? 'bg-[#101010] border-zinc-500 text-zinc-50'
-                            : 'bg-black border-zinc-800 text-zinc-300'
-                        }`}
-                      >
-                        <p className="text-sm font-semibold">Classic</p>
-                        <p className="text-xs text-zinc-400">Straightforward turn pings.</p>
-                        <div className="mt-2 text-[11px] text-zinc-500 border border-zinc-800 rounded-lg p-2">
-                          “Day 12 – You’re up. [Game link]”
-                        </div>
-                      </button>
-                      <button
-                        onClick={() => setFunChoice('fun')}
-                        className={`rounded-xl border px-4 py-4 text-left ${
-                          funChoice === 'fun'
-                            ? 'bg-[#13182a] border-[#2f3c7a] text-[#d5e0ff]'
-                            : 'bg-black border-zinc-800 text-zinc-300'
-                        }`}
-                      >
-                        <p className="text-sm font-semibold">Fun mode</p>
-                        <p className="text-xs text-zinc-400">AI caption with your faction vibe.</p>
-                        <div className="mt-2 text-[11px] text-zinc-500 border border-zinc-800 rounded-lg p-2">
-                          “Grit’s infantry raises the Com Tower flag under orange skies.”
-                        </div>
-                      </button>
                     </div>
-                  </div>
-                </div>
+                  ) : (
+                    <p className="text-sm text-zinc-500">
+                      Share the invite link above to add subscribers. They’ll choose their settings on the invite page.
+                    </p>
+                  )}
+                </section>
               </>
             ) : (
               <p className="text-sm text-zinc-400">Sign in to configure notifications for this game.</p>
@@ -1115,14 +931,27 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
 
             <div className="pt-4 space-y-2">
               <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Activity feed</p>
-              {activityLoading && <p className="text-xs text-zinc-500">Loading activity…</p>}
-              {!activityLoading && activity.length === 0 && (
-                <p className="text-xs text-zinc-500">No messages yet.</p>
+              {(activityLoading || patchActivityLoading) && <p className="text-xs text-zinc-500">Loading activity…</p>}
+              {!activityLoading && !patchActivityLoading && activity.length === 0 && (
+                <p className="text-xs text-zinc-500">No activity yet. Changes to subscribers will appear here.</p>
               )}
-              {!activityLoading && activity.length > 0 && (
+              {(!activityLoading || !patchActivityLoading) && activity.length > 0 && (
                 <div className="space-y-2 rounded-xl border border-zinc-800 bg-zinc-950 p-3">
                   {activity.map((item, idx) => (
                     <div key={idx} className="text-sm text-zinc-200 space-y-1">
+                      {item.kind === 'patch_activity' ? (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-[10px] uppercase tracking-wide px-2 py-1 rounded-full bg-zinc-800 text-zinc-300">
+                            {item.action === 'subscriber_added' ? 'Added' : item.action === 'subscriber_removed' ? 'Removed' : 'Updated'}
+                          </span>
+                          <span className="text-zinc-300">{item.handle ?? '—'}</span>
+                          {item.details && <span className="text-zinc-400">{item.details}</span>}
+                          {item.createdAt && (
+                            <span className="text-[11px] text-zinc-500 ml-auto">{new Date(item.createdAt).toLocaleString()}</span>
+                          )}
+                        </div>
+                      ) : (
+                      <>
                       <div className="flex items-center gap-2">
                         {item.status && (
                           <span className="text-[10px] uppercase tracking-wide px-2 py-1 rounded-full bg-zinc-800 text-zinc-300">
@@ -1214,6 +1043,8 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                       <div className="text-[11px] text-zinc-500 flex gap-3">
                         {item.createdAt && <span>{new Date(item.createdAt).toLocaleString()}</span>}
                       </div>
+                      </>
+                      )}
                     </div>
                   ))}
                 </div>

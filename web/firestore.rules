@@ -30,6 +30,12 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Patch activity: audit log of subscriber changes; only patch owner can read.
+    match /patchActivity/{activityId} {
+      allow read: if request.auth != null && resource.data.inviterUid == request.auth.uid;
+      allow write: if false;
+    }
+
     // Deny everything else.
     match /{document=**} {
       allow read, write: if false;
