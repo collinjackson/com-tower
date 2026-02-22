@@ -58,14 +58,16 @@ export function BackgroundCanvas() {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !rAF) return;
+    const requestAnim = rAF;
 
     let width = window.innerWidth;
     let height = Math.max(window.document.body.offsetHeight, 400);
     canvas.width = width;
     canvas.height = height;
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    const ctxOrNull = canvas.getContext('2d');
+    if (!ctxOrNull) return;
+    const ctx: CanvasRenderingContext2D = ctxOrNull;
 
     // Terrain state: { points, scrollDelay, lastScroll, fillStyle, mHeight }
     const terrains: Array<{
@@ -335,10 +337,10 @@ export function BackgroundCanvas() {
       explosions.length = 0;
       explosions.push(...stillActive);
 
-      rafId = rAF(animate);
+      rafId = requestAnim(animate);
     }
 
-    rafId = rAF(animate);
+    rafId = requestAnim(animate);
 
     const onResize = () => {
       if (resizeTimeout) clearTimeout(resizeTimeout);
