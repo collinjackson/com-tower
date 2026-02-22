@@ -188,8 +188,13 @@ export default function InvitePage({ params }: { params: Promise<{ code: string 
 
         {info && (
           <>
-            <p className="text-xl text-zinc-100 font-bold">{info.gameName}</p>
-            <p className="text-xs text-zinc-400 -mt-1">{info.mapName || 'Map unknown'}</p>
+            <p className="text-xl text-zinc-100 font-bold">
+              {info.gameName}
+              {info.mapName && (
+                <span className="text-zinc-400 font-normal"> · {info.mapName}</span>
+              )}
+              {!info.mapName && <span className="text-zinc-400 font-normal"> · Map unknown</span>}
+            </p>
 
             <div className="space-y-2">
               <label className="text-xs uppercase tracking-[0.2em] text-zinc-400">

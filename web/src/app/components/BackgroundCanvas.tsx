@@ -272,11 +272,10 @@ export function BackgroundCanvas() {
           } else {
             s.x = nextX;
             s.y = nextY;
-            ctx.lineWidth = s.size;
+            const radius = s.size + 1.5;
             ctx.beginPath();
-            ctx.moveTo(s.x, s.y);
-            ctx.lineTo(s.x + s.len, s.y - s.len);
-            ctx.stroke();
+            ctx.arc(s.x, s.y, radius, 0, Math.PI * 2);
+            ctx.fill();
           }
         } else if (now >= s.waitTime) {
           s.active = true;
