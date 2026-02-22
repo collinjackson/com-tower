@@ -52,6 +52,9 @@ type FlameParticle = { x: number; y: number; vx: number; vy: number; life: numbe
 type Explosion = { x: number; y: number; startTime: number; particles: FlameParticle[] };
 type TerrainHole = { worldX: number; radius: number; depth: number };
 
+type InfantryGroup = { worldX: number; terrainLayer: number; count: number; stepPhase: number; dir: number };
+type Fighter = { x: number; y: number; vx: number; vy: number; angle: number; trail: number };
+
 export function BackgroundCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -135,6 +138,32 @@ export function BackgroundCanvas() {
     }
     shootingStars.forEach(resetShootingStar);
 
+    const infantryGroups: InfantryGroup[] = [];
+    const power = Math.pow(2, Math.ceil(Math.log(Math.max(width, 1)) / Math.log(2)));
+    [0, 1, 2].forEach((layer) => {
+      for (let g = 0; g < 2; g++) {
+        infantryGroups.push({
+          worldX: Math.floor(Math.random() * (power * 3)) + g * (power * 2),
+          terrainLayer: layer,
+          count: 3 + Math.floor(Math.random() * 4),
+          stepPhase: Math.random() * Math.PI * 2,
+          dir: Math.random() > 0.5 ? 1 : -1,
+        });
+      }
+    });
+
+    const fighters: Fighter[] = [];
+    for (let f = 0; f < 4; f++) {
+      fighters.push({
+        x: Math.random() * width,
+        y: height * (0.15 + Math.random() * 0.35),
+        vx: (Math.random() - 0.5) * 1.2,
+        vy: (Math.random() - 0.5) * 0.8,
+        angle: Math.random() * Math.PI * 2,
+        trail: 0,
+      });
+    }
+
     const explosions: Explosion[] = [];
     const EXPLOSION_DURATION_MS = 800;
     const FIRE_DURATION_MS = 1800;
@@ -210,6 +239,10 @@ export function BackgroundCanvas() {
         });
       }
       while (stars.length > height) stars.pop();
+      for (const f of fighters) {
+        f.x = Math.min(width + 10, Math.max(-10, f.x));
+        f.y = Math.min(height * 0.5, Math.max(20, f.y));
+      }
     }
 
     let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -256,16 +289,72 @@ export function BackgroundCanvas() {
         ctx.fill();
       }
 
+      const frontTerrain = terrains[2];
+
+      for (const group of infantryGroups) {
+        const wrap = width + 120;
+        let screenX = ((group.worldX - frontTerrainScrollOffset) % wrap + wrap) % wrap - 60;
+        if (screenX < -20 || screenX > width + 20) continue;
+        const terrainY = getTerrainY(frontTerrain.points, screenX, width) + craterOffsetAt(screenX);
+        const y = terrainY - 3;
+        group.stepPhase += 0.04;
+        const bob = Math.sin(group.stepPhase) * 0.8;
+        ctx.fillStyle = 'rgba(8,8,12,0.92)';
+        for (let i = 0; i < group.count; i++) {
+          const px = screenX + i * 4 * group.dir + bob;
+          const py = y - (i % 2) * 1;
+          ctx.fillRect(px, py, 2, 3);
+        }
+      }
+
+      for (const f of fighters) {
+        f.x += f.vx;
+        f.y += f.vy;
+        f.angle = Math.atan2(f.vy, f.vx);
+        if (f.x < -20) f.x = width + 20;
+        if (f.x > width + 20) f.x = -20;
+        if (f.y < 20) { f.y = 20; f.vy *= -0.6; }
+        if (f.y > height * 0.5) { f.y = height * 0.5; f.vy *= -0.6; }
+        f.vx += (Math.random() - 0.5) * 0.08;
+        f.vy += (Math.random() - 0.5) * 0.06;
+        const spd = Math.sqrt(f.vx * f.vx + f.vy * f.vy);
+        if (spd > 1.8) { f.vx *= 0.98; f.vy *= 0.98; }
+        if (spd < 0.4) { f.vx *= 1.02; f.vy *= 1.02; }
+        f.trail = (f.trail + 0.3) % (Math.PI * 2);
+        const trailLen = 6 + Math.sin(f.trail) * 2;
+        ctx.strokeStyle = 'rgba(120,130,150,0.35)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(f.x, f.y);
+        ctx.lineTo(f.x - Math.cos(f.angle) * trailLen, f.y - Math.sin(f.angle) * trailLen);
+        ctx.stroke();
+        ctx.save();
+        ctx.translate(f.x, f.y);
+        ctx.rotate(f.angle);
+        ctx.fillStyle = 'rgba(90,95,110,0.9)';
+        ctx.beginPath();
+        ctx.moveTo(5, 0);
+        ctx.lineTo(-3, -2.5);
+        ctx.lineTo(-2, 0);
+        ctx.lineTo(-3, 2.5);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(70,75,90,0.95)';
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+        ctx.restore();
+      }
+
       ctx.fillStyle = '#ffffff';
       ctx.strokeStyle = '#ffffff';
 
-      const frontTerrain = terrains[2];
+      const frontTerrainForStars = terrains[2];
 
       for (const s of shootingStars) {
         if (s.active) {
           const nextX = s.x - s.speed;
           const nextY = s.y + s.speed;
-          const terrainY = getTerrainY(frontTerrain.points, nextX, width);
+          const terrainY = getTerrainY(frontTerrainForStars.points, nextX, width) + craterOffsetAt(nextX);
 
           if (nextX < 0) {
             resetShootingStar(s);
