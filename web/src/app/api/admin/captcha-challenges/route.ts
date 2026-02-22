@@ -133,6 +133,17 @@ export async function GET(req: NextRequest) {
                 }
               }
             });
+            const deliveries = data.deliveries || [];
+            deliveries.forEach((d: { handle?: string; error?: string }) => {
+              if (d.error && d.error.includes('CAPTCHA') && d.handle && !captchaErrorsFromMessages.has(d.handle)) {
+                captchaErrorsFromMessages.set(d.handle, {
+                  phone: d.handle,
+                  gameId,
+                  error: d.error,
+                  createdAt: data.createdAt?.toDate?.()?.toISOString() || data.createdAt || null,
+                });
+              }
+            });
           });
         } catch (err) {
           // If query fails (e.g., missing index), continue

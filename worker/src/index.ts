@@ -686,14 +686,19 @@ async function sendNotifications(
           });
       })
     );
+    const hasFailed = deliveries.some((d) => d.status === 'failed');
+    const hasSent = deliveries.some((d) => d.status === 'sent');
+    const messageStatus = hasFailed && hasSent ? 'partial-failed' : hasFailed ? 'failed' : 'sent';
     await msgRef.update({
-      status: 'sent',
+      status: messageStatus,
       sentAt: FieldValue.serverTimestamp(),
       deliveries,
     });
   } catch (err) {
+    const hasSent = deliveries.some((d) => d.status === 'sent');
+    const messageStatus = hasSent ? 'partial-failed' : 'failed';
     await msgRef.update({
-      status: 'failed',
+      status: messageStatus,
       error: err instanceof Error ? err.message : String(err),
       sentAt: FieldValue.serverTimestamp(),
       deliveries,
