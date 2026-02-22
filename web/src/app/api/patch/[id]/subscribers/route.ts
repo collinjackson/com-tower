@@ -199,7 +199,7 @@ export async function PATCH(
   }
 
   const validFreq = ['once', 'hourly'] as const;
-  let body: { type?: 'dm' | 'group'; handle?: string; notifyFrequency?: typeof validFreq[number] | null | ''; scope?: 'my-turn' | 'all'; funEnabled?: boolean };
+  let body: { type?: 'dm' | 'group'; handle?: string; notifyFrequency?: typeof validFreq[number] | null | ''; scope?: 'my-turn' | 'all'; funEnabled?: boolean; playerName?: string | null };
   try {
     body = await req.json();
   } catch {
@@ -244,6 +244,15 @@ export async function PATCH(
     if (typeof body.funEnabled === 'boolean') {
       updated[idx] = { ...updated[idx], funEnabled: body.funEnabled };
     }
+    if (body.playerName !== undefined) {
+      const next = updated[idx] as any;
+      if (body.playerName == null || body.playerName === '') {
+        const { playerName: _, ...rest } = next;
+        updated[idx] = rest;
+      } else {
+        updated[idx] = { ...next, playerName: String(body.playerName).trim() };
+      }
+    }
 
     await patchRef.update({ subscribers: updated });
 
@@ -256,6 +265,9 @@ export async function PATCH(
     }
     if (typeof body.funEnabled === 'boolean') {
       parts.push(`Message style → ${body.funEnabled ? 'Fun mode' : 'Classic'}`);
+    }
+    if (body.playerName !== undefined) {
+      parts.push(`Player → ${body.playerName == null || body.playerName === '' ? 'All' : body.playerName}`);
     }
     const { inviterUid } = parsePatchId(patchId);
     await writePatchActivity(getAdminDb(), {

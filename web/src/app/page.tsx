@@ -123,6 +123,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
   const [groupsLoading, setGroupsLoading] = useState(false);
   const [currentSubscribers, setCurrentSubscribers] = useState<any[]>([]);
   const [subscribersLoading, setSubscribersLoading] = useState(false);
+  const [gamePlayers, setGamePlayers] = useState<string[]>([]);
   const [inviteLink, setInviteLink] = useState('');
   const [inviteCode, setInviteCode] = useState('');
   const [inviteLoading, setInviteLoading] = useState(false);
@@ -556,6 +557,25 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
     }
   }, [gameInfo?.gameId, user]);
 
+  useEffect(() => {
+    if (!gameInfo?.gameId) {
+      setGamePlayers([]);
+      return;
+    }
+    let cancelled = false;
+    fetch(`/api/game/${gameInfo.gameId}/players`)
+      .then((res) => (res.ok ? res.json() : Promise.resolve({ players: [] })))
+      .then((data: { players?: string[] }) => {
+        if (!cancelled && Array.isArray(data.players)) setGamePlayers(data.players);
+      })
+      .catch(() => {
+        if (!cancelled) setGamePlayers([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [gameInfo?.gameId]);
+
   return (
     <div className="min-h-screen bg-transparent text-zinc-100 flex items-center justify-center p-4">
       <main
@@ -563,7 +583,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
           user && view === 'main' && !gameInfo ? 'pt-6' : 'pt-16'
         }`}
       >
-        <div className="flex items-start justify-between gap-4 min-w-0">
+        <div className={`flex justify-between gap-4 min-w-0 ${user ? 'items-start' : 'items-center'}`}>
         <div className="space-y-3 min-w-0 flex-1 overflow-hidden">
           {user && view === 'main' && gameInfo ? (
             <div className="relative min-w-0">
@@ -772,9 +792,6 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                               {sub.type}
                             </span>
                             <span className="text-sm text-zinc-200 truncate">{sub.handle}</span>
-                            {sub.playerName && (
-                              <span className="text-xs text-zinc-500">Player {sub.playerName}</span>
-                            )}
                             {sub.country && (
                               <span className="text-xs text-zinc-500 uppercase">{sub.country}</span>
                             )}
@@ -782,7 +799,49 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                               <span className="text-xs text-amber-400">Needs group selection</span>
                             )}
                           </div>
-                          <div className="flex items-center gap-2 shrink-0">
+                          <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+                            <select
+                              title="Player to notify for"
+                              value={sub.playerName ?? ''}
+                              disabled={saving}
+                              onChange={async (e) => {
+                                const val = e.target.value;
+                                if (!gameInfo?.gameId || !user || !firebaseAvailable) return;
+                                setSaving(true);
+                                setStatus(null);
+                                try {
+                                  const idToken = await getAuth().currentUser?.getIdToken();
+                                  const res = await fetch(`/api/patch/${gameInfo.gameId}-${user.uid}/subscribers`, {
+                                    method: 'PATCH',
+                                    headers: {
+                                      'Content-Type': 'application/json',
+                                      ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+                                    },
+                                    body: JSON.stringify({
+                                      type: sub.type,
+                                      handle: sub.handle,
+                                      playerName: val === '' ? null : val,
+                                    }),
+                                  });
+                                  if (!res.ok) {
+                                    const errData = await res.json().catch(() => ({}));
+                                    throw new Error(errData.error || 'Failed to update');
+                                  }
+                                  setStatus('Updated.');
+                                  loadSubscribers();
+                                } catch (err: unknown) {
+                                  setStatus(err instanceof Error ? err.message : 'Update failed');
+                                } finally {
+                                  setSaving(false);
+                                }
+                              }}
+                              className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-200 focus:outline-none focus:ring-1 focus:ring-zinc-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              <option value="">All players</option>
+                              {gamePlayers.map((p) => (
+                                <option key={p} value={p}>{p}</option>
+                              ))}
+                            </select>
                             <select
                               value={sub.scope === 'my-turn' ? 'my-turn' : 'all'}
                               onChange={async (e) => {
