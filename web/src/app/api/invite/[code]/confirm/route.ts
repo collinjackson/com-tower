@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { adminAvailable, getAdminDb } from '@/lib/firebase-admin';
 import { parseAndNormalizePhone } from '@/lib/phone';
+import { parsePatchId, writePatchActivity } from '@/lib/patch-activity';
 
 async function getPatchByInviteCode(code: string) {
   const db = getAdminDb();
@@ -31,6 +32,7 @@ export async function POST(
     phone?: string;
     funEnabled?: boolean;
     scope?: 'my-turn' | 'all';
+    notifyFrequency?: 'hourly' | '';
     playerName?: string;
     country?: string;
     action?: 'subscribe' | 'unsubscribe';
@@ -74,6 +76,14 @@ export async function POST(
         },
         { merge: true }
       );
+      const { inviterUid } = parsePatchId(patch.id);
+      await writePatchActivity(getAdminDb(), {
+        patchId: patch.id,
+        inviterUid,
+        action: 'subscriber_removed',
+        handle: phone,
+        type: 'dm',
+      }).catch((err) => console.error('[patchActivity] write failed', err));
       return NextResponse.json({ ok: true, subscribers: filtered });
     }
 
@@ -85,6 +95,9 @@ export async function POST(
       scope,
       lastVerifiedAt: Date.now(),
     };
+    if (body.notifyFrequency === 'hourly') {
+      newSubscriber.notifyFrequency = 'hourly';
+    }
     const playerName = (body.playerName || '').trim();
     if (playerName) {
       newSubscriber.playerName = playerName;
@@ -101,6 +114,18 @@ export async function POST(
       },
       { merge: true }
     );
+
+    const { inviterUid } = parsePatchId(patch.id);
+    await writePatchActivity(getAdminDb(), {
+      patchId: patch.id,
+      inviterUid,
+      action: 'subscriber_added',
+      handle: newSubscriber.handle,
+      type: 'dm',
+      scope: newSubscriber.scope,
+      notifyFrequency: newSubscriber.notifyFrequency ?? null,
+      funEnabled: newSubscriber.funEnabled,
+    }).catch((err) => console.error('[patchActivity] write failed', err));
 
     return NextResponse.json({ ok: true, subscriber: newSubscriber, subscribers: nextSubs });
   } catch (err: any) {

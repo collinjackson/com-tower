@@ -3,6 +3,13 @@
 import { use, useEffect, useState } from 'react';
 import { parseAndNormalizePhone } from '@/lib/phone';
 
+const INVITE_PHONE_STORAGE_KEY = 'com-tower-invite-phone';
+
+function getStoredInvitePhone(): string {
+  if (typeof window === 'undefined') return '';
+  return localStorage.getItem(INVITE_PHONE_STORAGE_KEY) || '';
+}
+
 type InviteInfo = {
   patchId: string;
   gameId: string;
@@ -18,8 +25,12 @@ export default function InvitePage({ params }: { params: Promise<{ code: string 
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState<string | null>(null);
   const [phone, setPhone] = useState('');
+  useEffect(() => {
+    setPhone(getStoredInvitePhone());
+  }, []);
   const [playerName, setPlayerName] = useState('');
   const [scope, setScope] = useState<'all' | 'my-turn'>('all');
+  const [notifyFrequency, setNotifyFrequency] = useState<'' | 'hourly'>('hourly');
   const [funEnabled, setFunEnabled] = useState(false);
   const [action, setAction] = useState<'subscribe' | 'unsubscribe'>('subscribe');
   const [sending, setSending] = useState(false);
@@ -90,6 +101,7 @@ export default function InvitePage({ params }: { params: Promise<{ code: string 
           phone: normalized,
           funEnabled,
           scope,
+          notifyFrequency,
           playerName: playerName || undefined,
           action,
         }),
@@ -99,15 +111,25 @@ export default function InvitePage({ params }: { params: Promise<{ code: string 
         throw new Error(err.error || 'Could not save subscription');
       }
       const data = await res.json();
+      const scopeMsg =
+        scope === 'my-turn'
+          ? 'You will get DMs when it is your turn.'
+          : 'You will get DMs on every player\'s turn.';
+      const freqMsg =
+        notifyFrequency === 'hourly'
+          ? " You'll get a DM when the turn changes, then hourly reminders until the turn ends."
+          : ' One notification per turn.';
       setStatus(
         action === 'unsubscribe'
           ? 'You have been unsubscribed.'
-          : 'Subscription saved. You will get DMs when it is your turn.'
+          : `Subscription saved. ${scopeMsg}${freqMsg}`
       );
       if (data.subscriber?.playerName) {
         setPlayerName(data.subscriber.playerName);
       }
-      setPhone('');
+      if (action === 'subscribe' && typeof window !== 'undefined') {
+        localStorage.setItem(INVITE_PHONE_STORAGE_KEY, normalized);
+      }
     } catch (err: any) {
       setStatus(err?.message || 'Could not save subscription');
     } finally {
@@ -181,54 +203,88 @@ export default function InvitePage({ params }: { params: Promise<{ code: string 
               </p>
             </div>
 
-            <div className="grid sm:grid-cols-2 gap-3">
-              <button
-                onClick={() => setScope('all')}
-                className={`rounded-xl border px-3 py-3 text-left ${
-                  scope === 'all'
-                    ? 'bg-[#13211f] border-[#1f3c35] text-[#b5f5e4]'
-                    : 'bg-black border-zinc-800 text-zinc-300'
-                }`}
-              >
-                <p className="text-sm font-semibold">All turns</p>
-                <p className="text-xs text-zinc-400">Get notified for every turn.</p>
-              </button>
-              <button
-                onClick={() => setScope('my-turn')}
-                className={`rounded-xl border px-3 py-3 text-left ${
-                  scope === 'my-turn'
-                    ? 'bg-[#1a1b2f] border-[#2e315a] text-[#c7d0ff]'
-                    : 'bg-black border-zinc-800 text-zinc-300'
-                }`}
-              >
-                <p className="text-sm font-semibold">Only my turn</p>
-                <p className="text-xs text-zinc-400">Needs your player name above.</p>
-              </button>
+            <div className="space-y-2">
+              <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">When to notify</p>
+              <div className="grid sm:grid-cols-2 gap-3">
+                <button
+                  onClick={() => setScope('all')}
+                  className={`rounded-xl border px-3 py-3 text-left ${
+                    scope === 'all'
+                      ? 'bg-[#13211f] border-[#1f3c35] text-[#b5f5e4]'
+                      : 'bg-black border-zinc-800 text-zinc-300'
+                  }`}
+                >
+                  <p className="text-sm font-semibold">All turns</p>
+                  <p className="text-xs text-zinc-400">Get notified for every player's turn.</p>
+                </button>
+                <button
+                  onClick={() => setScope('my-turn')}
+                  className={`rounded-xl border px-3 py-3 text-left ${
+                    scope === 'my-turn'
+                      ? 'bg-[#13211f] border-[#1f3c35] text-[#b5f5e4]'
+                      : 'bg-black border-zinc-800 text-zinc-300'
+                  }`}
+                >
+                  <p className="text-sm font-semibold">Only my turn</p>
+                  <p className="text-xs text-zinc-400">Needs your player name above.</p>
+                </button>
+              </div>
             </div>
 
-            <div className="grid sm:grid-cols-2 gap-3">
-              <button
-                onClick={() => setFunEnabled(false)}
-                className={`rounded-xl border px-3 py-3 text-left ${
-                  !funEnabled
-                    ? 'bg-[#0f1823] border-[#1f3048] text-[#c7e6ff]'
-                    : 'bg-black border-zinc-800 text-zinc-300'
-                }`}
-              >
-                <p className="text-sm font-semibold">Classic mode</p>
-                <p className="text-xs text-zinc-400">Straightforward alerts.</p>
-              </button>
-              <button
-                onClick={() => setFunEnabled(true)}
-                className={`rounded-xl border px-3 py-3 text-left ${
-                  funEnabled
-                    ? 'bg-[#23150f] border-[#3d2217] text-[#ffd8c7]'
-                    : 'bg-black border-zinc-800 text-zinc-300'
-                }`}
-              >
-                <p className="text-sm font-semibold">Fun mode</p>
-                <p className="text-xs text-zinc-400">Adds flair to messages.</p>
-              </button>
+            <div className="space-y-2">
+              <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">How often to notify</p>
+              <div className="grid sm:grid-cols-2 gap-3">
+                <button
+                  onClick={() => setNotifyFrequency('hourly')}
+                  className={`rounded-xl border px-3 py-3 text-left ${
+                    notifyFrequency === 'hourly'
+                      ? 'bg-[#2d1f0f] border-[#5c3d1a] text-[#ffd4a3]'
+                      : 'bg-black border-zinc-800 text-zinc-300'
+                  }`}
+                >
+                  <p className="text-sm font-semibold">Hourly</p>
+                  <p className="text-xs text-zinc-400">On turn change, then every hour until the turn ends.</p>
+                </button>
+                <button
+                  onClick={() => setNotifyFrequency('')}
+                  className={`rounded-xl border px-3 py-3 text-left ${
+                    notifyFrequency === ''
+                      ? 'bg-[#2d1f0f] border-[#5c3d1a] text-[#ffd4a3]'
+                      : 'bg-black border-zinc-800 text-zinc-300'
+                  }`}
+                >
+                  <p className="text-sm font-semibold">Once</p>
+                  <p className="text-xs text-zinc-400">One notification per turn change only.</p>
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Message style</p>
+              <div className="grid sm:grid-cols-2 gap-3">
+                <button
+                  onClick={() => setFunEnabled(false)}
+                  className={`rounded-xl border px-3 py-3 text-left ${
+                    !funEnabled
+                      ? 'bg-[#1a1b2f] border-[#2e315a] text-[#c7d0ff]'
+                      : 'bg-black border-zinc-800 text-zinc-300'
+                  }`}
+                >
+                  <p className="text-sm font-semibold">Classic mode</p>
+                  <p className="text-xs text-zinc-400">Straightforward alerts.</p>
+                </button>
+                <button
+                  onClick={() => setFunEnabled(true)}
+                  className={`rounded-xl border px-3 py-3 text-left ${
+                    funEnabled
+                      ? 'bg-[#1a1b2f] border-[#2e315a] text-[#c7d0ff]'
+                      : 'bg-black border-zinc-800 text-zinc-300'
+                  }`}
+                >
+                  <p className="text-sm font-semibold">Fun mode</p>
+                  <p className="text-xs text-zinc-400">Adds flair to messages.</p>
+                </button>
+              </div>
             </div>
 
             <div className="flex gap-2">
