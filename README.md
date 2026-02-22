@@ -1,5 +1,7 @@
 # Com Tower
 
+<img width="1195" height="751" alt="Screenshot 2026-02-22 at 2 16 07 PM" src="https://github.com/user-attachments/assets/a53506d7-636f-4015-830f-663c2a8d94cc" />
+
 **Overview**
 - `web/` — Next.js (Vercel) frontend + API:
   - Auth: Google (Firebase).
