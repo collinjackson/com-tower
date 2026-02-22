@@ -89,7 +89,6 @@ export async function GET(req: Request) {
           {
             gameId,
             inviterUid,
-            subscribers: [], // add on demand
             updatedAt: FieldValue.serverTimestamp(),
             createdAt: FieldValue.serverTimestamp(),
           },

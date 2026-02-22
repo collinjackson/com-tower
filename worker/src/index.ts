@@ -1,9 +1,12 @@
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
-import { getFirestore } from 'firebase-admin/firestore';
+import { getFirestore, type Firestore } from 'firebase-admin/firestore';
 import WebSocket from 'ws';
 import { GoogleAuth, IdTokenClient } from 'google-auth-library';
 import http from 'http';
 import { FieldValue } from 'firebase-admin/firestore';
+
+/** once = first notification only; hourly = at most once per hour; undefined = every turn */
+export type NotifyFrequency = 'once' | 'hourly';
 
 type Subscriber = { 
   type: 'dm' | 'group'; 
@@ -18,6 +21,8 @@ type Subscriber = {
   country?: string;
   funEnabled?: boolean;
   lastVerifiedAt?: any;
+  /** When to send: once, hourly; omit = every turn */
+  notifyFrequency?: NotifyFrequency;
 };
 type PatchData = {
   gameId: string;
@@ -59,6 +64,49 @@ function shouldNotify(sub: Subscriber, currentPlayerName?: string) {
     return target.length > 0 && target === String(currentPlayerName).toLowerCase();
   }
   return true;
+}
+
+/** Returns true if this subscriber should get a notification based on notifyFrequency and last-sent times.
+ *  - every turn (undefined): notify on every turn change.
+ *  - hourly: notify immediately on turn changes (same as every turn); no throttle.
+ *  - once: only the first notification for this game. */
+function shouldNotifyByFrequency(
+  sub: Subscriber,
+  lastSentMsByHandle: Map<string, number>
+): boolean {
+  const freq = sub.notifyFrequency;
+  if (freq === undefined) return true; // every turn
+  if (freq === 'hourly') return true; // notify immediately on turn changes (no max-once-per-hour throttle)
+  const lastSent = lastSentMsByHandle.get(sub.handle);
+  if (freq === 'once') return lastSent === undefined;
+  return true;
+}
+
+/** Load map of handle -> latest sent timestamp (ms) for this game from messages collection.
+ *  Requires composite index: messages (gameId asc, status asc, sentAt desc). */
+async function getLastSentMap(db: Firestore, gameId: string): Promise<Map<string, number>> {
+  const map = new Map<string, number>();
+  try {
+    const snap = await db
+      .collection('messages')
+      .where('gameId', '==', gameId)
+      .where('status', '==', 'sent')
+      .orderBy('sentAt', 'desc')
+      .limit(50)
+      .get();
+    for (const d of snap.docs) {
+      const data = d.data() as { sentAt?: { toDate: () => Date }; deliveries?: Array<{ handle: string; status: string }> };
+      const sentAt = data.sentAt?.toDate?.();
+      if (!sentAt || !Array.isArray(data.deliveries)) continue;
+      const ts = sentAt.getTime();
+      for (const del of data.deliveries) {
+        if (del.status === 'sent' && del.handle && !map.has(del.handle)) map.set(del.handle, ts);
+      }
+    }
+  } catch (err) {
+    console.warn('getLastSentMap failed (index may be missing)', err);
+  }
+  return map;
 }
 
 function readJsonBody<T>(req: http.IncomingMessage): Promise<T> {
@@ -208,6 +256,23 @@ async function loadPlayers(gameId: string): Promise<{ players: string[]; countri
   }
 }
 
+/** Check if the game has ended by scraping the AWBW game page. */
+async function isGameEnded(gameId: string): Promise<boolean> {
+  try {
+    const res = await fetch(gameLink(gameId), { cache: 'no-store' as any });
+    const html = await res.text();
+    if (/game\s+over|game over/i.test(html)) return true;
+    if (/winner\s*:|\bwinner\b.*(?:defeated|wins)/i.test(html)) return true;
+    if (/has\s+ended|game\s+has\s+ended/i.test(html)) return true;
+    if (/games_status\s*[=:]\s*["']?(?:finished|ended|complete|over)/i.test(html)) return true;
+    if (/game_status\s*[=:]\s*["']?(?:finished|ended|complete|over)/i.test(html)) return true;
+    return false;
+  } catch (err) {
+    console.warn('isGameEnded check failed', gameId, err);
+    return false;
+  }
+}
+
 // Best-effort scrape of the current player from the game page to validate the socket payload
 async function scrapeCurrentPlayerName(gameId: string): Promise<string | undefined> {
   try {
@@ -302,18 +367,78 @@ const NEXT_TURN_DEDUP_WINDOW_MS = 5000; // Ignore duplicate NextTurn events with
 // Track pending send requests for cancellation
 const pendingSends = new Map<string, AbortController>(); // key: `${gameId}-${subscriber.handle}`, value: AbortController
 
+// Active sockets by patchId so we can stop on game end or patch removal
+const GAME_ENDED_CHECK_MS = 30 * 60 * 1000; // 30 minutes
+const HOURLY_REMINDER_MS = 60 * 60 * 1000; // 1 hour
+/** Minimum gap between any two notifications to the same subscriber (avoid burst). */
+const MIN_NOTIFICATION_GAP_MS = 30 * 60 * 1000; // 30 minutes
+type ActiveSocketState = {
+  ws: WebSocket;
+  shouldReopen: boolean;
+  checkInterval?: ReturnType<typeof setInterval>;
+  data: PatchData; // so hourly job can send reminders
+};
+
+const activeSockets = new Map<string, ActiveSocketState>();
+
 function startSocket(data: PatchData) {
-  const url = buildAwbwSocketUrl(data.gameId);
-  console.log(`Connecting to ${url} for patch ${data.patchId} with ${data.subscribers?.length || 0} subscribers`);
+  const { patchId, gameId } = data;
+  const url = buildAwbwSocketUrl(gameId);
+  console.log(`Connecting to ${url} for patch ${patchId} with ${data.subscribers?.length || 0} subscribers`);
+
+  // If we already have a socket for this patch, stop it first (e.g. patch data updated or duplicate)
+  const existing = activeSockets.get(patchId);
+  if (existing) {
+    existing.shouldReopen = false;
+    if (existing.checkInterval) clearInterval(existing.checkInterval);
+    try {
+      existing.ws.close();
+    } catch {
+      // ignore
+    }
+    activeSockets.delete(patchId);
+  }
+
   const ws = new WebSocket(url);
+  const state: ActiveSocketState = { ws, shouldReopen: true, data };
+  activeSockets.set(patchId, state);
+
+  const stopMonitoring = (reason: string) => {
+    if (!state.shouldReopen) return;
+    console.log(`Stopping monitoring game ${gameId} (patch ${patchId}): ${reason}`);
+    state.shouldReopen = false;
+    if (state.checkInterval) {
+      clearInterval(state.checkInterval);
+      state.checkInterval = undefined;
+    }
+    activeSockets.delete(patchId);
+    try {
+      ws.close();
+    } catch {
+      // ignore
+    }
+  };
 
   const reopen = () => {
-    console.log(`Reconnecting to ${data.gameId} after close/error`);
+    if (!state.shouldReopen) return;
+    console.log(`Reconnecting to ${gameId} after close/error`);
+    activeSockets.delete(patchId);
+    if (state.checkInterval) clearInterval(state.checkInterval);
     setTimeout(() => startSocket(data), 1000);
   };
 
+  // Periodic check: has the game ended? (e.g. via AWBW page)
+  state.checkInterval = setInterval(() => {
+    if (!state.shouldReopen) return;
+    isGameEnded(gameId)
+      .then((ended) => {
+        if (ended) stopMonitoring('game ended (page check)');
+      })
+      .catch(() => {});
+  }, GAME_ENDED_CHECK_MS);
+
   ws.on('open', () => {
-    console.log(`WS open for game ${data.gameId} (patch ${data.patchId})`);
+    console.log(`WS open for game ${gameId} (patch ${patchId})`);
   });
 
   ws.on('message', (msg) => {
@@ -326,8 +451,15 @@ function startSocket(data: PatchData) {
         (parsed?.ActivityUpdate && 'ActivityUpdate') ||
         (parsed?.JoinRoom && 'JoinRoom') ||
         (parsed?.LeaveRoom && 'LeaveRoom') ||
+        (parsed?.GameOver && 'GameOver') ||
+        (parsed?.GameEnd && 'GameEnd') ||
+        (parsed?.game_over && 'GameOver') ||
         'unknown';
       console.log(`WS message for game ${data.gameId}: type=${msgType}`);
+      if (msgType === 'GameOver' || msgType === 'GameEnd') {
+        stopMonitoring('game over (WebSocket)');
+        return;
+      }
       if (msgType === 'unknown') {
         console.log(`WS payload for game ${data.gameId}: ${msg.toString()}`);
       }
@@ -380,31 +512,32 @@ function startSocket(data: PatchData) {
           includeImage: false, // Temporarily disabled to troubleshoot basic chat sending
         };
         const db = getFirestore();
-        const msgRef = db.collection('messages').doc();
-        msgRef
-          .set({
-            gameId: data.gameId,
-            status: 'processing',
-            createdAt: FieldValue.serverTimestamp(),
-            recipients: candidateSubs.map((s) => s.handle),
-          })
-          .catch((err) => console.error('Pre-log message create failed', err));
-
         Promise.all([
           loadPlayers(data.gameId).catch(() => ({ players: [], countries: [] })),
           loadGameName(data.gameId),
           scrapedPlayerNamePromise,
+          getLastSentMap(db, data.gameId),
         ])
-          .then(([info, gameName, scrapedPlayerName]) => {
+          .then(([info, gameName, scrapedPlayerName, lastSentMap]) => {
             if (scrapedPlayerName && socketPlayerName && scrapedPlayerName !== socketPlayerName) {
               console.log(
                 `Player mismatch for game ${data.gameId}: socket=${socketPlayerName}, scraped=${scrapedPlayerName}`
               );
             }
             const effectivePlayerName = scrapedPlayerName || socketPlayerName;
-            const deliverSubs = candidateSubs.filter((s) =>
-              shouldNotify(s, effectivePlayerName)
-            );
+            let deliverSubs = candidateSubs
+              .filter((s) => shouldNotify(s, effectivePlayerName))
+              .filter((s) => shouldNotifyByFrequency(s, lastSentMap));
+            // Avoid two notifications less than 30 minutes apart (skip if we sent recently)
+            deliverSubs = deliverSubs.filter((s) => {
+              const lastSent = lastSentMap.get(s.handle);
+              if (lastSent === undefined) return true;
+              if (Date.now() - lastSent < MIN_NOTIFICATION_GAP_MS) {
+                console.log(`Skipping notify to ${s.handle} for game ${data.gameId}: last sent ${Math.round((Date.now() - lastSent) / 60000)}m ago (< 30m gap)`);
+                return false;
+              }
+              return true;
+            });
             if (deliverSubs.length === 0) {
               console.log(
                 `NextTurn for ${data.gameId} but no matching subscribers after scrape for ${
@@ -420,149 +553,7 @@ function startSocket(data: PatchData) {
               gameName,
               playerName: effectivePlayerName,
             };
-            msgRef
-              .update({
-                socketPlayerName: socketPlayerName || null,
-                scrapedPlayerName: scrapedPlayerName || null,
-                effectivePlayerName: effectivePlayerName || null,
-                recipients: deliverSubs.map((s) => s.handle),
-              })
-              .catch((err) => console.error('Message log player update failed', err));
-            const funSubs = deliverSubs.filter((s) => !!s.funEnabled);
-            const classicSubs = deliverSubs.filter((s) => !s.funEnabled);
-
-            const payloadPromises: Array<Promise<[boolean, RenderPayload]>> = [];
-            if (classicSubs.length > 0) {
-              payloadPromises.push(
-                buildMessage(data.gameId, { ...baseMeta, funEnabled: false }).then((payload) => {
-                  (payload as any).currentPlayerName = meta.playerName;
-                  return [false, payload];
-                })
-              );
-            }
-            if (funSubs.length > 0) {
-              payloadPromises.push(
-                buildMessage(data.gameId, { ...baseMeta, funEnabled: true }).then((payload) => {
-                  (payload as any).currentPlayerName = meta.playerName;
-                  return [true, payload];
-                })
-              );
-            }
-
-            return Promise.all(payloadPromises).then((entries) => {
-              const payloadMap = new Map<boolean, RenderPayload>(entries);
-              const logPayloadClassic = payloadMap.get(false);
-              const logPayloadFun = payloadMap.get(true);
-              const logPayload = logPayloadClassic || logPayloadFun;
-              if (!logPayload) {
-                throw new Error('No payload generated for subscribers');
-              }
-              console.log(
-                `Render payload for game ${data.gameId}: textLen=${logPayload.text.length}, imageData=${
-                  logPayload.imageData ? logPayload.imageData.length : 0
-                }, imageUrl=${logPayload.imageUrl ? 'yes' : 'no'}, variants=${entries.length}`
-              );
-              msgRef
-                .update({
-                  status: 'rendered',
-                  text: logPayload.text,
-                  textClassic: logPayloadClassic?.text || null,
-                  textFun: logPayloadFun?.text || null,
-                  recipientsClassic: classicSubs.map((s) => s.handle),
-                  recipientsFun: funSubs.map((s) => s.handle),
-                  imageUrl: logPayload.imageUrl || null,
-                  imageDataPresent: !!logPayload.imageData,
-                  renderedAt: FieldValue.serverTimestamp(),
-                })
-                .catch((err) => console.error('Message log render update failed', err));
-
-              msgRef
-                .update({ status: 'sending', sendStartedAt: FieldValue.serverTimestamp() })
-                .catch((err) => console.error('Message log send-start update failed', err));
-
-              const deliveries: Array<{
-                handle: string;
-                variant: 'fun' | 'classic';
-                status: 'sent' | 'failed';
-                error?: string;
-              }> = [];
-
-              // Cancel any pending sends for this game/subscriber combination
-              deliverSubs.forEach((sub) => {
-                const pendingKey = `${data.gameId}-${sub.handle}`;
-                const pendingController = pendingSends.get(pendingKey);
-                if (pendingController) {
-                  console.log(`Cancelling pending send for ${pendingKey}`);
-                  pendingController.abort();
-                  pendingSends.delete(pendingKey);
-                }
-              });
-
-              Promise.all(
-                deliverSubs.map((sub) => {
-                  const pendingKey = `${data.gameId}-${sub.handle}`;
-                  const abortController = new AbortController();
-                  pendingSends.set(pendingKey, abortController);
-
-                  const payload = payloadMap.get(!!sub.funEnabled) || logPayload;
-                  const variant: 'fun' | 'classic' = sub.funEnabled ? 'fun' : 'classic';
-
-                  return sendSignal(sub, payload, data.patchId, abortController.signal)
-                    .then(() => {
-                      pendingSends.delete(pendingKey);
-                      deliveries.push({
-                        handle: sub.handle,
-                        variant,
-                        status: 'sent',
-                      });
-                      console.log(
-                        `Signal ${sub.type === 'group' ? 'group ' : ''}sent to ${
-                          sub.handle
-                        } for game ${data.gameId} (NextTurn, fun=${!!sub.funEnabled})`
-                      );
-                    })
-                    .catch((err) => {
-                      pendingSends.delete(pendingKey);
-                      if (err.name === 'AbortError') {
-                        console.log(`Send cancelled for ${pendingKey}`);
-                        return; // Don't throw for cancelled requests
-                      }
-                      deliveries.push({
-                        handle: sub.handle,
-                        variant,
-                        status: 'failed',
-                        error: err instanceof Error ? err.message : String(err),
-                      });
-                      console.error('Signal send failed', err);
-                      throw err;
-                    });
-                })
-              )
-                .then(() =>
-                  msgRef.update({
-                    status: 'sent',
-                    sentAt: FieldValue.serverTimestamp(),
-                    deliveries,
-                  })
-                )
-                .catch((err) =>
-                  msgRef.update({
-                    status: 'failed',
-                    error: err instanceof Error ? err.message : String(err),
-                    sentAt: FieldValue.serverTimestamp(),
-                    deliveries,
-                  })
-                );
-            });
-          })
-          .catch((err) => {
-            console.error('Message build failed', err);
-            msgRef
-              .update({
-                status: 'failed',
-                error: err instanceof Error ? err.message : String(err),
-              })
-              .catch(() => {});
+            sendNotifications(data, baseMeta, deliverSubs, 'NextTurn').catch(() => {});
           });
       }
     } catch (err) {
@@ -576,8 +567,174 @@ function startSocket(data: PatchData) {
   });
   ws.on('close', () => {
     console.log(`WS closed for ${data.gameId}`);
-    reopen();
+    if (state.checkInterval) {
+      clearInterval(state.checkInterval);
+      state.checkInterval = undefined;
+    }
+    activeSockets.delete(patchId);
+    if (state.shouldReopen) reopen();
   });
+}
+
+/** Send notifications to deliverSubs (build message, send Signal, log to messages). Used for NextTurn and hourly reminders. */
+async function sendNotifications(
+  data: PatchData,
+  baseMeta: NextTurnMeta,
+  deliverSubs: Subscriber[],
+  source: 'NextTurn' | 'hourly'
+): Promise<void> {
+  const db = getFirestore();
+  const msgRef = db.collection('messages').doc();
+  await msgRef.set({
+    gameId: data.gameId,
+    status: 'processing',
+    createdAt: FieldValue.serverTimestamp(),
+    recipients: deliverSubs.map((s) => s.handle),
+  }).catch((err) => console.error('Pre-log message create failed', err));
+
+  const funSubs = deliverSubs.filter((s) => !!s.funEnabled);
+  const classicSubs = deliverSubs.filter((s) => !s.funEnabled);
+  const payloadPromises: Array<Promise<[boolean, RenderPayload]>> = [];
+  if (classicSubs.length > 0) {
+    payloadPromises.push(
+      buildMessage(data.gameId, { ...baseMeta, funEnabled: false }).then((payload) => {
+        (payload as any).currentPlayerName = baseMeta.playerName;
+        return [false, payload];
+      })
+    );
+  }
+  if (funSubs.length > 0) {
+    payloadPromises.push(
+      buildMessage(data.gameId, { ...baseMeta, funEnabled: true }).then((payload) => {
+        (payload as any).currentPlayerName = baseMeta.playerName;
+        return [true, payload];
+      })
+    );
+  }
+
+  let entries: [boolean, RenderPayload][];
+  try {
+    entries = await Promise.all(payloadPromises);
+  } catch (err) {
+    console.error('Message build failed', err);
+    await msgRef.update({
+      status: 'failed',
+      error: err instanceof Error ? err.message : String(err),
+    }).catch(() => {});
+    return;
+  }
+
+  const payloadMap = new Map<boolean, RenderPayload>(entries);
+  const logPayloadClassic = payloadMap.get(false);
+  const logPayloadFun = payloadMap.get(true);
+  const logPayload = logPayloadClassic || logPayloadFun;
+  if (!logPayload) {
+    await msgRef.update({ status: 'failed', error: 'No payload generated' }).catch(() => {});
+    return;
+  }
+  console.log(
+    `Render payload for game ${data.gameId} (${source}): textLen=${logPayload.text.length}, recipients=${deliverSubs.length}`
+  );
+  await msgRef.update({
+    status: 'rendered',
+    text: logPayload.text,
+    textClassic: logPayloadClassic?.text || null,
+    textFun: logPayloadFun?.text || null,
+    recipientsClassic: classicSubs.map((s) => s.handle),
+    recipientsFun: funSubs.map((s) => s.handle),
+    imageUrl: logPayload.imageUrl || null,
+    imageDataPresent: !!logPayload.imageData,
+    renderedAt: FieldValue.serverTimestamp(),
+  }).catch((err) => console.error('Message log render update failed', err));
+  await msgRef.update({ status: 'sending', sendStartedAt: FieldValue.serverTimestamp() }).catch(() => {});
+
+  const deliveries: Array<{ handle: string; variant: 'fun' | 'classic'; status: 'sent' | 'failed'; error?: string }> = [];
+  deliverSubs.forEach((sub) => {
+    const pendingKey = `${data.gameId}-${sub.handle}`;
+    const pendingController = pendingSends.get(pendingKey);
+    if (pendingController) {
+      pendingController.abort();
+      pendingSends.delete(pendingKey);
+    }
+  });
+
+  try {
+    await Promise.all(
+      deliverSubs.map((sub) => {
+        const pendingKey = `${data.gameId}-${sub.handle}`;
+        const abortController = new AbortController();
+        pendingSends.set(pendingKey, abortController);
+        const payload = payloadMap.get(!!sub.funEnabled) || logPayload;
+        const variant: 'fun' | 'classic' = sub.funEnabled ? 'fun' : 'classic';
+        return sendSignal(sub, payload, data.patchId, abortController.signal)
+          .then(() => {
+            pendingSends.delete(pendingKey);
+            deliveries.push({ handle: sub.handle, variant, status: 'sent' });
+            console.log(`Signal sent to ${sub.handle} for game ${data.gameId} (${source})`);
+          })
+          .catch((err) => {
+            pendingSends.delete(pendingKey);
+            if (err.name === 'AbortError') return;
+            deliveries.push({
+              handle: sub.handle,
+              variant,
+              status: 'failed',
+              error: err instanceof Error ? err.message : String(err),
+            });
+            console.error('Signal send failed', err);
+            throw err;
+          });
+      })
+    );
+    await msgRef.update({
+      status: 'sent',
+      sentAt: FieldValue.serverTimestamp(),
+      deliveries,
+    });
+  } catch (err) {
+    await msgRef.update({
+      status: 'failed',
+      error: err instanceof Error ? err.message : String(err),
+      sentAt: FieldValue.serverTimestamp(),
+      deliveries,
+    });
+  }
+}
+
+/** Run hourly reminders for subscribers with notifyFrequency === 'hourly': send if still their turn and last sent ≥ 1h ago. */
+async function runHourlyReminders(): Promise<void> {
+  const db = getFirestore();
+  for (const [_patchId, state] of activeSockets) {
+    const data = state.data;
+    if (!data?.subscribers?.length) continue;
+    const hourlySubs = data.subscribers.filter((s) => s.notifyFrequency === 'hourly');
+    if (hourlySubs.length === 0) continue;
+
+    const [currentPlayerName, lastSentMap, info, gameName] = await Promise.all([
+      scrapeCurrentPlayerName(data.gameId),
+      getLastSentMap(db, data.gameId),
+      loadPlayers(data.gameId).catch(() => ({ players: [] as string[], countries: [] as string[] })),
+      loadGameName(data.gameId),
+    ]);
+    const deliverSubs = hourlySubs.filter((s) => {
+      if (!shouldNotify(s, currentPlayerName)) return false;
+      const lastSent = lastSentMap.get(s.handle);
+      if (lastSent === undefined) return true;
+      const gap = Date.now() - lastSent;
+      if (gap < MIN_NOTIFICATION_GAP_MS) return false; // avoid two notifications < 30 min apart
+      return gap >= HOURLY_REMINDER_MS;
+    });
+    if (deliverSubs.length === 0) continue;
+
+    const baseMeta: NextTurnMeta = {
+      playerName: currentPlayerName,
+      players: info.players,
+      countries: info.countries,
+      gameName,
+      includeImage: false,
+    };
+    await sendNotifications(data, baseMeta, deliverSubs, 'hourly');
+  }
 }
 
 async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId: string, abortSignal?: AbortSignal) {
@@ -782,9 +939,28 @@ async function main() {
   const db = getFirestore();
 
   console.log('Worker starting. Watching patches for subscribers...');
+  setInterval(() => {
+    runHourlyReminders().catch((err) => console.error('Hourly reminders failed', err));
+  }, HOURLY_REMINDER_MS);
+
   db.collection('patches').onSnapshot((snap) => {
     snap.docChanges().forEach((change) => {
-      if (change.type === 'removed') return;
+      const patchId = change.doc.id;
+      if (change.type === 'removed') {
+        const state = activeSockets.get(patchId);
+        if (state) {
+          state.shouldReopen = false;
+          if (state.checkInterval) clearInterval(state.checkInterval);
+          try {
+            state.ws.close();
+          } catch {
+            // ignore
+          }
+          activeSockets.delete(patchId);
+          console.log(`Stopped monitoring patch ${patchId} (patch removed)`);
+        }
+        return;
+      }
       const data = change.doc.data() as {
         gameId?: string;
         subscribers?: Subscriber[];
@@ -795,7 +971,7 @@ async function main() {
       startSocket({
         gameId: data.gameId,
         subscribers: data.subscribers,
-        patchId: change.doc.id,
+        patchId,
         experimentalExtended: data.experimentalExtended,
       });
     });

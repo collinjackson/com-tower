@@ -1,6 +1,7 @@
 import { NextResponse, NextRequest } from 'next/server';
 import { getAdminAuth, getAdminDb, adminAvailable } from '@/lib/firebase-admin';
 import { parseAndNormalizePhone } from '@/lib/phone';
+import { parsePatchId, writePatchActivity } from '@/lib/patch-activity';
 
 export async function POST(
   req: NextRequest,
@@ -30,11 +31,15 @@ export async function POST(
     return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
   }
 
+  const validFreq = ['once', 'hourly'] as const;
+  type NotifyFreq = (typeof validFreq)[number];
+
   let body: {
     type?: 'dm' | 'group';
     handle?: string;
     funEnabled?: boolean;
     scope?: 'my-turn' | 'all';
+    notifyFrequency?: NotifyFreq;
     mentions?: string[];
     groupName?: string;
     groupId?: string;
@@ -83,6 +88,9 @@ export async function POST(
       funEnabled: !!body.funEnabled,
       scope: body.scope === 'my-turn' || body.scope === 'all' ? body.scope : 'all',
     };
+    if (body.notifyFrequency !== undefined && validFreq.includes(body.notifyFrequency)) {
+      newSub.notifyFrequency = body.notifyFrequency;
+    }
 
     
     // Only include mentions if it's a non-empty array (Firestore doesn't allow undefined)
@@ -121,7 +129,7 @@ export async function POST(
     }
     
     const nextSubs = [
-      ...subscribers.filter((s) => !(s.type === body.type && s.handle === body.handle)),
+      ...subscribers.filter((s) => !(s.type === body.type && s.handle === normalizedHandle)),
       newSub,
     ];
 
@@ -132,6 +140,18 @@ export async function POST(
       },
       { merge: true }
     );
+
+    const { inviterUid } = parsePatchId(patchId);
+    await writePatchActivity(getAdminDb(), {
+      patchId,
+      inviterUid: inviterUid || data.inviterUid || uid,
+      action: 'subscriber_added',
+      handle: newSub.type === 'dm' ? normalizedHandle : newSub.handle,
+      type: newSub.type,
+      scope: newSub.scope,
+      notifyFrequency: newSub.notifyFrequency ?? null,
+      funEnabled: newSub.funEnabled,
+    }).catch((err) => console.error('[patchActivity] write failed', err));
 
     return NextResponse.json({ 
       ok: true, 
@@ -144,6 +164,114 @@ export async function POST(
         error: err?.message || 'Internal server error',
         details: err?.stack?.substring(0, 500),
       },
+      { status: 500 }
+    );
+  }
+}
+
+/** Update one subscriber's notifyFrequency (and optionally scope, funEnabled) by type+handle. */
+export async function PATCH(
+  req: NextRequest,
+  context: { params: Promise<{ id: string }> }
+) {
+  if (!adminAvailable) {
+    return NextResponse.json({ error: 'Admin not configured' }, { status: 500 });
+  }
+
+  const { id: patchId } = await context.params;
+  if (!patchId) {
+    return NextResponse.json({ error: 'Missing patch id' }, { status: 400 });
+  }
+
+  const authHeader =
+    req.headers.get('authorization') || req.headers.get('Authorization');
+  if (!authHeader?.startsWith('Bearer ')) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  let uid: string | null = null;
+  try {
+    const token = authHeader.slice('Bearer '.length);
+    const decoded = await getAdminAuth().verifyIdToken(token);
+    uid = decoded.uid;
+  } catch {
+    return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
+  }
+
+  const validFreq = ['once', 'hourly'] as const;
+  let body: { type?: 'dm' | 'group'; handle?: string; notifyFrequency?: typeof validFreq[number] | null | ''; scope?: 'my-turn' | 'all'; funEnabled?: boolean };
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
+  }
+
+  if (!body.type || !body.handle) {
+    return NextResponse.json({ error: 'type and handle required' }, { status: 400 });
+  }
+
+  try {
+    const db = getAdminDb();
+    const patchRef = db.collection('patches').doc(patchId);
+    const snap = await patchRef.get();
+    if (!snap.exists) {
+      return NextResponse.json({ error: 'Patch not found' }, { status: 404 });
+    }
+    const data = snap.data() as { inviterUid?: string; subscribers?: any[] };
+    if (data.inviterUid && data.inviterUid !== uid) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
+    const subscribers = Array.isArray(data.subscribers) ? data.subscribers : [];
+    const idx = subscribers.findIndex((s: any) => s.type === body.type && s.handle === body.handle);
+    if (idx === -1) {
+      return NextResponse.json({ error: 'Subscriber not found' }, { status: 404 });
+    }
+
+    const updated = [...subscribers];
+    const clearFreq = body.notifyFrequency === null || body.notifyFrequency === '';
+    if (body.notifyFrequency !== undefined) {
+      if (clearFreq) {
+        const { notifyFrequency: _, ...rest } = updated[idx] as any;
+        updated[idx] = rest;
+      } else if (validFreq.includes(body.notifyFrequency as any)) {
+        updated[idx] = { ...updated[idx], notifyFrequency: body.notifyFrequency };
+      }
+    }
+    if (body.scope === 'my-turn' || body.scope === 'all') {
+      updated[idx] = { ...updated[idx], scope: body.scope };
+    }
+    if (typeof body.funEnabled === 'boolean') {
+      updated[idx] = { ...updated[idx], funEnabled: body.funEnabled };
+    }
+
+    await patchRef.update({ subscribers: updated });
+
+    const parts: string[] = [];
+    if (body.scope === 'my-turn' || body.scope === 'all') {
+      parts.push(`Scope → ${body.scope === 'my-turn' ? 'Only my turn' : 'All turns'}`);
+    }
+    if (body.notifyFrequency !== undefined) {
+      parts.push(`Frequency → ${body.notifyFrequency === 'hourly' ? 'Hourly' : 'Once per turn'}`);
+    }
+    if (typeof body.funEnabled === 'boolean') {
+      parts.push(`Message style → ${body.funEnabled ? 'Fun mode' : 'Classic'}`);
+    }
+    const { inviterUid } = parsePatchId(patchId);
+    await writePatchActivity(getAdminDb(), {
+      patchId,
+      inviterUid,
+      action: 'subscriber_updated',
+      handle: body.handle,
+      type: body.type as 'dm' | 'group',
+      details: parts.length ? parts.join('; ') : undefined,
+    }).catch((err) => console.error('[patchActivity] write failed', err));
+
+    return NextResponse.json({ ok: true, subscribers: updated });
+  } catch (err: any) {
+    console.error('[subscribers PATCH] Error:', err);
+    return NextResponse.json(
+      { error: err?.message || 'Internal server error' },
       { status: 500 }
     );
   }

@@ -1,5 +1,6 @@
 import { NextResponse, NextRequest } from 'next/server';
 import { getAdminAuth, getAdminDb, adminAvailable } from '@/lib/firebase-admin';
+import { parsePatchId, writePatchActivity } from '@/lib/patch-activity';
 
 export async function DELETE(
   req: NextRequest,
@@ -51,6 +52,15 @@ export async function DELETE(
   await patchRef.update({
     subscribers: updated,
   });
+
+  const { inviterUid } = parsePatchId(patchId);
+  await writePatchActivity(getAdminDb(), {
+    patchId,
+    inviterUid,
+    action: 'subscriber_removed',
+    handle: decodedHandle,
+    type: type as 'dm' | 'group',
+  }).catch((err) => console.error('[patchActivity] write failed', err));
 
   return NextResponse.json({ ok: true, subscribers: updated });
 }
