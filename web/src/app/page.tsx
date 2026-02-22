@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   firebaseAvailable,
   signInWithGoogle,
@@ -25,6 +25,7 @@ import {
   limit as fsLimit,
 } from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
 type GameInfo = {
@@ -72,6 +73,9 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
   const [userPhone, setUserPhone] = useState('');
   const [userPhoneLoading, setUserPhoneLoading] = useState(false);
   const [view, setView] = useState<'main' | 'settings'>('main');
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const accountMenuRef = useRef<HTMLDivElement>(null);
+  const accountMenuCloseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [experimentalExtended, setExperimentalExtended] = useState(false);
   const [activityMessages, setActivityMessages] = useState<ActivityItem[]>([]);
   const [activityPatch, setActivityPatch] = useState<ActivityItem[]>([]);
@@ -101,6 +105,14 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
   useEffect(() => {
     setActivityPage(0);
   }, [lockedGameId]);
+
+  useEffect(() => {
+    return () => {
+      if (accountMenuCloseTimeoutRef.current) {
+        clearTimeout(accountMenuCloseTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const [funChoice, setFunChoice] = useState<'fun' | 'plain' | null>(null);
   const [scopeChoice, setScopeChoice] = useState<'my-turn' | 'all'>('all');
@@ -547,41 +559,101 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
 
   return (
     <div className="min-h-screen bg-transparent text-zinc-100 flex items-center justify-center p-4">
-      <main className="w-full max-w-3xl px-6 py-16 flex flex-col gap-8 backdrop-blur-xl bg-white/10 rounded-3xl border border-white/10 shadow-2xl">
-        <div className="flex items-start justify-between gap-4">
-        <div className="space-y-3">
-          <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Com Tower</p>
-            {!user && (
-              <>
-          <h1 className="text-3xl font-semibold">AWBW turn notifications</h1>
-          <p className="text-sm text-zinc-400">
-                  Patch your AWBW game to receive turn alerts.
-          </p>
-              </>
-            )}
+      <main
+        className={`w-full max-w-3xl px-6 pb-16 flex flex-col gap-8 backdrop-blur-xl bg-white/10 rounded-3xl border border-white/10 shadow-2xl ${
+          user && view === 'main' && !gameInfo ? 'pt-6' : 'pt-16'
+        }`}
+      >
+        <div className="flex items-start justify-between gap-4 min-w-0">
+        <div className="space-y-3 min-w-0 flex-1 overflow-hidden">
+          {user && view === 'main' && gameInfo ? (
+            <div className="relative min-w-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <Link
+                  href="/"
+                  onClick={() => {
+                    setLockedGameId(null);
+                    setGameInfo(null);
+                    setSignalToken('');
+                    setNotifyMode('signal-dm');
+                    setPatchedEnsured(false);
+                    setExperimentalExtended(false);
+                  }}
+                  className="text-base uppercase tracking-[0.2em] text-zinc-400 hover:text-zinc-200 focus:outline-none focus:underline shrink-0"
+                >
+                  COM TOWER
+                </Link>
+                <span className="text-zinc-600 shrink-0" aria-hidden>/</span>
+                <span
+                  className="text-zinc-200 font-medium truncate min-w-0 block"
+                  title={[gameInfo.gameName, gameInfo.mapName].filter(Boolean).join(' · ') || undefined}
+                >
+                  {gameInfo.gameName}
+                  {gameInfo.mapName && (
+                    <span className="text-zinc-400 font-normal"> · {gameInfo.mapName}</span>
+                  )}
+                </span>
+              </div>
+            </div>
+          ) : (
+            <>
+              {!(user && view === 'main' && gameInfo) && (
+                <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Com Tower</p>
+              )}
+              {!user && (
+                <>
+                  <h1 className="text-3xl font-semibold">AWBW turn notifications</h1>
+                  <p className="text-sm text-zinc-400">
+                    Patch your AWBW game to receive turn alerts.
+                  </p>
+                </>
+              )}
+            </>
+          )}
         </div>
-          <div className="flex flex-col items-end gap-2 text-xs text-zinc-400">
-            <div className="flex items-center gap-2">
+          <div className="flex flex-col items-end gap-2 text-xs text-zinc-400 shrink-0">
+            <div className="flex items-center gap-2 flex-wrap justify-end">
               {firebaseAvailable ? (
                 user ? (
-                  <>
-                    <span>{user.email}</span>
-                    {view === 'settings' ? (
-                      <button
-                        onClick={() => setView('main')}
-                        className="px-3 py-2 rounded-lg border border-zinc-700 hover:border-zinc-500"
-                      >
-                        Back
-                      </button>
-                    ) : (
+                  <div
+                    className="relative"
+                    ref={accountMenuRef}
+                    onMouseEnter={() => {
+                      if (accountMenuCloseTimeoutRef.current) {
+                        clearTimeout(accountMenuCloseTimeoutRef.current);
+                        accountMenuCloseTimeoutRef.current = null;
+                      }
+                      setAccountMenuOpen(true);
+                    }}
+                    onMouseLeave={() => {
+                      accountMenuCloseTimeoutRef.current = setTimeout(() => {
+                        setAccountMenuOpen(false);
+                        accountMenuCloseTimeoutRef.current = null;
+                      }, 150);
+                    }}
+                  >
                     <button
-                        onClick={() => setView('settings')}
-                      className="px-3 py-2 rounded-lg border border-zinc-700 hover:border-zinc-500"
+                      type="button"
+                      className="text-zinc-400 hover:text-zinc-200 focus:outline-none truncate max-w-[200px] sm:max-w-none"
+                      title={user.email ?? undefined}
                     >
-                        Settings
+                      {user.email}
                     </button>
+                    {accountMenuOpen && (
+                      <div className="absolute right-0 top-full mt-1 z-50 min-w-[140px] rounded-lg border border-zinc-700 bg-zinc-900 py-1 shadow-xl">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            signOutFirebase();
+                            setAccountMenuOpen(false);
+                          }}
+                          className="w-full px-3 py-2 text-left text-sm text-zinc-300 hover:bg-zinc-800 focus:outline-none focus:bg-zinc-800"
+                        >
+                          Log out
+                        </button>
+                      </div>
                     )}
-                  </>
+                  </div>
                 ) : (
                   <button
                     onClick={signInWithGoogle}
@@ -597,36 +669,6 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
             {statusLine && <p className="text-[11px] text-zinc-500">{statusLine}</p>}
           </div>
         </div>
-
-        {user && view === 'main' && (
-          <nav className="flex items-center gap-2 text-sm">
-            {gameInfo ? (
-              <>
-                <button
-                  type="button"
-                  onClick={() => {
-                    router.push('/');
-                    setLockedGameId(null);
-                    setGameInfo(null);
-                    setSignalToken('');
-                    setNotifyMode('signal-dm');
-                    setPatchedEnsured(false);
-                    setExperimentalExtended(false);
-                  }}
-                  className="text-xs uppercase tracking-[0.2em] text-zinc-400 hover:text-zinc-200 focus:outline-none focus:underline"
-                >
-                  Patched games
-                </button>
-                <span className="text-zinc-600" aria-hidden>/</span>
-                <span className="text-zinc-200 font-medium truncate max-w-[200px] sm:max-w-none" title={gameInfo.mapName || undefined}>
-                  {gameInfo.gameName}
-                </span>
-              </>
-            ) : (
-              <span className="text-xs uppercase tracking-[0.2em] text-zinc-400">Patched games</span>
-            )}
-          </nav>
-        )}
 
         {user && view === 'main' && !effectiveLockedId && !gameInfo && (
           <div className="space-y-4">
@@ -681,63 +723,6 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
           </div>
         )}
 
-        {user && view === 'settings' && (
-          <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Settings</p>
-                <p className="text-sm text-zinc-400">Default Signal DM and session.</p>
-              </div>
-              <button
-                onClick={signOutFirebase}
-                className="px-3 py-2 rounded-lg border border-zinc-700 hover:border-zinc-500 text-xs"
-              >
-                Sign out
-              </button>
-            </div>
-            <div className="space-y-2">
-              <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Default Signal number</p>
-              {userPhoneLoading && <p className="text-xs text-zinc-500">Loading…</p>}
-              <div className="flex flex-col sm:flex-row gap-2">
-                <input
-                  value={userPhone}
-                  onChange={(e) => setUserPhone(e.target.value)}
-                  className="flex-1 rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-500"
-                  placeholder="Your Signal phone (DM default)"
-                />
-                <button
-                  onClick={async () => {
-                    if (!firebaseAvailable || !user) return;
-                    setSaving(true);
-                    setStatus(null);
-                    try {
-                      const db = getFirestore();
-                      const ref = doc(db, 'users', user.uid);
-                      await setDoc(
-                        ref,
-                        {
-                          signalPhone: userPhone.trim(),
-                          updatedAt: serverTimestamp(),
-                        },
-                        { merge: true }
-                      );
-                      setStatus('Default Signal number saved.');
-                    } catch (err: unknown) {
-                      setStatus(err instanceof Error ? err.message : 'Failed to save number');
-                    } finally {
-                      setSaving(false);
-                    }
-                  }}
-                  disabled={saving}
-                  className="px-4 py-3 rounded-xl bg-white text-black font-semibold shadow disabled:opacity-50"
-                >
-                  Save number
-                </button>
-              </div>
-            </div>
-          </section>
-        )}
-
         {view === 'main' && gameInfo && (
           <div className="space-y-4">
             {user && (
@@ -751,7 +736,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                 </div>
                 <div className="flex flex-col sm:flex-row gap-2 items-stretch">
                   <input
-                    value={inviteLink || 'Invite link unavailable'}
+                    value={inviteLink || 'Loading invite link'}
                     readOnly
                     className="flex-1 rounded-xl bg-black border border-zinc-800 px-3 py-3 text-sm text-zinc-200 focus:outline-none"
                   />

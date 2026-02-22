@@ -135,6 +135,7 @@ export function BackgroundCanvas() {
 
     const explosions: Explosion[] = [];
     const EXPLOSION_DURATION_MS = 600;
+    const FIRE_DURATION_MS = 1800;
     const PARTICLE_COUNT = 14;
 
     const terrainHoles: TerrainHole[] = [];
@@ -282,7 +283,7 @@ export function BackgroundCanvas() {
       const stillActive: Explosion[] = [];
       for (const ex of explosions) {
         const elapsed = now - ex.startTime;
-        if (elapsed > EXPLOSION_DURATION_MS) continue;
+        if (elapsed > FIRE_DURATION_MS) continue;
 
         if (elapsed < 200) {
           const flashAlpha = (1 - elapsed / 200) * 0.35;
@@ -295,22 +296,39 @@ export function BackgroundCanvas() {
           ctx.fillRect(ex.x - r, ex.y - r, r * 2, r * 2);
         }
 
-        const t = elapsed / EXPLOSION_DURATION_MS;
-        for (const p of ex.particles) {
-          p.x += p.vx;
-          p.y += p.vy;
-          p.vx *= 0.96;
-          p.vy *= 0.96;
-          p.life = Math.max(0, 1 - t * 1.2);
+        if (elapsed < EXPLOSION_DURATION_MS) {
+          const t = elapsed / EXPLOSION_DURATION_MS;
+          for (const p of ex.particles) {
+            p.x += p.vx;
+            p.y += p.vy;
+            p.vx *= 0.96;
+            p.vy *= 0.96;
+            p.life = Math.max(0, 1 - t * 1.2);
 
-          const radius = 1.5 + (1 - p.life) * 2;
-          ctx.globalAlpha = p.life;
-          ctx.fillStyle = p.life > 0.5 ? '#ffaa44' : '#ff6622';
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
-          ctx.fill();
+            const radius = 1.5 + (1 - p.life) * 2;
+            ctx.globalAlpha = p.life;
+            ctx.fillStyle = p.life > 0.5 ? '#ffaa44' : '#ff6622';
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.globalAlpha = 1;
         }
-        ctx.globalAlpha = 1;
+
+        if (elapsed < FIRE_DURATION_MS) {
+          const fireLife = 1 - elapsed / FIRE_DURATION_MS;
+          const flicker = 0.85 + 0.15 * Math.sin(elapsed * 0.08) * Math.sin(elapsed * 0.13);
+          const r = 12 + 18 * fireLife * flicker;
+          const alpha = fireLife * fireLife * flicker * 0.7;
+          const grad = ctx.createRadialGradient(ex.x, ex.y, 0, ex.x, ex.y, r);
+          grad.addColorStop(0, `rgba(255,200,80,${alpha * 0.9})`);
+          grad.addColorStop(0.35, `rgba(255,120,30,${alpha * 0.6})`);
+          grad.addColorStop(0.7, `rgba(200,50,20,${alpha * 0.25})`);
+          grad.addColorStop(1, 'rgba(100,20,10,0)');
+          ctx.fillStyle = grad;
+          ctx.fillRect(ex.x - r, ex.y - r, r * 2, r * 2);
+        }
+
         stillActive.push(ex);
       }
       explosions.length = 0;
