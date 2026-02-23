@@ -1029,6 +1029,63 @@ async function main() {
         }
         return;
       }
+      if (url.pathname === '/submit-captcha' && _.method === 'POST') {
+        const sharedSecret = process.env.INVITE_SHARED_SECRET;
+        if (sharedSecret) {
+          const headerSecret = _.headers['x-shared-secret'];
+          if (headerSecret !== sharedSecret) {
+            res.statusCode = 401;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'Unauthorized' }));
+            return;
+          }
+        }
+        try {
+          const body = await readJsonBody<{ phone?: string; challengeToken?: string; captchaToken?: string }>(_ as any);
+          let captchaToken = (body.captchaToken || '').trim();
+          const challengeToken = (body.challengeToken || '').trim();
+          if (captchaToken.startsWith('signalcaptcha://')) {
+            captchaToken = captchaToken.replace('signalcaptcha://', '').split('?')[0].split('#')[0];
+          } else if (captchaToken.includes('signalcaptcha://')) {
+            const match = captchaToken.match(/signalcaptcha:\/\/([^\s?#]+)/);
+            if (match) captchaToken = match[1];
+          }
+          if (!challengeToken || !captchaToken) {
+            res.statusCode = 400;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'challengeToken and captchaToken required' }));
+            return;
+          }
+          const bridgeUrl = process.env.SIGNAL_CLI_URL;
+          const botNumber = process.env.SIGNAL_BOT_NUMBER;
+          if (!bridgeUrl || !botNumber) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'Bridge not configured' }));
+            return;
+          }
+          const client = await getIdTokenClient(bridgeUrl);
+          const numberPath = encodeURIComponent(botNumber);
+          const challengeRes = await client.request({
+            url: `${bridgeUrl}/v1/accounts/${numberPath}/rate-limit-challenge`,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            data: { challenge: challengeToken, captcha: captchaToken },
+            timeout: 15000,
+          });
+          const data = (challengeRes as any)?.data ?? challengeRes;
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ ok: true, ...(typeof data === 'object' ? data : {}) }));
+        } catch (err: any) {
+          const errMsg = err?.response?.data?.error ?? err?.response?.data ?? err?.message ?? String(err);
+          const status = err?.response?.status ?? 500;
+          res.statusCode = status;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: typeof errMsg === 'string' ? errMsg : 'Failed to submit CAPTCHA', details: errMsg }));
+        }
+        return;
+      }
       if (url.pathname === '/list-groups') {
         const bridgeUrl = process.env.SIGNAL_CLI_URL;
         const botNumber = process.env.SIGNAL_BOT_NUMBER;
