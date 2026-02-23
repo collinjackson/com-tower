@@ -631,9 +631,9 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
   }, [gameInfo?.gameId]);
 
   return (
-    <div className="min-h-screen bg-transparent text-zinc-100 flex items-center justify-center p-4">
+    <div className="min-h-screen bg-transparent text-zinc-100 flex items-center justify-center px-8 sm:px-12 py-4">
       <main
-        className={`w-full max-w-3xl px-6 pb-16 flex flex-col gap-8 backdrop-blur-xl bg-white/10 rounded-3xl border border-white/10 shadow-2xl ${
+        className={`w-full max-w-3xl px-6 sm:px-8 pb-16 flex flex-col gap-8 backdrop-blur-xl bg-white/10 rounded-3xl border border-white/10 shadow-2xl ${
           user && view === 'main' && !gameInfo ? 'pt-6' : 'pt-16'
         }`}
       >
@@ -674,12 +674,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                 <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Com Tower</p>
               )}
               {!user && (
-                <>
-                  <h1 className="text-3xl font-semibold">AWBW turn notifications</h1>
-                  <p className="text-sm text-zinc-400">
-                    AWBW turn alerts via Signal.
-                  </p>
-                </>
+                <h1 className="text-3xl font-semibold">AWBW Signal Notifications</h1>
               )}
             </>
           )}
