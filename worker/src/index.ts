@@ -1542,10 +1542,17 @@ async function main() {
             res.end(JSON.stringify({ error: 'Bridge not configured' }));
             return;
           }
+          // signal-cli expects a sgnl:// URI; convert https://signal.group/#hash if needed
+          let joinUri = inviteLink;
+          const hashMatch = inviteLink.match(/signal\.group\/#(.+)/);
+          if (hashMatch) {
+            joinUri = `https://signal.group/#${hashMatch[1]}`;
+          }
           const client = await getIdTokenClient(bridgeUrl);
           const numberPath = encodeURIComponent(botNumber);
+          console.log(`[join-group] Joining with URI: ${joinUri}`);
           const joinRes = await client.request({
-            url: `${bridgeUrl}/v1/groups/${numberPath}/join/${encodeURIComponent(inviteLink)}`,
+            url: `${bridgeUrl}/v1/groups/${numberPath}/join/${encodeURIComponent(joinUri)}`,
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             timeout: 30000,
