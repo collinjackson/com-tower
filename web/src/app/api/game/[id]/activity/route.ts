@@ -58,6 +58,7 @@ export async function GET(req: Request, context: { params: Promise<{ id: string 
         createdAt?: { toDate: () => Date };
         imageUrl?: string;
         status?: string;
+        error?: string;
       };
       return {
         text: data.text || '',
@@ -70,6 +71,7 @@ export async function GET(req: Request, context: { params: Promise<{ id: string 
         createdAt: data.createdAt ? data.createdAt.toDate().toISOString() : null,
         imageUrl: data.imageUrl || null,
         status: data.status || null,
+        error: data.error || null,
       };
     });
 

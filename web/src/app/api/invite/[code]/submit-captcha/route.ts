@@ -29,9 +29,8 @@ export async function POST(
     return NextResponse.json({ error: 'challengeToken and captchaToken required' }, { status: 400 });
   }
 
-  const workerUrl =
-    process.env.COM_TOWER_WORKER_URL ||
-    'https://com-tower-worker-33713971134.us-central1.run.app';
+  const workerUrl = (process.env.COM_TOWER_WORKER_URL ||
+    'https://com-tower-worker-33713971134.us-central1.run.app').replace(/\/$/, '');
   const sharedSecret = process.env.INVITE_SHARED_SECRET;
 
   try {
@@ -48,12 +47,17 @@ export async function POST(
       }),
     });
 
-    const data = await res.json().catch(() => ({}));
+    const text = await res.text();
+    const data = text ? (() => { try { return JSON.parse(text); } catch { return {}; } })() : {};
 
     if (!res.ok) {
+      const is404 = res.status === 404;
+      const message = is404
+        ? 'Worker does not support CAPTCHA submission yet. Redeploy the worker (worker/deploy.sh) so it includes the /submit-captcha endpoint.'
+        : (data.error as string) || (data.details as string) || 'Failed to submit CAPTCHA';
       return NextResponse.json(
-        { error: data.error || 'Failed to submit CAPTCHA', details: data },
-        { status: res.status }
+        { error: message, details: data },
+        { status: is404 ? 503 : res.status }
       );
     }
 
