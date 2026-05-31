@@ -49,6 +49,7 @@ type ActivityItem = {
   createdAt: string | null;
   imageUrl?: string | null;
   status?: string;
+  error?: string | null;
   /** Audit log: subscriber_added | subscriber_removed | subscriber_updated */
   action?: string;
   handle?: string;
@@ -129,6 +130,9 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
   const [inviteLinkCopied, setInviteLinkCopied] = useState(false);
   const [inviteCode, setInviteCode] = useState('');
   const [inviteLoading, setInviteLoading] = useState(false);
+  const [joinGroupLink, setJoinGroupLink] = useState('');
+  const [joinGroupLoading, setJoinGroupLoading] = useState(false);
+  const [joinGroupStatus, setJoinGroupStatus] = useState<{ ok: boolean; msg: string } | null>(null);
   const [captchaChallenges, setCaptchaChallenges] = useState<Array<{ phone: string; challengeToken: string; gameId: string | null }>>([]);
   const [captchaChallengesLoading, setCaptchaChallengesLoading] = useState(false);
   const [captchaSubmitting, setCaptchaSubmitting] = useState<string | null>(null);
@@ -328,6 +332,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
           createdAt: m.createdAt ?? null,
           imageUrl: m.imageUrl ?? null,
           status: m.status ?? null,
+          error: m.error ?? null,
         }));
         const patchRows: ActivityItem[] = (data.patchActivity || []).map((a: any) => ({
           kind: 'patch_activity',
@@ -1059,6 +1064,62 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                     </p>
                   )}
                 </section>
+                <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 space-y-3">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">Add bot to Signal group</p>
+                    <p className="text-sm text-zinc-400 mt-1">
+                      Paste a Signal group invite link to let the bot join. Once it&apos;s in the group, use{' '}
+                      <code className="text-zinc-200 bg-zinc-800 px-1 rounded">/sub {gameInfo?.gameId}</code> in the chat to subscribe.
+                    </p>
+                  </div>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <input
+                      value={joinGroupLink}
+                      onChange={(e) => { setJoinGroupLink(e.target.value); setJoinGroupStatus(null); }}
+                      placeholder="https://signal.group/#..."
+                      className="flex-1 rounded-xl bg-black border border-zinc-800 px-3 py-2.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-zinc-500"
+                      disabled={joinGroupLoading}
+                    />
+                    <button
+                      type="button"
+                      disabled={!joinGroupLink.trim() || joinGroupLoading}
+                      onClick={async () => {
+                        setJoinGroupLoading(true);
+                        setJoinGroupStatus(null);
+                        try {
+                          const idToken = await getAuth().currentUser?.getIdToken();
+                          const res = await fetch('/api/join-group', {
+                            method: 'POST',
+                            headers: {
+                              'Content-Type': 'application/json',
+                              ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+                            },
+                            body: JSON.stringify({ inviteLink: joinGroupLink.trim() }),
+                          });
+                          const data = await res.json().catch(() => ({}));
+                          if (!res.ok) {
+                            setJoinGroupStatus({ ok: false, msg: (data as any).error || 'Join failed' });
+                          } else {
+                            setJoinGroupStatus({ ok: true, msg: 'Bot joined! Use /sub in the chat to subscribe.' });
+                            setJoinGroupLink('');
+                          }
+                        } catch (err: any) {
+                          setJoinGroupStatus({ ok: false, msg: err?.message || 'Request failed' });
+                        } finally {
+                          setJoinGroupLoading(false);
+                        }
+                      }}
+                      className="px-4 py-2.5 rounded-xl bg-white text-black font-medium text-sm hover:bg-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                    >
+                      {joinGroupLoading ? 'Joining…' : 'Join group'}
+                    </button>
+                  </div>
+                  {joinGroupStatus && (
+                    <p className={`text-sm ${joinGroupStatus.ok ? 'text-emerald-300' : 'text-rose-300'}`}>
+                      {joinGroupStatus.msg}
+                    </p>
+                  )}
+                </section>
               </>
             ) : (
               <p className="text-sm text-zinc-400">Sign in to configure notifications for this game.</p>
@@ -1072,7 +1133,7 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                   <div className="rounded-2xl border border-amber-800 bg-amber-950/40 p-4 space-y-3">
                     <p className="text-xs uppercase tracking-[0.2em] text-amber-300">Solve CAPTCHA</p>
                     <p className="text-sm text-zinc-400">
-                      These numbers need a CAPTCHA solved to receive notifications. Paste the token from the Signal CAPTCHA link.
+                      These numbers need a CAPTCHA solved to receive notifications. Paste the token in the box below (do not open the signalcaptcha:// link in your browser).
                     </p>
                     <div className="space-y-3">
                       {captchaChallenges.map((c) => (
@@ -1245,37 +1306,42 @@ export function ComTowerApp({ initialGameId }: { initialGameId?: string }) {
                           {item.deliveries.map((d, i) => {
                             const isFailed = d.status !== 'sent';
                             return (
-                              <div key={i} className="flex flex-wrap items-center gap-2">
-                                <span
-                                  className={`px-2 py-0.5 rounded-full text-[10px] uppercase tracking-wide ${
-                                    d.variant === 'fun'
-                                      ? 'bg-indigo-900/70 text-indigo-200'
-                                      : 'bg-zinc-800 text-zinc-200'
-                                  }`}
-                                >
-                                  {d.variant}
-                                </span>
-                                <span
-                                  className={`px-2 py-0.5 rounded-full text-[10px] uppercase tracking-wide ${
-                                    d.status === 'sent'
-                                      ? 'bg-emerald-900/70 text-emerald-200'
-                                      : 'bg-rose-900/70 text-rose-200'
-                                  }`}
-                                >
-                                  {d.status}
-                                </span>
-                                <span className={isFailed ? 'text-amber-300 font-medium' : 'text-zinc-300'}>
-                                  {d.handle}
-                                </span>
-                                {d.error && (
-                                  <span className="text-rose-200" title={d.error}>
-                                    {d.error.includes('CAPTCHA') ? 'CAPTCHA required' : d.error}
+                              <div key={i} className="flex flex-col gap-0.5">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span
+                                    className={`px-2 py-0.5 rounded-full text-[10px] uppercase tracking-wide ${
+                                      d.variant === 'fun'
+                                        ? 'bg-indigo-900/70 text-indigo-200'
+                                        : 'bg-zinc-800 text-zinc-200'
+                                    }`}
+                                  >
+                                    {d.variant}
                                   </span>
+                                  <span
+                                    className={`px-2 py-0.5 rounded-full text-[10px] uppercase tracking-wide ${
+                                      d.status === 'sent'
+                                        ? 'bg-emerald-900/70 text-emerald-200'
+                                        : 'bg-rose-900/70 text-rose-200'
+                                    }`}
+                                  >
+                                    {d.status}
+                                  </span>
+                                  <span className={isFailed ? 'text-amber-300 font-medium' : 'text-zinc-300'}>
+                                    {d.handle}
+                                  </span>
+                                </div>
+                                {d.error && (
+                                  <p className="text-rose-300 font-mono text-[10px] break-all pl-1">
+                                    {d.error}
+                                  </p>
                                 )}
                               </div>
                             );
                           })}
                         </div>
+                      )}
+                      {item.error && !item.deliveries?.length && (
+                        <p className="text-[11px] text-rose-300 font-mono break-all">{item.error}</p>
                       )}
                       <div className="text-[11px] text-zinc-500 flex gap-3">
                         {item.createdAt && <span>{new Date(item.createdAt).toLocaleString()}</span>}

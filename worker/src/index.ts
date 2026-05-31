@@ -363,6 +363,7 @@ async function buildMessage(gameId: string, meta: NextTurnMeta): Promise<RenderP
 // Track recent NextTurn events to prevent duplicate processing
 const recentNextTurns = new Map<string, number>(); // key: `${gameId}-${day}-${playerId}`, value: timestamp
 const NEXT_TURN_DEDUP_WINDOW_MS = 5000; // Ignore duplicate NextTurn events within 5 seconds
+const SIGNAL_RECEIVE_POLL_MS = 5000; // Poll for incoming Signal messages every 5 seconds
 
 // Track pending send requests for cancellation
 const pendingSends = new Map<string, AbortController>(); // key: `${gameId}-${subscriber.handle}`, value: AbortController
@@ -658,52 +659,43 @@ async function sendNotifications(
     }
   });
 
-  try {
-    await Promise.all(
-      deliverSubs.map((sub) => {
-        const pendingKey = `${data.gameId}-${sub.handle}`;
-        const abortController = new AbortController();
-        pendingSends.set(pendingKey, abortController);
-        const payload = payloadMap.get(!!sub.funEnabled) || logPayload;
-        const variant: 'fun' | 'classic' = sub.funEnabled ? 'fun' : 'classic';
-        return sendSignal(sub, payload, data.patchId, abortController.signal)
-          .then(() => {
-            pendingSends.delete(pendingKey);
-            deliveries.push({ handle: sub.handle, variant, status: 'sent' });
-            console.log(`Signal sent to ${sub.handle} for game ${data.gameId} (${source})`);
-          })
-          .catch((err) => {
-            pendingSends.delete(pendingKey);
-            if (err.name === 'AbortError') return;
-            deliveries.push({
-              handle: sub.handle,
-              variant,
-              status: 'failed',
-              error: err instanceof Error ? err.message : String(err),
-            });
-            console.error('Signal send failed', err);
-            throw err;
+  const results = await Promise.allSettled(
+    deliverSubs.map((sub) => {
+      const pendingKey = `${data.gameId}-${sub.handle}`;
+      const abortController = new AbortController();
+      pendingSends.set(pendingKey, abortController);
+      const payload = payloadMap.get(!!sub.funEnabled) || logPayload;
+      const variant: 'fun' | 'classic' = sub.funEnabled ? 'fun' : 'classic';
+      return sendSignal(sub, payload, data.patchId, abortController.signal)
+        .then(() => {
+          pendingSends.delete(pendingKey);
+          deliveries.push({ handle: sub.handle, variant, status: 'sent' });
+          console.log(`Signal sent to ${sub.handle} for game ${data.gameId} (${source})`);
+        })
+        .catch((err) => {
+          pendingSends.delete(pendingKey);
+          if (err.name === 'AbortError') return;
+          deliveries.push({
+            handle: sub.handle,
+            variant,
+            status: 'failed',
+            error: err instanceof Error ? err.message : String(err),
           });
-      })
-    );
-    const hasFailed = deliveries.some((d) => d.status === 'failed');
-    const hasSent = deliveries.some((d) => d.status === 'sent');
-    const messageStatus = hasFailed && hasSent ? 'partial-failed' : hasFailed ? 'failed' : 'sent';
-    await msgRef.update({
-      status: messageStatus,
-      sentAt: FieldValue.serverTimestamp(),
-      deliveries,
-    });
-  } catch (err) {
-    const hasSent = deliveries.some((d) => d.status === 'sent');
-    const messageStatus = hasSent ? 'partial-failed' : 'failed';
-    await msgRef.update({
-      status: messageStatus,
-      error: err instanceof Error ? err.message : String(err),
-      sentAt: FieldValue.serverTimestamp(),
-      deliveries,
-    });
-  }
+          console.error('Signal send failed', err);
+          throw err;
+        });
+    })
+  );
+  const firstError = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+  const hasFailed = deliveries.some((d) => d.status === 'failed');
+  const hasSent = deliveries.some((d) => d.status === 'sent');
+  const messageStatus = hasFailed && hasSent ? 'partial-failed' : hasFailed ? 'failed' : 'sent';
+  await msgRef.update({
+    status: messageStatus,
+    ...(firstError ? { error: firstError.reason instanceof Error ? firstError.reason.message : String(firstError.reason) } : {}),
+    sentAt: FieldValue.serverTimestamp(),
+    deliveries,
+  }).catch((err) => console.error('Message log final update failed', err));
 }
 
 /** Run hourly reminders for subscribers with notifyFrequency === 'hourly': send if still their turn and last sent ≥ 1h ago. */
@@ -939,6 +931,205 @@ async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId
 }
 
 
+// ── Signal slash-command bot ─────────────────────────────────────────────────
+
+function extractGameIdFromArg(arg?: string): string | null {
+  if (!arg) return null;
+  const urlMatch = arg.match(/games_id=(\d+)/);
+  if (urlMatch) return urlMatch[1];
+  const ctMatch = arg.match(/\/game\/(\d+)/);
+  if (ctMatch) return ctMatch[1];
+  if (/^\d{5,8}$/.test(arg.trim())) return arg.trim();
+  return null;
+}
+
+async function sendGroupReply(groupId: string, text: string): Promise<void> {
+  const sub: Subscriber = { type: 'group', handle: groupId, groupId };
+  try {
+    await sendSignal(sub, { text }, 'bot-reply');
+  } catch (err) {
+    console.error('[bot] Failed to send group reply:', err);
+  }
+}
+
+async function handleSignalCommand(groupId: string, cmd: string, args: string[]): Promise<void> {
+  const db = getFirestore();
+
+  if (cmd === '/sub' || cmd === '/subscribe') {
+    const gameId = extractGameIdFromArg(args[0]);
+    if (!gameId) {
+      await sendGroupReply(groupId, 'Usage: /sub <game_id or AWBW URL>');
+      return;
+    }
+    const patchId = `${gameId}-bot`;
+    const patchRef = db.collection('patches').doc(patchId);
+    const snap = await patchRef.get();
+    const data = (snap.data() || {}) as { subscribers?: Subscriber[] };
+    const subscribers = data.subscribers || [];
+    const already = subscribers.find(
+      (s) => s.type === 'group' && (s.groupId === groupId || s.handle === groupId)
+    );
+    if (already) {
+      await sendGroupReply(groupId, `Already watching game ${gameId}. Use /unsub ${gameId} to stop.`);
+      return;
+    }
+    subscribers.push({ type: 'group', handle: groupId, groupId, funEnabled: false, scope: 'all' });
+    await patchRef.set(
+      { gameId, inviterUid: 'bot', subscribers, updatedAt: FieldValue.serverTimestamp() },
+      { merge: true }
+    );
+    console.log(`[bot] Group ${groupId.substring(0, 20)} subscribed to game ${gameId}`);
+    await sendGroupReply(
+      groupId,
+      `📡 Subscribed to game ${gameId}! Turn notifications will appear here.\n` +
+        `Commands: /unsub ${gameId} · /fun ${gameId} (toggle fun mode) · /status`
+    );
+    return;
+  }
+
+  if (cmd === '/unsub' || cmd === '/unsubscribe') {
+    const gameId = extractGameIdFromArg(args[0]);
+    if (!gameId) {
+      await sendGroupReply(groupId, 'Usage: /unsub <game_id or AWBW URL>');
+      return;
+    }
+    const patchId = `${gameId}-bot`;
+    const patchRef = db.collection('patches').doc(patchId);
+    const snap = await patchRef.get();
+    if (!snap.exists) {
+      await sendGroupReply(groupId, `Not subscribed to game ${gameId}.`);
+      return;
+    }
+    const data = snap.data() as { subscribers?: Subscriber[] };
+    const before = data.subscribers || [];
+    const after = before.filter(
+      (s) => !(s.type === 'group' && (s.groupId === groupId || s.handle === groupId))
+    );
+    if (before.length === after.length) {
+      await sendGroupReply(groupId, `Not subscribed to game ${gameId}.`);
+      return;
+    }
+    if (after.length === 0) {
+      await patchRef.delete();
+    } else {
+      await patchRef.update({ subscribers: after, updatedAt: FieldValue.serverTimestamp() });
+    }
+    console.log(`[bot] Group ${groupId.substring(0, 20)} unsubscribed from game ${gameId}`);
+    await sendGroupReply(groupId, `Unsubscribed from game ${gameId}.`);
+    return;
+  }
+
+  if (cmd === '/fun') {
+    const gameId = extractGameIdFromArg(args[0]);
+    if (!gameId) {
+      await sendGroupReply(groupId, 'Usage: /fun <game_id or AWBW URL> [on|off]');
+      return;
+    }
+    const patchId = `${gameId}-bot`;
+    const patchRef = db.collection('patches').doc(patchId);
+    const snap = await patchRef.get();
+    if (!snap.exists) {
+      await sendGroupReply(groupId, `Not subscribed to game ${gameId}. Use /sub ${gameId} first.`);
+      return;
+    }
+    const data = snap.data() as { subscribers?: Subscriber[] };
+    const subscribers = data.subscribers || [];
+    const sub = subscribers.find(
+      (s) => s.type === 'group' && (s.groupId === groupId || s.handle === groupId)
+    );
+    if (!sub) {
+      await sendGroupReply(groupId, `Not subscribed to game ${gameId}. Use /sub ${gameId} first.`);
+      return;
+    }
+    const explicit = args[1]?.toLowerCase();
+    const newFun = explicit === 'on' ? true : explicit === 'off' ? false : !sub.funEnabled;
+    sub.funEnabled = newFun;
+    await patchRef.update({ subscribers, updatedAt: FieldValue.serverTimestamp() });
+    console.log(`[bot] Group ${groupId.substring(0, 20)} set fun=${newFun} for game ${gameId}`);
+    await sendGroupReply(groupId, `Fun mode ${newFun ? 'enabled ✨' : 'disabled'} for game ${gameId}.`);
+    return;
+  }
+
+  if (cmd === '/status') {
+    const patchSnap = await db.collection('patches').where('inviterUid', '==', 'bot').get();
+    const lines: string[] = [];
+    for (const docSnap of patchSnap.docs) {
+      const data = docSnap.data() as { gameId?: string; subscribers?: Subscriber[] };
+      const sub = (data.subscribers || []).find(
+        (s) => s.type === 'group' && (s.groupId === groupId || s.handle === groupId)
+      );
+      if (sub && data.gameId) {
+        lines.push(
+          `• Game ${data.gameId}${sub.funEnabled ? ' [fun ✨]' : ''} — https://awbw.amarriner.com/game.php?games_id=${data.gameId}`
+        );
+      }
+    }
+    if (lines.length === 0) {
+      await sendGroupReply(groupId, 'No active subscriptions. Use /sub <game_id> to start.');
+    } else {
+      await sendGroupReply(groupId, `Active subscriptions:\n${lines.join('\n')}`);
+    }
+    return;
+  }
+
+  // Unknown /command → show help
+  await sendGroupReply(
+    groupId,
+    'Com Tower commands:\n' +
+      '/sub <game_id>    — subscribe to turn notifications\n' +
+      '/unsub <game_id>  — unsubscribe\n' +
+      '/fun <game_id>    — toggle fun mode (or /fun <id> on|off)\n' +
+      '/status           — list active subscriptions'
+  );
+}
+
+async function handleSignalIncoming(item: any): Promise<void> {
+  const dataMessage = item?.envelope?.dataMessage;
+  if (!dataMessage) return;
+  const text: string = (dataMessage.message || '').trim();
+  if (!text.startsWith('/')) return;
+  const groupId: string | undefined = dataMessage.groupInfo?.groupId;
+  if (!groupId) return; // only handle group messages, not DMs
+  const parts = text.split(/\s+/);
+  const cmd = parts[0].toLowerCase();
+  const args = parts.slice(1);
+  console.log(`[bot] Incoming command "${cmd}" from group ${groupId.substring(0, 20)}...`);
+  await handleSignalCommand(groupId, cmd, args);
+}
+
+async function pollSignalMessages(): Promise<void> {
+  const bridgeUrl = process.env.SIGNAL_CLI_URL;
+  const botNumber = process.env.SIGNAL_BOT_NUMBER;
+  if (!bridgeUrl || !botNumber) return;
+  try {
+    const client = await getIdTokenClient(bridgeUrl);
+    const numberPath = encodeURIComponent(botNumber);
+    const res = await client.request({
+      url: `${bridgeUrl}/v1/receive/${numberPath}`,
+      method: 'GET',
+      timeout: 10000,
+    });
+    const messages = (res as any)?.data;
+    if (!Array.isArray(messages) || messages.length === 0) return;
+    console.log(`[bot] Received ${messages.length} Signal message(s)`);
+    for (const item of messages) {
+      await handleSignalIncoming(item).catch((err) =>
+        console.error('[bot] Error handling incoming message:', err)
+      );
+    }
+  } catch (err: any) {
+    const msg = String(err?.message || err);
+    // 404 means the bridge doesn't support /receive — log once, don't spam
+    if (msg.includes('404') || msg.includes('Not Found')) {
+      console.warn('[bot] Signal receive endpoint not available (bridge may not support it)');
+      return;
+    }
+    console.warn('[bot] Signal receive poll failed:', msg);
+  }
+}
+
+// ── End slash-command bot ────────────────────────────────────────────────────
+
 async function main() {
   ensureFirebase();
   const db = getFirestore();
@@ -947,6 +1138,13 @@ async function main() {
   setInterval(() => {
     runHourlyReminders().catch((err) => console.error('Hourly reminders failed', err));
   }, HOURLY_REMINDER_MS);
+
+  // Signal slash-command receive loop
+  setInterval(() => {
+    pollSignalMessages().catch((err) => console.error('[bot] Poll error:', err));
+  }, SIGNAL_RECEIVE_POLL_MS);
+  // Run once immediately so the first poll doesn't wait 5s
+  pollSignalMessages().catch(() => {});
 
   db.collection('patches').onSnapshot((snap) => {
     snap.docChanges().forEach((change) => {
@@ -1314,6 +1512,54 @@ async function main() {
               })
             );
           });
+        return;
+      }
+      if (url.pathname === '/join-group' && _.method === 'POST') {
+        const sharedSecret = process.env.INVITE_SHARED_SECRET;
+        if (sharedSecret) {
+          const headerSecret = _.headers['x-shared-secret'];
+          if (headerSecret !== sharedSecret) {
+            res.statusCode = 401;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'Unauthorized' }));
+            return;
+          }
+        }
+        try {
+          const body = await readJsonBody<{ inviteLink?: string }>(_ as any);
+          const inviteLink = (body.inviteLink || '').trim();
+          if (!inviteLink) {
+            res.statusCode = 400;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'inviteLink required' }));
+            return;
+          }
+          const bridgeUrl = process.env.SIGNAL_CLI_URL;
+          const botNumber = process.env.SIGNAL_BOT_NUMBER;
+          if (!bridgeUrl || !botNumber) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'Bridge not configured' }));
+            return;
+          }
+          const client = await getIdTokenClient(bridgeUrl);
+          const numberPath = encodeURIComponent(botNumber);
+          const joinRes = await client.request({
+            url: `${bridgeUrl}/v1/groups/${numberPath}/join/${encodeURIComponent(inviteLink)}`,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 30000,
+          });
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ ok: true, data: (joinRes as any)?.data }));
+        } catch (err: any) {
+          const errMsg = err?.response?.data?.error ?? err?.response?.data ?? err?.message ?? String(err);
+          const status = err?.response?.status ?? 500;
+          res.statusCode = status;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: typeof errMsg === 'string' ? errMsg : JSON.stringify(errMsg) }));
+        }
         return;
       }
       res.statusCode = 200;
