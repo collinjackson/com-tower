@@ -365,6 +365,27 @@ const recentNextTurns = new Map<string, number>(); // key: `${gameId}-${day}-${p
 const NEXT_TURN_DEDUP_WINDOW_MS = 5000; // Ignore duplicate NextTurn events within 5 seconds
 const SIGNAL_RECEIVE_POLL_MS = 5000; // Poll for incoming Signal messages every 5 seconds
 
+// ── Receive diagnostics ──────────────────────────────────────────────────────
+// The bridge can run in poll (normal/native) mode where GET /v1/receive returns an
+// array, or json-rpc mode where receiving is a WebSocket. We support both and expose
+// what we've seen via the /debug/receive endpoint so receive can be verified without
+// Cloud Run log access.
+type ReceiverMode = 'unknown' | 'poll' | 'ws';
+let receiverMode: ReceiverMode = 'unknown';
+let receiverWs: WebSocket | null = null;
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+let wsFailCount = 0;
+let lastReceiveError: string | null = null;
+let lastReceiveAt: number | null = null;
+const recentRawReceives: Array<{ at: string; raw: unknown }> = [];
+const MAX_RECENT_RECEIVES = 25;
+
+function recordRaw(raw: unknown) {
+  lastReceiveAt = Date.now();
+  recentRawReceives.push({ at: new Date().toISOString(), raw });
+  while (recentRawReceives.length > MAX_RECENT_RECEIVES) recentRawReceives.shift();
+}
+
 // Track pending send requests for cancellation
 const pendingSends = new Map<string, AbortController>(); // key: `${gameId}-${subscriber.handle}`, value: AbortController
 
@@ -955,6 +976,14 @@ async function sendGroupReply(groupId: string, text: string): Promise<void> {
 async function handleSignalCommand(groupId: string, cmd: string, args: string[]): Promise<void> {
   const db = getFirestore();
 
+  if (cmd === '/ping') {
+    await sendGroupReply(
+      groupId,
+      '🟢 pong — Com Tower can hear this group. Receiving is working.'
+    );
+    return;
+  }
+
   if (cmd === '/sub' || cmd === '/subscribe') {
     const gameId = extractGameIdFromArg(args[0]);
     if (!gameId) {
@@ -1076,6 +1105,7 @@ async function handleSignalCommand(groupId: string, cmd: string, args: string[])
   await sendGroupReply(
     groupId,
     'Com Tower commands:\n' +
+      '/ping             — check the bot can hear this group\n' +
       '/sub <game_id>    — subscribe to turn notifications\n' +
       '/unsub <game_id>  — unsubscribe\n' +
       '/fun <game_id>    — toggle fun mode (or /fun <id> on|off)\n' +
@@ -1097,10 +1127,22 @@ async function handleSignalIncoming(item: any): Promise<void> {
   await handleSignalCommand(groupId, cmd, args);
 }
 
-async function pollSignalMessages(): Promise<void> {
-  const bridgeUrl = process.env.SIGNAL_CLI_URL;
-  const botNumber = process.env.SIGNAL_BOT_NUMBER;
-  if (!bridgeUrl || !botNumber) return;
+/** Record a raw received item for diagnostics, normalize json-rpc wrapping, and route it. */
+async function handleRawReceive(raw: any): Promise<void> {
+  recordRaw(raw);
+  // json-rpc WS sends { jsonrpc, method: 'receive', params: { envelope, account } }.
+  // poll/GET sends { envelope, account }. Normalize to the latter.
+  const item = raw && raw.method === 'receive' && raw.params ? raw.params : raw;
+  await handleSignalIncoming(item).catch((err) =>
+    console.error('[bot] Error handling incoming message:', err)
+  );
+}
+
+/** One GET poll. Returns false if the bridge doesn't support poll-mode receive
+ *  (non-array body, 400 json-rpc hint, or 404) so the caller can switch to WS. */
+async function pollSignalMessagesOnce(): Promise<boolean> {
+  const bridgeUrl = process.env.SIGNAL_CLI_URL!;
+  const botNumber = process.env.SIGNAL_BOT_NUMBER!;
   try {
     const client = await getIdTokenClient(bridgeUrl);
     const numberPath = encodeURIComponent(botNumber);
@@ -1110,21 +1152,158 @@ async function pollSignalMessages(): Promise<void> {
       timeout: 10000,
     });
     const messages = (res as any)?.data;
-    if (!Array.isArray(messages) || messages.length === 0) return;
-    console.log(`[bot] Received ${messages.length} Signal message(s)`);
-    for (const item of messages) {
-      await handleSignalIncoming(item).catch((err) =>
-        console.error('[bot] Error handling incoming message:', err)
-      );
+    if (!Array.isArray(messages)) {
+      lastReceiveError = `poll: non-array body (${typeof messages}) — bridge likely in json-rpc mode`;
+      console.warn(`[bot] ${lastReceiveError}; switching to ws receiver`);
+      return false;
     }
+    if (messages.length > 0) {
+      console.log(`[bot] Received ${messages.length} Signal message(s) via poll`);
+      for (const item of messages) await handleRawReceive(item);
+    }
+    return true;
   } catch (err: any) {
+    const status = err?.response?.status;
+    const body =
+      typeof err?.response?.data === 'string'
+        ? err.response.data
+        : JSON.stringify(err?.response?.data || '');
     const msg = String(err?.message || err);
-    // 404 means the bridge doesn't support /receive — log once, don't spam
-    if (msg.includes('404') || msg.includes('Not Found')) {
-      console.warn('[bot] Signal receive endpoint not available (bridge may not support it)');
+    if (status === 404 || msg.includes('404') || msg.includes('Not Found')) {
+      lastReceiveError = 'poll: 404 — trying ws receiver';
+      console.warn('[bot] Signal receive GET 404; switching to ws receiver');
+      return false;
+    }
+    if (status === 400 && /websocket|json[\s_-]?rpc/i.test(body)) {
+      lastReceiveError = `poll: 400 json-rpc hint — switching to ws (${body.substring(0, 120)})`;
+      console.warn('[bot] Signal receive GET says json-rpc/websocket; switching to ws receiver');
+      return false;
+    }
+    lastReceiveError = `poll: ${msg}`;
+    console.warn('[bot] Signal receive poll failed (will retry):', msg);
+    return true; // transient — stay in poll mode
+  }
+}
+
+function startPollReceiver(): void {
+  receiverMode = 'poll';
+  console.log('[bot] receive mode: poll (GET /v1/receive)');
+  if (pollTimer) clearInterval(pollTimer);
+  const tick = async () => {
+    const ok = await pollSignalMessagesOnce().catch((e) => {
+      lastReceiveError = `poll: ${String(e?.message || e)}`;
+      return true;
+    });
+    if (ok === false) {
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      startWsReceiver();
+    }
+  };
+  pollTimer = setInterval(tick, SIGNAL_RECEIVE_POLL_MS);
+  tick(); // immediate first poll
+}
+
+function startWsReceiver(): void {
+  receiverMode = 'ws';
+  const bridgeUrl = process.env.SIGNAL_CLI_URL!;
+  const botNumber = process.env.SIGNAL_BOT_NUMBER!;
+  const numberPath = encodeURIComponent(botNumber);
+  const wsUrl = `${bridgeUrl.replace(/^http/i, 'ws')}/v1/receive/${numberPath}`;
+
+  (async () => {
+    let authorization: string | undefined;
+    try {
+      const client = await getIdTokenClient(bridgeUrl);
+      const hdrs: any = await client.getRequestHeaders(bridgeUrl);
+      authorization =
+        hdrs?.Authorization ||
+        hdrs?.authorization ||
+        (typeof hdrs?.get === 'function' ? hdrs.get('Authorization') : undefined);
+    } catch (e) {
+      console.error('[bot] ws auth header fetch failed', e);
+    }
+
+    console.log(`[bot] receive mode: ws — connecting ${wsUrl}`);
+    const ws = new WebSocket(wsUrl, authorization ? { headers: { Authorization: authorization } } : undefined);
+    receiverWs = ws;
+    let opened = false;
+
+    ws.on('open', () => {
+      opened = true;
+      wsFailCount = 0;
+      lastReceiveError = null;
+      console.log('[bot] receive websocket open');
+    });
+    ws.on('message', (data) => {
+      try {
+        const parsed = JSON.parse(data.toString());
+        handleRawReceive(parsed).catch(() => {});
+      } catch (e) {
+        console.warn('[bot] ws message parse error', e);
+      }
+    });
+    ws.on('error', (err: any) => {
+      lastReceiveError = `ws: ${String(err?.message || err)}`;
+      console.error('[bot] receive websocket error:', err?.message || err);
+    });
+    ws.on('close', (code) => {
+      receiverWs = null;
+      console.warn(`[bot] receive websocket closed (code=${code}, opened=${opened})`);
+      if (receiverMode !== 'ws') return;
+      if (!opened) wsFailCount++;
+      if (wsFailCount >= 3) {
+        wsFailCount = 0;
+        console.warn('[bot] ws failed to connect repeatedly; falling back to poll receiver');
+        startPollReceiver();
+        return;
+      }
+      setTimeout(() => {
+        if (receiverMode === 'ws') startWsReceiver();
+      }, 3000);
+    });
+  })();
+}
+
+/** Probe the bridge once and choose poll vs ws receive, then keep it running. */
+async function startSignalReceiver(): Promise<void> {
+  const bridgeUrl = process.env.SIGNAL_CLI_URL;
+  const botNumber = process.env.SIGNAL_BOT_NUMBER;
+  if (!bridgeUrl || !botNumber) {
+    console.warn('[bot] receiver disabled: SIGNAL_CLI_URL / SIGNAL_BOT_NUMBER not set');
+    return;
+  }
+  try {
+    const client = await getIdTokenClient(bridgeUrl);
+    const numberPath = encodeURIComponent(botNumber);
+    const res = await client.request({
+      url: `${bridgeUrl}/v1/receive/${numberPath}`,
+      method: 'GET',
+      timeout: 8000,
+    });
+    if (Array.isArray((res as any)?.data)) {
+      const messages = (res as any).data as any[];
+      if (messages.length > 0) {
+        console.log(`[bot] probe drained ${messages.length} queued message(s)`);
+        for (const item of messages) await handleRawReceive(item);
+      }
+      startPollReceiver();
       return;
     }
-    console.warn('[bot] Signal receive poll failed:', msg);
+    console.warn('[bot] probe: receive GET returned non-array; using ws receiver');
+    startWsReceiver();
+  } catch (err: any) {
+    const status = err?.response?.status;
+    const body =
+      typeof err?.response?.data === 'string'
+        ? err.response.data
+        : JSON.stringify(err?.response?.data || '');
+    lastReceiveError = `probe: ${status || ''} ${body || err?.message || ''}`.trim();
+    console.warn(`[bot] probe failed (${lastReceiveError}); defaulting to ws receiver`);
+    // json-rpc mode commonly 400s the GET; ws receiver will fall back to poll if it can't connect.
+    startWsReceiver();
   }
 }
 
@@ -1139,12 +1318,8 @@ async function main() {
     runHourlyReminders().catch((err) => console.error('Hourly reminders failed', err));
   }, HOURLY_REMINDER_MS);
 
-  // Signal slash-command receive loop
-  setInterval(() => {
-    pollSignalMessages().catch((err) => console.error('[bot] Poll error:', err));
-  }, SIGNAL_RECEIVE_POLL_MS);
-  // Run once immediately so the first poll doesn't wait 5s
-  pollSignalMessages().catch(() => {});
+  // Signal slash-command receiver (poll or websocket, auto-detected)
+  startSignalReceiver().catch((err) => console.error('[bot] receiver start failed:', err));
 
   db.collection('patches').onSnapshot((snap) => {
     snap.docChanges().forEach((change) => {
@@ -1186,6 +1361,37 @@ async function main() {
   const server = http.createServer(async (_, res) => {
     try {
       const url = new URL(_.url || '/', 'http://localhost');
+      if (url.pathname === '/debug/receive') {
+        // Diagnostics for the Signal receive path. Gated by INVITE_SHARED_SECRET when set
+        // (pass ?secret=... or x-shared-secret header); open otherwise.
+        const sharedSecret = process.env.INVITE_SHARED_SECRET;
+        if (sharedSecret) {
+          const provided = _.headers['x-shared-secret'] || url.searchParams.get('secret');
+          if (provided !== sharedSecret) {
+            res.statusCode = 401;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'Unauthorized' }));
+            return;
+          }
+        }
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(
+          JSON.stringify(
+            {
+              mode: receiverMode,
+              bridgeConfigured: !!(process.env.SIGNAL_CLI_URL && process.env.SIGNAL_BOT_NUMBER),
+              lastReceiveError,
+              lastReceiveAt: lastReceiveAt ? new Date(lastReceiveAt).toISOString() : null,
+              count: recentRawReceives.length,
+              recent: recentRawReceives,
+            },
+            null,
+            2
+          )
+        );
+        return;
+      }
       if (url.pathname === '/send-verification' && _.method === 'POST') {
         const sharedSecret = process.env.INVITE_SHARED_SECRET;
         if (sharedSecret) {
