@@ -847,75 +847,48 @@ async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId
   // }
 
   if (recipient.type === 'group') {
-    // Use the cached groupId if available, otherwise use handle
-    // The groupId should be resolved when the subscriber is added (via web API)
-    const groupId = recipient.groupId || recipient.handle;
-    
-    if (!groupId) {
-      throw new Error('Group subscriber missing groupId. Please resolve the group ID first.');
+    const rawId = recipient.groupId || recipient.handle;
+    if (!rawId) {
+      throw new Error('Group subscriber missing groupId.');
     }
-    
-    console.log(`[sendSignal] Using cached groupId: ${groupId.substring(0, 50)}...`);
-    
-    // signal-cli-rest-api expects "groupId" and also requires a non-empty recipients array.
-    // We'll use the clean base64 group id and set recipients to the botNumber to satisfy validation.
-    console.log(`[sendSignal] Group payload base: ${JSON.stringify(baseData).substring(0, 500)}`);
-    const cleanGroupId = groupId.startsWith('group.') ? groupId.substring(6) : groupId;
+    // signal-cli-rest-api (v2/send) sends to a group by putting "group.<base64(internalId)>"
+    // in the recipients array. Received messages give us groupInfo.groupId = the raw internal_id
+    // (base64 of the group master id); the create/list "id" field is already "group.<base64>".
+    const groupRecipient = rawId.startsWith('group.')
+      ? rawId
+      : `group.${Buffer.from(rawId, 'utf8').toString('base64')}`;
+    console.log(`[sendSignal] Group send to ${groupRecipient.substring(0, 60)}...`);
 
-    // Bridge insists on a non-empty recipients array. Use mention numbers if present; otherwise bot number.
-    const recipientsForSend =
-      mentionNumbers.length > 0 ? mentionNumbers : [botNumber];
-
-    const sendWithId = async (gid: string) => {
+    const doGroupSend = async () => {
       if (abortSignal?.aborted) throw new Error('Request aborted');
       return client.request({
         url: `${bridgeUrl}/v2/send`,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        data: { ...baseData, groupId: gid, recipients: recipientsForSend },
+        data: { ...baseData, recipients: [groupRecipient] },
         timeout: 30000,
         signal: abortSignal,
       });
     };
-    const idsToTry = cleanGroupId === groupId ? [cleanGroupId] : [cleanGroupId, groupId];
 
     try {
-      for (const gid of idsToTry) {
-        try {
-          console.log(`[sendSignal] Attempting group send with id=${gid.substring(0, 60)}...`);
-          return await sendWithId(gid);
-        } catch (err: any) {
-          const isTimeout = err?.message?.toString().includes('timeout');
-          if (abortSignal?.aborted || err.name === 'AbortError') {
-            throw new Error('Request aborted');
-          }
-          if (isTimeout) {
-            console.warn('[sendSignal] Group send timeout, retrying once...');
-            return await sendWithId(gid);
-          }
-          // If this was the last ID to try, rethrow; otherwise continue to next.
-          if (gid === idsToTry[idsToTry.length - 1]) {
-            // Log detailed bridge response to diagnose
-            const status = err?.response?.status;
-            const statusText = err?.response?.statusText;
-            const data = err?.response?.data;
-            console.error('[sendSignal] Group send failed', {
-              groupId: gid,
-              status,
-              statusText,
-              data: typeof data === 'string' ? data : JSON.stringify(data || {}),
-              message: err?.message,
-              raw: err?.response || err?.toString?.() || String(err),
-            });
-            throw err;
-          } else {
-            console.warn(`[sendSignal] Group send failed with id=${gid.substring(0, 60)}..., trying next id`);
-          }
-        }
-      }
-      // Should not reach here
-      throw new Error('Group send failed for all attempted IDs');
+      return await doGroupSend();
     } catch (err: any) {
+      if (abortSignal?.aborted || err.name === 'AbortError') {
+        throw new Error('Request aborted');
+      }
+      if (err?.message?.toString().includes('timeout')) {
+        console.warn('[sendSignal] Group send timeout, retrying once...');
+        return await doGroupSend();
+      }
+      const status = err?.response?.status;
+      const data = err?.response?.data;
+      console.error('[sendSignal] Group send failed', {
+        groupRecipient,
+        status,
+        data: typeof data === 'string' ? data : JSON.stringify(data || {}),
+        message: err?.message,
+      });
       throw err;
     }
   }
