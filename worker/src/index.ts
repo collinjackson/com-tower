@@ -946,6 +946,36 @@ async function sendGroupReply(groupId: string, text: string): Promise<void> {
   }
 }
 
+/** Join a Signal group via its invite link, by calling the VM join-shim
+ *  (which forwards joinGroup to the signal-cli daemon — not exposed via the bridge REST API). */
+async function joinViaLink(uri: string): Promise<void> {
+  const shimUrl = process.env.JOIN_SHIM_URL;
+  const secret = process.env.JOIN_SHIM_SECRET || '';
+  if (!shimUrl) {
+    console.warn('[bot] JOIN_SHIM_URL not set; cannot auto-join from invite link');
+    return;
+  }
+  try {
+    const res = await fetch(`${shimUrl}/join`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Secret': secret },
+      body: JSON.stringify({ uri }),
+    });
+    const data: any = await res.json().catch(() => ({}));
+    const groupId = data?.result?.groupId;
+    const errMsg = data?.error?.message;
+    console.log(`[bot] joinViaLink -> HTTP ${res.status} groupId=${groupId || '?'} ${errMsg ? `error="${errMsg}"` : 'ok'}`);
+    if (res.ok && groupId && !errMsg) {
+      await sendGroupReply(
+        groupId,
+        '👋 Com Tower joined. Send /ping to test, or /sub <game id> for AWBW turn alerts.'
+      );
+    }
+  } catch (err) {
+    console.error('[bot] joinViaLink failed:', err);
+  }
+}
+
 async function handleSignalCommand(groupId: string, cmd: string, args: string[]): Promise<void> {
   const db = getFirestore();
 
@@ -1090,9 +1120,17 @@ async function handleSignalIncoming(item: any): Promise<void> {
   const dataMessage = item?.envelope?.dataMessage;
   if (!dataMessage) return;
   const text: string = (dataMessage.message || '').trim();
+  // Onboarding: if anyone sends the bot a Signal group invite link (works in a DM,
+  // before the bot is in the group), join it via the link.
+  const linkMatch = text.match(/https:\/\/signal\.group\/#\S+/);
+  if (linkMatch) {
+    console.log('[bot] Received Signal group invite link; attempting join');
+    await joinViaLink(linkMatch[0]);
+    return;
+  }
   if (!text.startsWith('/')) return;
   const groupId: string | undefined = dataMessage.groupInfo?.groupId;
-  if (!groupId) return; // only handle group messages, not DMs
+  if (!groupId) return; // only handle group commands, not DMs
   const parts = text.split(/\s+/);
   const cmd = parts[0].toLowerCase();
   const args = parts.slice(1);
