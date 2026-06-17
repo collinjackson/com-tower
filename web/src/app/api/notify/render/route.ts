@@ -219,7 +219,8 @@ export async function POST(req: NextRequest) {
         const spriteUrl = `https://awbw.amarriner.com/terrain/ani/${army.code}${unitFile}.gif`;
         const sres = await fetch(spriteUrl);
         if (sres.ok) {
-          let unitBuf = Buffer.from(await sres.arrayBuffer());
+          // Typed as Uint8Array (sharp accepts it) to avoid the strict Buffer<ArrayBuffer> generic.
+          let unitBuf: Uint8Array = Buffer.from(await sres.arrayBuffer());
           const meta = await sharp(unitBuf, { animated: true }).metadata();
           const baseW = meta.width || 16;
           const uH = meta.pageHeight || baseW;
@@ -232,7 +233,7 @@ export async function POST(req: NextRequest) {
           let frameH = uH;
           try {
             const tres = await fetch(`https://awbw.amarriner.com/terrain/aw1/${tile}.gif`);
-            const terrSrc = tres.ok
+            const terrSrc: Uint8Array = tres.ok
               ? Buffer.from(await tres.arrayBuffer())
               : Buffer.from(
                   await (await fetch('https://awbw.amarriner.com/terrain/aw1/plain.gif')).arrayBuffer()
