@@ -937,10 +937,34 @@ function extractGameIdFromArg(arg?: string): string | null {
   return null;
 }
 
+/** Low-level group send to the bridge (v2/send), with optional ACI mentions. */
+async function sendGroupRaw(
+  groupId: string,
+  message: string,
+  mentions?: Array<{ author: string; start: number; length: number }>
+): Promise<void> {
+  const bridgeUrl = process.env.SIGNAL_CLI_URL;
+  const botNumber = process.env.SIGNAL_BOT_NUMBER;
+  if (!bridgeUrl || !botNumber) throw new Error('Signal bridge not configured');
+  // v2/send takes the group as "group.<base64(internalId)>" in recipients.
+  const groupRecipient = groupId.startsWith('group.')
+    ? groupId
+    : `group.${Buffer.from(groupId, 'utf8').toString('base64')}`;
+  const client = await getIdTokenClient(bridgeUrl);
+  const data: any = { number: botNumber, message, recipients: [groupRecipient] };
+  if (mentions && mentions.length > 0) data.mentions = mentions;
+  await client.request({
+    url: `${bridgeUrl}/v2/send`,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    data,
+    timeout: 30000,
+  });
+}
+
 async function sendGroupReply(groupId: string, text: string): Promise<void> {
-  const sub: Subscriber = { type: 'group', handle: groupId, groupId };
   try {
-    await sendSignal(sub, { text }, 'bot-reply');
+    await sendGroupRaw(groupId, text);
   } catch (err) {
     console.error('[bot] Failed to send group reply:', err);
   }
@@ -968,7 +992,7 @@ async function joinViaLink(uri: string): Promise<void> {
     if (res.ok && groupId && !errMsg) {
       await sendGroupReply(
         groupId,
-        '👋 Com Tower joined. Send /ping to test, or /sub <game id> for AWBW turn alerts.'
+        '👋 Com Tower reporting in. Set the game with /game <AWBW link>, then each player runs /iam <awbw_name>. /help for all commands.'
       );
     }
   } catch (err) {
@@ -976,152 +1000,270 @@ async function joinViaLink(uri: string): Promise<void> {
   }
 }
 
-async function handleSignalCommand(groupId: string, cmd: string, args: string[]): Promise<void> {
-  const db = getFirestore();
+const HELP_TEXT =
+  '📋 Com Tower — AWBW turn alerts\n' +
+  '/game <link>         — watch an AWBW game (admin)\n' +
+  '/iam <awbw_name>     — claim your player slot\n' +
+  '/setplayer @x <name> — map a member to a player (admin)\n' +
+  '/unsetplayer @x      — remove a mapping (admin)\n' +
+  '/players             — show the roster\n' +
+  '/scope mine|all      — who gets pinged each turn (admin)\n' +
+  '/fun [on|off]        — flavor text (admin)\n' +
+  '/status              — current state\n' +
+  '/stop                — stop watching (admin)\n' +
+  '/ping                — connectivity check';
+
+type PlayerMapping = {
+  aci: string;
+  number?: string;
+  displayName?: string;
+  claimedBy: 'self' | 'admin';
+  claimedAt?: any;
+};
+type GroupGame = {
+  groupId: string;
+  gameId: string;
+  gameName?: string;
+  status: 'active' | 'stopped' | 'ended';
+  createdBy?: { aci?: string; number?: string };
+  admins?: string[];
+  players?: Record<string, PlayerMapping>;
+  funEnabled?: boolean;
+  scope?: 'mine' | 'all';
+  lastTurn?: { day?: number | null; awbwUsername?: string };
+};
+type CmdCtx = {
+  groupId: string;
+  senderAci?: string;
+  senderNumber?: string;
+  senderName?: string;
+  cmd: string;
+  args: string[];
+  mentions: Array<{ uuid?: string; number?: string; name?: string }>;
+};
+
+function ggRef(groupId: string) {
+  return getFirestore().collection('groupGames').doc(groupId);
+}
+/** Permissive admin check: if no admins recorded yet, anyone may act (friendly games). */
+function isGgAdmin(gg: GroupGame | undefined, aci?: string): boolean {
+  if (!gg) return true;
+  const admins = gg.admins || [];
+  if (admins.length === 0) return true;
+  return !!aci && admins.includes(aci);
+}
+
+async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
+  const { groupId, cmd, args, senderAci, senderNumber, senderName, mentions } = ctx;
+  const reply = (t: string) => sendGroupReply(groupId, t);
 
   if (cmd === '/ping') {
-    await sendGroupReply(
-      groupId,
-      '🟢 pong — Com Tower can hear this group. Receiving is working.'
-    );
+    await reply('🟢 pong — Com Tower can hear this group. Receiving is working.');
+    return;
+  }
+  if (cmd === '/help') {
+    await reply(HELP_TEXT);
     return;
   }
 
-  if (cmd === '/sub' || cmd === '/subscribe') {
+  const snap = await ggRef(groupId).get();
+  const gg = snap.exists ? ({ ...(snap.data() as GroupGame), groupId }) : undefined;
+
+  if (cmd === '/game') {
     const gameId = extractGameIdFromArg(args[0]);
     if (!gameId) {
-      await sendGroupReply(groupId, 'Usage: /sub <game_id or AWBW URL>');
+      await reply('Usage: /game <AWBW game link or id>');
       return;
     }
-    const patchId = `${gameId}-bot`;
-    const patchRef = db.collection('patches').doc(patchId);
-    const snap = await patchRef.get();
-    const data = (snap.data() || {}) as { subscribers?: Subscriber[] };
-    const subscribers = data.subscribers || [];
-    const already = subscribers.find(
-      (s) => s.type === 'group' && (s.groupId === groupId || s.handle === groupId)
-    );
-    if (already) {
-      await sendGroupReply(groupId, `Already watching game ${gameId}. Use /unsub ${gameId} to stop.`);
+    if (gg && !isGgAdmin(gg, senderAci)) {
+      await reply('Only an admin can change the game.');
       return;
     }
-    subscribers.push({ type: 'group', handle: groupId, groupId, funEnabled: false, scope: 'all' });
-    await patchRef.set(
-      { gameId, inviterUid: 'bot', subscribers, updatedAt: FieldValue.serverTimestamp() },
+    const [info, gameName] = await Promise.all([
+      loadPlayers(gameId).catch(() => ({ players: [] as string[], countries: [] as string[] })),
+      loadGameName(gameId),
+    ]);
+    const existingPlayers = gg?.players || {};
+    await ggRef(groupId).set(
+      {
+        groupId,
+        gameId,
+        gameName: gameName || null,
+        status: 'active',
+        createdBy: gg?.createdBy || { aci: senderAci || null, number: senderNumber || null },
+        admins: gg?.admins?.length ? gg.admins : senderAci ? [senderAci] : [],
+        players: existingPlayers,
+        funEnabled: gg?.funEnabled || false,
+        scope: gg?.scope || 'mine',
+        updatedAt: FieldValue.serverTimestamp(),
+      },
       { merge: true }
     );
-    console.log(`[bot] Group ${groupId.substring(0, 20)} subscribed to game ${gameId}`);
-    await sendGroupReply(
-      groupId,
-      `📡 Subscribed to game ${gameId}! Turn notifications will appear here.\n` +
-        `Commands: /unsub ${gameId} · /fun ${gameId} (toggle fun mode) · /status`
-    );
+    const roster = info.players || [];
+    const mapped = new Set(Object.keys(existingPlayers).map((s) => s.toLowerCase()));
+    const unmapped = roster.filter((p) => !mapped.has(p.toLowerCase()));
+    let msg = `📡 Watching game ${gameId}${gameName ? ` (${gameName})` : ''}.\n${gameLink(gameId)}\n`;
+    if (roster.length) msg += `Players: ${roster.join(', ')}\n`;
+    msg += unmapped.length
+      ? `Unmapped: ${unmapped.join(', ')}\nEach player: /iam <your_awbw_name>  ·  admin: /setplayer @member <awbw_name>`
+      : `All players mapped — you'll be @mentioned on your turn.`;
+    await reply(msg);
+    console.log(`[gg] /game ${gameId} set for group ${groupId.substring(0, 16)}`);
     return;
   }
 
-  if (cmd === '/unsub' || cmd === '/unsubscribe') {
-    const gameId = extractGameIdFromArg(args[0]);
-    if (!gameId) {
-      await sendGroupReply(groupId, 'Usage: /unsub <game_id or AWBW URL>');
+  if (!gg) {
+    await reply('No game set yet. An admin should run: /game <AWBW link>');
+    return;
+  }
+
+  if (cmd === '/iam') {
+    const username = args[0];
+    if (!username) {
+      await reply('Usage: /iam <your_awbw_username>');
       return;
     }
-    const patchId = `${gameId}-bot`;
-    const patchRef = db.collection('patches').doc(patchId);
-    const snap = await patchRef.get();
-    if (!snap.exists) {
-      await sendGroupReply(groupId, `Not subscribed to game ${gameId}.`);
+    if (!senderAci) {
+      await reply("Couldn't read your Signal identity — try again.");
       return;
     }
-    const data = snap.data() as { subscribers?: Subscriber[] };
-    const before = data.subscribers || [];
-    const after = before.filter(
-      (s) => !(s.type === 'group' && (s.groupId === groupId || s.handle === groupId))
+    const players = gg.players || {};
+    for (const k of Object.keys(players)) if (players[k]?.aci === senderAci) delete players[k];
+    players[username] = {
+      aci: senderAci,
+      number: senderNumber,
+      displayName: senderName,
+      claimedBy: 'self',
+      claimedAt: FieldValue.serverTimestamp(),
+    };
+    await ggRef(groupId).update({ players, updatedAt: FieldValue.serverTimestamp() });
+    await reply(`✅ Got it — you're ${username}. You'll be @mentioned on your turn.`);
+    return;
+  }
+
+  if (cmd === '/setplayer') {
+    if (!isGgAdmin(gg, senderAci)) {
+      await reply('Only an admin can use /setplayer.');
+      return;
+    }
+    const target = mentions[0];
+    const username = args[args.length - 1];
+    if (!target?.uuid || !username || username.startsWith('@')) {
+      await reply('Usage: /setplayer @member <awbw_username>');
+      return;
+    }
+    const players = gg.players || {};
+    for (const k of Object.keys(players)) if (players[k]?.aci === target.uuid) delete players[k];
+    players[username] = {
+      aci: target.uuid,
+      number: target.number,
+      displayName: target.name,
+      claimedBy: 'admin',
+      claimedAt: FieldValue.serverTimestamp(),
+    };
+    await ggRef(groupId).update({ players, updatedAt: FieldValue.serverTimestamp() });
+    await reply(`✅ Mapped ${target.name || 'member'} → ${username}.`);
+    return;
+  }
+
+  if (cmd === '/unsetplayer' || cmd === '/forget') {
+    if (!isGgAdmin(gg, senderAci)) {
+      await reply('Only an admin can use /unsetplayer.');
+      return;
+    }
+    const target = mentions[0];
+    if (!target?.uuid) {
+      await reply('Usage: /unsetplayer @member');
+      return;
+    }
+    const players = gg.players || {};
+    let removed: string | undefined;
+    for (const k of Object.keys(players))
+      if (players[k]?.aci === target.uuid) {
+        removed = k;
+        delete players[k];
+      }
+    await ggRef(groupId).update({ players, updatedAt: FieldValue.serverTimestamp() });
+    await reply(removed ? `Removed mapping for ${removed}.` : 'No mapping found for that member.');
+    return;
+  }
+
+  if (cmd === '/players' || cmd === '/who') {
+    const players = gg.players || {};
+    const info = await loadPlayers(gg.gameId).catch(() => ({ players: [] as string[], countries: [] as string[] }));
+    const lines = Object.entries(players).map(
+      ([uname, m]) => `• ${uname} → ${m.displayName || m.number || m.aci.slice(0, 8)}`
     );
-    if (before.length === after.length) {
-      await sendGroupReply(groupId, `Not subscribed to game ${gameId}.`);
+    const mapped = new Set(Object.keys(players).map((s) => s.toLowerCase()));
+    const unmapped = (info.players || []).filter((p) => !mapped.has(p.toLowerCase()));
+    let msg = lines.length
+      ? `Roster for game ${gg.gameId}:\n${lines.join('\n')}`
+      : `No players mapped yet for game ${gg.gameId}.`;
+    if (unmapped.length) msg += `\nUnmapped: ${unmapped.join(', ')} — /iam <name>`;
+    await reply(msg);
+    return;
+  }
+
+  if (cmd === '/scope') {
+    if (!isGgAdmin(gg, senderAci)) {
+      await reply('Only an admin can change scope.');
       return;
     }
-    if (after.length === 0) {
-      await patchRef.delete();
-    } else {
-      await patchRef.update({ subscribers: after, updatedAt: FieldValue.serverTimestamp() });
+    const v = (args[0] || '').toLowerCase();
+    if (v !== 'mine' && v !== 'all') {
+      await reply('Usage: /scope mine | all');
+      return;
     }
-    console.log(`[bot] Group ${groupId.substring(0, 20)} unsubscribed from game ${gameId}`);
-    await sendGroupReply(groupId, `Unsubscribed from game ${gameId}.`);
+    await ggRef(groupId).update({ scope: v, updatedAt: FieldValue.serverTimestamp() });
+    await reply(
+      v === 'mine'
+        ? 'Scope set: only the player whose turn it is gets @mentioned.'
+        : 'Scope set: every mapped player is @mentioned each turn.'
+    );
     return;
   }
 
   if (cmd === '/fun') {
-    const gameId = extractGameIdFromArg(args[0]);
-    if (!gameId) {
-      await sendGroupReply(groupId, 'Usage: /fun <game_id or AWBW URL> [on|off]');
+    if (!isGgAdmin(gg, senderAci)) {
+      await reply('Only an admin can toggle fun mode.');
       return;
     }
-    const patchId = `${gameId}-bot`;
-    const patchRef = db.collection('patches').doc(patchId);
-    const snap = await patchRef.get();
-    if (!snap.exists) {
-      await sendGroupReply(groupId, `Not subscribed to game ${gameId}. Use /sub ${gameId} first.`);
-      return;
-    }
-    const data = snap.data() as { subscribers?: Subscriber[] };
-    const subscribers = data.subscribers || [];
-    const sub = subscribers.find(
-      (s) => s.type === 'group' && (s.groupId === groupId || s.handle === groupId)
-    );
-    if (!sub) {
-      await sendGroupReply(groupId, `Not subscribed to game ${gameId}. Use /sub ${gameId} first.`);
-      return;
-    }
-    const explicit = args[1]?.toLowerCase();
-    const newFun = explicit === 'on' ? true : explicit === 'off' ? false : !sub.funEnabled;
-    sub.funEnabled = newFun;
-    await patchRef.update({ subscribers, updatedAt: FieldValue.serverTimestamp() });
-    console.log(`[bot] Group ${groupId.substring(0, 20)} set fun=${newFun} for game ${gameId}`);
-    await sendGroupReply(groupId, `Fun mode ${newFun ? 'enabled ✨' : 'disabled'} for game ${gameId}.`);
+    const explicit = (args[0] || '').toLowerCase();
+    const newFun = explicit === 'on' ? true : explicit === 'off' ? false : !gg.funEnabled;
+    await ggRef(groupId).update({ funEnabled: newFun, updatedAt: FieldValue.serverTimestamp() });
+    await reply(`Fun mode ${newFun ? 'enabled ✨' : 'disabled'}.`);
     return;
   }
 
   if (cmd === '/status') {
-    const patchSnap = await db.collection('patches').where('inviterUid', '==', 'bot').get();
-    const lines: string[] = [];
-    for (const docSnap of patchSnap.docs) {
-      const data = docSnap.data() as { gameId?: string; subscribers?: Subscriber[] };
-      const sub = (data.subscribers || []).find(
-        (s) => s.type === 'group' && (s.groupId === groupId || s.handle === groupId)
-      );
-      if (sub && data.gameId) {
-        lines.push(
-          `• Game ${data.gameId}${sub.funEnabled ? ' [fun ✨]' : ''} — https://awbw.amarriner.com/game.php?games_id=${data.gameId}`
-        );
-      }
-    }
-    if (lines.length === 0) {
-      await sendGroupReply(groupId, 'No active subscriptions. Use /sub <game_id> to start.');
-    } else {
-      await sendGroupReply(groupId, `Active subscriptions:\n${lines.join('\n')}`);
-    }
+    const n = Object.keys(gg.players || {}).length;
+    let msg = `Game ${gg.gameId}${gg.gameName ? ` (${gg.gameName})` : ''} — ${gg.status}\n${gameLink(gg.gameId)}\n`;
+    msg += `Players mapped: ${n} · scope: ${gg.scope || 'mine'} · fun: ${gg.funEnabled ? 'on' : 'off'}`;
+    if (gg.lastTurn?.awbwUsername)
+      msg += `\nLast turn seen: ${gg.lastTurn.awbwUsername}${gg.lastTurn.day ? ` (day ${gg.lastTurn.day})` : ''}`;
+    await reply(msg);
     return;
   }
 
-  // Unknown /command → show help
-  await sendGroupReply(
-    groupId,
-    'Com Tower commands:\n' +
-      '/ping             — check the bot can hear this group\n' +
-      '/sub <game_id>    — subscribe to turn notifications\n' +
-      '/unsub <game_id>  — unsubscribe\n' +
-      '/fun <game_id>    — toggle fun mode (or /fun <id> on|off)\n' +
-      '/status           — list active subscriptions'
-  );
+  if (cmd === '/stop' || cmd === '/unwatch') {
+    if (!isGgAdmin(gg, senderAci)) {
+      await reply('Only an admin can stop watching.');
+      return;
+    }
+    await ggRef(groupId).update({ status: 'stopped', updatedAt: FieldValue.serverTimestamp() });
+    await reply(`Stopped watching game ${gg.gameId}. Run /game <link> to resume.`);
+    return;
+  }
+
+  await reply(HELP_TEXT);
 }
 
 async function handleSignalIncoming(item: any): Promise<void> {
-  const dataMessage = item?.envelope?.dataMessage;
+  const env = item?.envelope;
+  const dataMessage = env?.dataMessage;
   if (!dataMessage) return;
   const text: string = (dataMessage.message || '').trim();
-  // Onboarding: if anyone sends the bot a Signal group invite link (works in a DM,
-  // before the bot is in the group), join it via the link.
+  // Onboarding: a Signal group invite link (works in a DM, before the bot is a member) -> join it.
   const linkMatch = text.match(/https:\/\/signal\.group\/#\S+/);
   if (linkMatch) {
     console.log('[bot] Received Signal group invite link; attempting join');
@@ -1134,8 +1276,19 @@ async function handleSignalIncoming(item: any): Promise<void> {
   const parts = text.split(/\s+/);
   const cmd = parts[0].toLowerCase();
   const args = parts.slice(1);
-  console.log(`[bot] Incoming command "${cmd}" from group ${groupId.substring(0, 20)}...`);
-  await handleSignalCommand(groupId, cmd, args);
+  const mentions = Array.isArray(dataMessage.mentions)
+    ? dataMessage.mentions.map((m: any) => ({ uuid: m.uuid, number: m.number, name: m.name }))
+    : [];
+  console.log(`[bot] command "${cmd}" from ${env.sourceName || env.sourceUuid || '?'} in group ${groupId.substring(0, 16)}`);
+  await handleSignalCommand({
+    groupId,
+    senderAci: env.sourceUuid,
+    senderNumber: env.sourceNumber,
+    senderName: env.sourceName,
+    cmd,
+    args,
+    mentions,
+  });
 }
 
 /** Record a raw received item for diagnostics, normalize json-rpc wrapping, and route it. */
@@ -1320,49 +1473,198 @@ async function startSignalReceiver(): Promise<void> {
 
 // ── End slash-command bot ────────────────────────────────────────────────────
 
+// ── Group-game turn-notification driver ──────────────────────────────────────
+type GGSocketState = {
+  ws: WebSocket;
+  shouldReopen: boolean;
+  checkInterval?: ReturnType<typeof setInterval>;
+  gameId: string;
+};
+const activeGGSockets = new Map<string, GGSocketState>();
+
+function stopGGSocket(groupId: string, reason: string) {
+  const st = activeGGSockets.get(groupId);
+  if (!st) return;
+  st.shouldReopen = false;
+  if (st.checkInterval) clearInterval(st.checkInterval);
+  try {
+    st.ws.close();
+  } catch {
+    /* ignore */
+  }
+  activeGGSockets.delete(groupId);
+  console.log(`[gg] stopped watching for group ${groupId.substring(0, 16)} (${reason})`);
+}
+
+function startGroupGameSocket(groupId: string, gameId: string) {
+  const existing = activeGGSockets.get(groupId);
+  if (existing) {
+    existing.shouldReopen = false;
+    if (existing.checkInterval) clearInterval(existing.checkInterval);
+    try {
+      existing.ws.close();
+    } catch {
+      /* ignore */
+    }
+    activeGGSockets.delete(groupId);
+  }
+  const ws = new WebSocket(buildAwbwSocketUrl(gameId));
+  const state: GGSocketState = { ws, shouldReopen: true, gameId };
+  activeGGSockets.set(groupId, state);
+  console.log(`[gg] watching game ${gameId} for group ${groupId.substring(0, 16)}`);
+
+  state.checkInterval = setInterval(() => {
+    if (!state.shouldReopen) return;
+    isGameEnded(gameId)
+      .then((ended) => {
+        if (ended) {
+          ggRef(groupId).update({ status: 'ended', updatedAt: FieldValue.serverTimestamp() }).catch(() => {});
+          sendGroupReply(groupId, `🏁 Game ${gameId} has ended. Run /game <link> to watch another.`).catch(() => {});
+          stopGGSocket(groupId, 'game ended (page check)');
+        }
+      })
+      .catch(() => {});
+  }, GAME_ENDED_CHECK_MS);
+
+  ws.on('open', () => console.log(`[gg] ws open ${gameId}`));
+  ws.on('message', (msg) => {
+    try {
+      const parsed = JSON.parse(msg.toString());
+      if (parsed?.GameOver || parsed?.GameEnd || parsed?.type === 'GameOver' || parsed?.type === 'GameEnd') {
+        ggRef(groupId).update({ status: 'ended', updatedAt: FieldValue.serverTimestamp() }).catch(() => {});
+        stopGGSocket(groupId, 'game over (ws)');
+        return;
+      }
+      const isNextTurn = parsed?.type === 'NextTurn' || parsed?.NextTurn;
+      if (!isNextTurn) return;
+      const next = parsed?.NextTurn || parsed?.nextTurn || parsed || {};
+      const socketPlayer =
+        next.playerName || next.player_name || next.player || next.username || next.name;
+      const day = next.day;
+      const dedupKey = `gg-${groupId}-${gameId}-${day}-${next.playerId || next.player_id || socketPlayer}`;
+      const now = Date.now();
+      const last = recentNextTurns.get(dedupKey);
+      if (last && now - last < NEXT_TURN_DEDUP_WINDOW_MS) return;
+      recentNextTurns.set(dedupKey, now);
+      onGroupGameNextTurn(groupId, gameId, { day, socketPlayer }).catch((e) =>
+        console.error('[gg] notify error', e)
+      );
+    } catch (err) {
+      console.error('[gg] ws parse error', err);
+    }
+  });
+  ws.on('error', (err: any) => {
+    console.error(`[gg] ws error ${gameId}:`, err?.message || err);
+    try {
+      ws.close();
+    } catch {
+      /* ignore */
+    }
+  });
+  ws.on('close', () => {
+    if (state.checkInterval) clearInterval(state.checkInterval);
+    activeGGSockets.delete(groupId);
+    if (state.shouldReopen) {
+      console.log(`[gg] reconnecting ${gameId}`);
+      setTimeout(() => startGroupGameSocket(groupId, gameId), 1500);
+    }
+  });
+}
+
+async function onGroupGameNextTurn(
+  groupId: string,
+  gameId: string,
+  meta: { day?: number; socketPlayer?: string }
+) {
+  const snap = await ggRef(groupId).get();
+  if (!snap.exists) {
+    stopGGSocket(groupId, 'group doc gone');
+    return;
+  }
+  const gg = snap.data() as GroupGame;
+  if (gg.status !== 'active') {
+    stopGGSocket(groupId, 'not active');
+    return;
+  }
+  const scraped = await scrapeCurrentPlayerName(gameId).catch(() => undefined);
+  const currentPlayer = scraped || meta.socketPlayer;
+  if (!currentPlayer) {
+    console.log('[gg] no current player resolved');
+    return;
+  }
+  const info = await loadPlayers(gameId).catch(() => ({ players: [] as string[], countries: [] as string[] }));
+  const gameName = gg.gameName || (await loadGameName(gameId)) || undefined;
+  const payload = await buildMessage(gameId, {
+    day: meta.day,
+    playerName: currentPlayer,
+    socketPlayerName: meta.socketPlayer,
+    players: info.players,
+    gameName,
+    funEnabled: gg.funEnabled,
+  });
+  let message = payload.text;
+  const players = gg.players || {};
+  const mentions: Array<{ author: string; start: number; length: number }> = [];
+  const scope = gg.scope || 'mine';
+
+  // Append an '@' placeholder (length 1) that signal-cli renders as the contact mention.
+  // JS string .length is UTF-16 code units, matching Java/signal-cli char offsets.
+  const appendMention = (aci: string) => {
+    const spacer = message.endsWith(' ') || message.endsWith('\n') ? '' : ' ';
+    const start = (message + spacer).length;
+    message = `${message}${spacer}@`;
+    mentions.push({ author: aci, start, length: 1 });
+  };
+
+  if (scope === 'all') {
+    const acis = Object.values(players).map((m) => m.aci).filter(Boolean);
+    if (acis.length) {
+      message += '\n';
+      for (const aci of acis) appendMention(aci);
+    }
+  } else {
+    const key = Object.keys(players).find(
+      (k) => k.toLowerCase() === String(currentPlayer).toLowerCase()
+    );
+    const mapping = key ? players[key] : undefined;
+    if (mapping?.aci) appendMention(mapping.aci);
+    else message += `\n(Whoever is ${currentPlayer}: send  /iam ${currentPlayer}  to get pinged here.)`;
+  }
+
+  try {
+    await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined);
+    await ggRef(groupId)
+      .update({ lastTurn: { day: meta.day ?? null, awbwUsername: currentPlayer }, updatedAt: FieldValue.serverTimestamp() })
+      .catch(() => {});
+    console.log(
+      `[gg] notified group ${groupId.substring(0, 16)} turn=${currentPlayer} scope=${scope} mentions=${mentions.length}`
+    );
+  } catch (err) {
+    console.error('[gg] send failed', err);
+  }
+}
+
 async function main() {
   ensureFirebase();
   const db = getFirestore();
 
-  console.log('Worker starting. Watching patches for subscribers...');
-  setInterval(() => {
-    runHourlyReminders().catch((err) => console.error('Hourly reminders failed', err));
-  }, HOURLY_REMINDER_MS);
+  console.log('Worker starting. Watching groupGames for active games...');
 
   // Signal slash-command receiver (poll or websocket, auto-detected)
   startSignalReceiver().catch((err) => console.error('[bot] receiver start failed:', err));
 
-  db.collection('patches').onSnapshot((snap) => {
+  // Drive one AWBW socket per active group game; notify the group on each turn change.
+  db.collection('groupGames').onSnapshot((snap) => {
     snap.docChanges().forEach((change) => {
-      const patchId = change.doc.id;
-      if (change.type === 'removed') {
-        const state = activeSockets.get(patchId);
-        if (state) {
-          state.shouldReopen = false;
-          if (state.checkInterval) clearInterval(state.checkInterval);
-          try {
-            state.ws.close();
-          } catch {
-            // ignore
-          }
-          activeSockets.delete(patchId);
-          console.log(`Stopped monitoring patch ${patchId} (patch removed)`);
-        }
+      const groupId = change.doc.id;
+      const gg = change.doc.data() as GroupGame;
+      if (change.type === 'removed' || gg.status !== 'active' || !gg.gameId) {
+        stopGGSocket(groupId, change.type === 'removed' ? 'doc removed' : `status ${gg.status}`);
         return;
       }
-      const data = change.doc.data() as {
-        gameId?: string;
-        subscribers?: Subscriber[];
-        experimentalExtended?: boolean;
-      };
-      if (!data.gameId || !data.subscribers?.length) return;
-
-      startSocket({
-        gameId: data.gameId,
-        subscribers: data.subscribers,
-        patchId,
-        experimentalExtended: data.experimentalExtended,
-      });
+      const st = activeGGSockets.get(groupId);
+      if (st && st.gameId === gg.gameId && st.shouldReopen) return; // already watching this game
+      startGroupGameSocket(groupId, gg.gameId);
     });
   });
 
