@@ -297,34 +297,46 @@ async function scrapeCurrentPlayerName(gameId: string): Promise<string | undefin
   return undefined;
 }
 
-/** Resolve the current player's AWBW username from the game page. AWBW exposes
- *  `currentTurn = <players_id>` and embeds player records mapping players_id -> users_username. */
-async function resolveCurrentPlayerName(gameId: string): Promise<string | undefined> {
+/** Resolve the current player's AWBW username AND army from the game page. AWBW exposes
+ *  `currentTurn = <players_id>`; each player record has users_username (before players_id) and
+ *  countries_code / countries_name (just after it). */
+async function resolveCurrentTurn(
+  gameId: string
+): Promise<{ username?: string; countryCode?: string; countryName?: string } | undefined> {
   try {
     const res = await fetch(gameLink(gameId), { cache: 'no-store' as any });
     const html = await res.text();
     const cur = html.match(/currentTurn\s*=\s*(\d+)/);
     if (!cur) return undefined;
     const curId = cur[1];
-    const map = new Map<string, string>();
-    // Player records may list users_username before or after players_id — capture both orders.
-    for (const m of html.matchAll(/"users_username"\s*:\s*"([^"]+)"[\s\S]{0,400}?"players_id"\s*:\s*(\d+)/g)) {
-      map.set(m[2], m[1]);
-    }
-    for (const m of html.matchAll(/"players_id"\s*:\s*(\d+)[\s\S]{0,400}?"users_username"\s*:\s*"([^"]+)"/g)) {
-      if (!map.has(m[1])) map.set(m[1], m[2]);
-    }
-    return map.get(curId);
+    const idMatch = new RegExp(`"players_id"\\s*:\\s*${curId}\\b`).exec(html);
+    if (!idMatch) return undefined;
+    const before = html.slice(Math.max(0, idMatch.index - 500), idMatch.index);
+    const after = html.slice(idMatch.index, idMatch.index + 500);
+    const username = [...before.matchAll(/"users_username"\s*:\s*"([^"]+)"/g)].pop()?.[1];
+    const countryCode =
+      (after.match(/"countries_code"\s*:\s*"([a-z]{2,3})"/i) ||
+        before.match(/"countries_code"\s*:\s*"([a-z]{2,3})"/i))?.[1];
+    const countryName =
+      (after.match(/"countries_name"\s*:\s*"([^"]+)"/) ||
+        before.match(/"countries_name"\s*:\s*"([^"]+)"/))?.[1];
+    return { username, countryCode, countryName };
   } catch (err) {
-    console.error('resolveCurrentPlayerName failed', err);
+    console.error('resolveCurrentTurn failed', err);
     return undefined;
   }
+}
+
+/** Just the current player's username (used by the backstop poll's change check). */
+async function resolveCurrentPlayerName(gameId: string): Promise<string | undefined> {
+  return (await resolveCurrentTurn(gameId))?.username;
 }
 
 async function buildMessage(
   gameId: string,
   meta: NextTurnMeta,
-  recentChat?: Array<{ name?: string; text: string }>
+  recentChat?: Array<{ name?: string; text: string }>,
+  army?: { code?: string; name?: string }
 ): Promise<RenderPayload> {
   const link = gameLink(gameId);
   const gameName = meta.gameName || `Game ${gameId}`;
@@ -349,7 +361,7 @@ async function buildMessage(
           link,
           enableFun,
           recentChat: enableFun && recentChat?.length ? recentChat : undefined,
-          includeImage: false, // Keep images off for now to focus on reliable sends
+          army: enableFun && army?.code ? army : undefined,
         }),
       });
       if (res.ok) {
@@ -365,7 +377,12 @@ async function buildMessage(
           } else if (nameChunk && !text.includes(nameChunk)) {
             text = `${text} ${nameChunk}`;
           }
-          return { text, imageUrl: data.imageUrl || undefined };
+          return {
+            text,
+            imageData: data.imageData || undefined,
+            imageContentType: data.imageContentType || undefined,
+            imageFilename: data.imageFilename || undefined,
+          };
         }
         throw new Error('Render returned no text');
       } else {
@@ -966,11 +983,12 @@ function extractGameIdFromArg(arg?: string): string | null {
   return null;
 }
 
-/** Low-level group send to the bridge (v2/send), with optional ACI mentions. */
+/** Low-level group send to the bridge (v2/send), with optional ACI mentions and one attachment. */
 async function sendGroupRaw(
   groupId: string,
   message: string,
-  mentions?: Array<{ author: string; start: number; length: number }>
+  mentions?: Array<{ author: string; start: number; length: number }>,
+  attachment?: { dataB64: string; contentType: string; filename: string }
 ): Promise<void> {
   const bridgeUrl = process.env.SIGNAL_CLI_URL;
   const botNumber = process.env.SIGNAL_BOT_NUMBER;
@@ -982,12 +1000,18 @@ async function sendGroupRaw(
   const client = await getIdTokenClient(bridgeUrl);
   const data: any = { number: botNumber, message, recipients: [groupRecipient] };
   if (mentions && mentions.length > 0) data.mentions = mentions;
+  if (attachment?.dataB64) {
+    // signal-cli-rest-api base64_attachments item: data:<mime>;filename=<name>;base64,<data>
+    data.base64_attachments = [
+      `data:${attachment.contentType};filename=${attachment.filename};base64,${attachment.dataB64}`,
+    ];
+  }
   await client.request({
     url: `${bridgeUrl}/v2/send`,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     data,
-    timeout: 30000,
+    timeout: 45000,
   });
 }
 
@@ -1686,11 +1710,15 @@ async function onGroupGameNextTurn(
     stopGGSocket(groupId, 'not active');
     return;
   }
-  const resolved =
-    (await resolveCurrentPlayerName(gameId).catch(() => undefined)) ||
+  const turn = await resolveCurrentTurn(gameId).catch(() => undefined);
+  const currentPlayer =
+    turn?.username ||
     (await scrapeCurrentPlayerName(gameId).catch(() => undefined)) ||
     meta.socketPlayer;
-  const currentPlayer = resolved;
+  const army =
+    turn?.countryCode || turn?.countryName
+      ? { code: turn?.countryCode, name: turn?.countryName }
+      : undefined;
   if (!currentPlayer) {
     // Couldn't name the player, but a turn DID change — notify anyway so it's never silent.
     console.log('[gg] turn changed but current player unresolved; sending generic notice');
@@ -1724,7 +1752,8 @@ async function onGroupGameNextTurn(
       gameName,
       funEnabled: gg.funEnabled,
     },
-    recentChat
+    recentChat,
+    army
   );
   let message = payload.text;
   const players = gg.players || {};
@@ -1747,8 +1776,16 @@ async function onGroupGameNextTurn(
     mentions.push({ author: mapping.aci, start, length: 1 });
   }
 
+  const attachment = payload.imageData
+    ? {
+        dataB64: payload.imageData,
+        contentType: payload.imageContentType || 'image/gif',
+        filename: payload.imageFilename || 'unit.gif',
+      }
+    : undefined;
+
   try {
-    await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined);
+    await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined, attachment);
     await ggRef(groupId)
       .update({ lastTurn: { day: meta.day ?? null, awbwUsername: currentPlayer }, updatedAt: FieldValue.serverTimestamp() })
       .catch(() => {});
