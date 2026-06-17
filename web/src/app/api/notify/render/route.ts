@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
-import sharp from 'sharp';
 
 // Units we pick from for the "grunt radioing the commander" voice + matching sprite.
 // All exist as animated per-army sprites at terrain/ani/<code><unit>.gif on AWBW.
@@ -138,6 +137,7 @@ export async function POST(req: NextRequest) {
     let imageFilename: string | null = null;
     if (enableFun && army.code && /^[a-z]{2,3}$/.test(army.code)) {
       try {
+        const sharp = (await import('sharp')).default;
         const spriteUrl = `https://awbw.amarriner.com/terrain/ani/${army.code}${unit}.gif`;
         const res = await fetch(spriteUrl);
         if (res.ok) {
