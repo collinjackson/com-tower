@@ -37,15 +37,28 @@ export async function POST(req: NextRequest) {
           Array.isArray(body.players) && body.players.length
             ? ` Players in game: ${body.players.join(', ')}.`
             : '';
+        // Optional recent group-chat context to riff on.
+        const recentChat = Array.isArray(body.recentChat)
+          ? (body.recentChat as Array<{ name?: string; text?: string }>)
+              .filter((c) => c && typeof c.text === 'string' && c.text.trim())
+              .slice(-6)
+          : [];
+        const chatBlock = recentChat.length
+          ? `\nRecent group chat (oldest first):\n` +
+            recentChat
+              .map((c) => `${(c.name || 'someone').slice(0, 24)}: ${String(c.text).slice(0, 160)}`)
+              .join('\n') +
+            `\nIf there's a natural, good-natured hook in that chat, work a quick nod to it into the alert; if nothing fits, just give the turn reminder. Don't quote anything sensitive or mean-spirited, and don't force it.`
+          : '';
         const prompt =
           `Write a playful, under-140-character comm-tower alert for a turn reminder in an Advance Wars By Web game.` +
           ` Mention${who} without using any placeholders; if a name is unknown, say "your opponent".` +
-          ` Do NOT invent names; only use the provided player names/COs if given. Tone: witty but concise.${playersList}`;
+          ` Do NOT invent names; only use the provided player names/COs if given. Tone: witty but concise.${playersList}${chatBlock}`;
         const res = await client.chat.completions.create({
           model: process.env.FUN_MODE_MODEL_TEXT || 'gpt-4o-mini',
           messages: [{ role: 'user', content: prompt }],
-          max_tokens: 80,
-          temperature: 0.8,
+          max_tokens: 90,
+          temperature: 0.85,
         });
         caption = res.choices[0]?.message?.content?.trim() || null;
         if (caption && caption.length > 180) caption = caption.slice(0, 180);
