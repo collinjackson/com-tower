@@ -32,10 +32,13 @@ export async function POST(req: NextRequest) {
     if (useAi) {
       try {
         const client = new OpenAI({ apiKey: openaiKey });
-        const who = playerName ? ` ${playerName}` : ' your opponent';
+        const model = process.env.FUN_MODE_MODEL_TEXT || 'gpt-4o-mini';
+        const judgeModel = process.env.FUN_MODE_JUDGE_MODEL || model;
+        const candidateCount = Math.max(1, Math.min(20, Number(process.env.FUN_MODE_CANDIDATES) || 10));
+        const who = playerName || 'your opponent';
         const playersList =
           Array.isArray(body.players) && body.players.length
-            ? ` Players in game: ${body.players.join(', ')}.`
+            ? `Players: ${body.players.join(', ')}. `
             : '';
         // Optional recent group-chat context to riff on.
         const recentChat = Array.isArray(body.recentChat)
@@ -44,23 +47,68 @@ export async function POST(req: NextRequest) {
               .slice(-6)
           : [];
         const chatBlock = recentChat.length
-          ? `\nRecent group chat (oldest first):\n` +
+          ? `Recent group chat (oldest first):\n` +
             recentChat
-              .map((c) => `${(c.name || 'someone').slice(0, 24)}: ${String(c.text).slice(0, 160)}`)
+              .map((c) => `  ${(c.name || 'someone').slice(0, 24)}: ${String(c.text).slice(0, 160)}`)
               .join('\n') +
-            `\nIf there's a natural, good-natured hook in that chat, work a quick nod to it into the alert; if nothing fits, just give the turn reminder. Don't quote anything sensitive or mean-spirited, and don't force it.`
-          : '';
-        const prompt =
-          `Write a playful, under-140-character comm-tower alert for a turn reminder in an Advance Wars By Web game.` +
-          ` Mention${who} without using any placeholders; if a name is unknown, say "your opponent".` +
-          ` Do NOT invent names; only use the provided player names/COs if given. Tone: witty but concise.${playersList}${chatBlock}`;
-        const res = await client.chat.completions.create({
-          model: process.env.FUN_MODE_MODEL_TEXT || 'gpt-4o-mini',
-          messages: [{ role: 'user', content: prompt }],
-          max_tokens: 90,
-          temperature: 0.85,
+            `\nIf there's a genuinely funny hook in the chat, land a quick callback to it; if not, just be a sharp turn reminder. Don't quote verbatim, sensitive, or mean-spirited content, and don't force it.`
+          : `No recent chat — just be a sharp, witty turn reminder.`;
+        const genPrompt =
+          `You are "Com Tower", a deadpan military-comms AI that pings Advance Wars By Web players when it's their turn.` +
+          ` Voice: dry, quick, a little mischievous — a war-room operator who's seen it all. Never cringe, never mean.\n` +
+          `Write a turn-reminder alert, UNDER 140 characters, telling ${who} it's their turn` +
+          `${playerName ? ` (use the exact name "${playerName}")` : ''}.` +
+          ` Do NOT invent player names; only use ones given.${day ? ` It is day ${day}.` : ''} ${playersList}\n` +
+          `${chatBlock}\n` +
+          `Output ONLY the alert text — no surrounding quotes, at most one emoji.`;
+
+        // Best-of-N: generate diverse candidates, then judge picks the cleverest.
+        const gen = await client.chat.completions.create({
+          model,
+          n: candidateCount,
+          messages: [{ role: 'user', content: genPrompt }],
+          max_tokens: 70,
+          temperature: 1.05,
         });
-        caption = res.choices[0]?.message?.content?.trim() || null;
+        const candidates = Array.from(
+          new Set(
+            gen.choices
+              .map((c) => (c.message?.content || '').trim().replace(/^["']|["']$/g, ''))
+              .filter((t) => t.length > 0 && t.length <= 220)
+          )
+        );
+
+        if (candidates.length === 1) {
+          caption = candidates[0];
+        } else if (candidates.length > 1) {
+          try {
+            const list = candidates.map((c, i) => `${i}. ${c}`).join('\n');
+            const judgeRes = await client.chat.completions.create({
+              model: judgeModel,
+              temperature: 0.2,
+              max_tokens: 60,
+              response_format: { type: 'json_object' },
+              messages: [
+                {
+                  role: 'user',
+                  content:
+                    `Pick the single best turn-reminder alert for ${who}. Criteria, in priority order: ` +
+                    `genuinely funny/clever; lands a natural callback to the chat ONLY if there's a real hook; ` +
+                    `clearly says it's ${who}'s turn; under 140 chars; not mean or cringe; ` +
+                    `prefer ones that don't open with a generic "it's your turn".\n` +
+                    `Candidates:\n${list}\n` +
+                    `Reply as JSON: {"best": <index>}`,
+                },
+              ],
+            });
+            const pick = JSON.parse(judgeRes.choices[0]?.message?.content || '{}');
+            const idx = Number(pick.best);
+            caption = candidates[Number.isInteger(idx) && candidates[idx] ? idx : 0];
+          } catch (judgeErr) {
+            console.warn('Fun-mode judge failed; using first candidate', judgeErr);
+            caption = candidates[0];
+          }
+        }
         if (caption && caption.length > 180) caption = caption.slice(0, 180);
       } catch (err) {
         console.error('AI render failed', err);
