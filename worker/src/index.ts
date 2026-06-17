@@ -297,6 +297,30 @@ async function scrapeCurrentPlayerName(gameId: string): Promise<string | undefin
   return undefined;
 }
 
+/** Resolve the current player's AWBW username from the game page. AWBW exposes
+ *  `currentTurn = <players_id>` and embeds player records mapping players_id -> users_username. */
+async function resolveCurrentPlayerName(gameId: string): Promise<string | undefined> {
+  try {
+    const res = await fetch(gameLink(gameId), { cache: 'no-store' as any });
+    const html = await res.text();
+    const cur = html.match(/currentTurn\s*=\s*(\d+)/);
+    if (!cur) return undefined;
+    const curId = cur[1];
+    const map = new Map<string, string>();
+    // Player records may list users_username before or after players_id — capture both orders.
+    for (const m of html.matchAll(/"users_username"\s*:\s*"([^"]+)"[\s\S]{0,400}?"players_id"\s*:\s*(\d+)/g)) {
+      map.set(m[2], m[1]);
+    }
+    for (const m of html.matchAll(/"players_id"\s*:\s*(\d+)[\s\S]{0,400}?"users_username"\s*:\s*"([^"]+)"/g)) {
+      if (!map.has(m[1])) map.set(m[1], m[2]);
+    }
+    return map.get(curId);
+  } catch (err) {
+    console.error('resolveCurrentPlayerName failed', err);
+    return undefined;
+  }
+}
+
 async function buildMessage(gameId: string, meta: NextTurnMeta): Promise<RenderPayload> {
   const link = gameLink(gameId);
   const gameName = meta.gameName || `Game ${gameId}`;
@@ -1628,10 +1652,21 @@ async function onGroupGameNextTurn(
     stopGGSocket(groupId, 'not active');
     return;
   }
-  const scraped = await scrapeCurrentPlayerName(gameId).catch(() => undefined);
-  const currentPlayer = scraped || meta.socketPlayer;
+  const resolved =
+    (await resolveCurrentPlayerName(gameId).catch(() => undefined)) ||
+    (await scrapeCurrentPlayerName(gameId).catch(() => undefined)) ||
+    meta.socketPlayer;
+  const currentPlayer = resolved;
   if (!currentPlayer) {
-    console.log('[gg] no current player resolved');
+    // Couldn't name the player, but a turn DID change — notify anyway so it's never silent.
+    console.log('[gg] turn changed but current player unresolved; sending generic notice');
+    await sendGroupRaw(
+      groupId,
+      `⏭️ Next turn is up${meta.day ? ` (day ${meta.day})` : ''}.\n${gameLink(gameId)}`
+    ).catch((e) => console.error('[gg] generic notice failed', e));
+    await ggRef(groupId)
+      .update({ lastTurn: { day: meta.day ?? null, awbwUsername: null }, updatedAt: FieldValue.serverTimestamp() })
+      .catch(() => {});
     return;
   }
   const info = await loadPlayers(gameId).catch(() => ({ players: [] as string[], countries: [] as string[] }));
