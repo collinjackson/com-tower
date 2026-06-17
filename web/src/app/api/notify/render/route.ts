@@ -4,10 +4,48 @@ import OpenAI from 'openai';
 // AWBW country code -> army name (for voice flavor). Unknown codes just omit the name.
 const ARMY_NAMES: Record<string, string> = {
   os: 'Orange Star', bm: 'Blue Moon', ge: 'Green Earth', yc: 'Yellow Comet', bh: 'Black Hole',
-  rf: 'Red Fire', gs: 'Grey Sky', bd: 'Brown Desert', ab: 'Amber Blaze', js: 'Jade Sun',
+  rf: 'Red Fire', gs: 'Grey Sky', bd: 'Brown Desert', ab: 'Amber Blossom', js: 'Jade Sun',
   ci: 'Cobalt Ice', pc: 'Pink Cosmos', tg: 'Teal Galaxy', pl: 'Purple Lightning', ar: 'Acid Rain',
-  wn: 'White Nova', sc: 'Silver Claw',
+  wn: 'White Nova', aa: 'Azure Asteroid', ne: 'Noir Eclipse', sc: 'Silver Claw', uw: 'Umber Wilds',
 };
+
+// AWBW country code -> a short persona/theme that colors the unit's voice.
+// Drawn from each nation's official lore card (terrain/cinfo_<code>_aw1.gif).
+const ARMY_THEME: Record<string, string> = {
+  os: 'all-American pros (USA) — earnest, heroic, academy-trained, can-do',
+  bm: 'Russian winter army — cold, rugged, stoic, grind-it-out attrition',
+  ge: 'German precision — hyper-efficient, organized, disciplined, by-the-book',
+  yc: 'Japan/samurai pride — traditional, honor-bound, reveres the old ways',
+  bh: 'otherworldly invaders — sinister, mechanized, coldly villainous',
+  rf: 'British (UK) — jovial, nonchalant, improvising; cheeky, clock-tower bells, makes do',
+  gs: 'dystopian-future industrial state — oppressive, faceless conscripts, shadowed eyes, grim',
+  bd: 'Egyptian desert folk — headscarves, ancient ruins, sandstorms, old-world stoicism',
+  ab: 'Chinese alliance of three mountain tribes (Three Kingdoms vibe) — scrappy, proud, now modern',
+  js: 'Ancient-Rome legion reborn — conquest-hungry, fierce, grandiose, historic arms',
+  ci: 'sentient ANTARCTIC PENGUINS running on stolen Black Hole tech — cold, waddling, chilly bravado',
+  pc: 'cosmic religious zealots — fervent, certain, "purifying" the world by the universe’s grand design',
+  tg: 'Latin-American revolutionaries — proud, fiery, elite beret commandos, anti-colonial',
+  pl: 'French Foreign Legion of mercenaries from everywhere — professional, motley, fighting for citizenship',
+  ar: 'secretive Vietnamese jungle guerillas — hardy, patient, ambushers, mysterious',
+  wn: 'benevolent peace-loving ALIENS who only fight evil — noble, otherworldly, reluctant warriors',
+  aa: 'sentient blue OOZE/SLIME creatures wielding modern guns — weird, gloopy, oddly competent',
+  ne: 'mafia MOBSTERS of the criminal underworld — smooth, menacing, "connections", wiseguy patter',
+  sc: 'intelligent high-tech DINOSAURS back from extinction — ancient, roaring, surprisingly advanced',
+  uw: 'feral jungle MONKEYS & APES with scavenged gear — hoots, screeches, coconuts, rebellious attitude',
+};
+
+// The transmission's format for a given turn — weighted toward a straight call, with occasional
+// rhyme/joke/gripe/praise/deadpan when there's material to play with.
+const STYLES = [
+  'a sharp, punchy radio call',
+  'a sharp, punchy radio call',
+  'a sharp, punchy radio call',
+  'a short rhyming couplet (it must actually rhyme)',
+  'a quick one-liner joke',
+  'a good-natured gripe or complaint',
+  'over-the-top praise/hype for the commander',
+  'bone-dry deadpan humor',
+];
 
 // Sprite-file unit name -> a fitting terrain tile to stand on.
 // (Only 'plain', 'mountain', 'sea' are verified-correct AWBW tiles; 'wood' is a different image.)
@@ -81,31 +119,32 @@ export async function POST(req: NextRequest) {
             `\nIf there's a genuinely funny hook in the chatter, the grunt can gripe or joke about it; otherwise just call in for orders. No verbatim quoting or cruelty.`
           : `No chatter — just call in for orders.`;
 
-        // Ground the mood in the unit's REAL condition. Never invent damage/combat.
-        const condition =
-          hp !== undefined && hp < 10
-            ? `You've taken a beating (down to ${hp}/10 HP) — you may sound weary, rattled, or scraped up, but do NOT invent specific casualties or battles.`
-            : `You are at FULL strength and unscratched. Do NOT claim any damage, casualties, low ammo, or combat. Pick a mood befitting an idle soldier awaiting orders: bored, restless, cocky, antsy, over-caffeinated, itching to move.`;
+        // Convey MORALE/MOOD from the real condition — never exact HP numbers.
+        const mood =
+          hp !== undefined && hp <= 4
+            ? 'badly shot up — grim, defiant, gallows humor'
+            : hp !== undefined && hp < 10
+              ? 'a bit banged up — scrappy and weary, but game'
+              : 'at full strength — bored, restless, cocky, itching to move';
+        const supplies = [lowFuel ? 'almost out of fuel' : '', lowAmmo ? 'low on ammo' : '']
+          .filter(Boolean)
+          .join(' and ');
+        const persona = (army.code && ARMY_THEME[army.code]) || '';
+        const style = STYLES[Math.floor(Math.random() * STYLES.length)];
         const subject = unitName
-          ? `a single ${armyName ? armyName + ' ' : ''}${unitName} unit`
-          : `${armyName ? armyName + ' ' : 'field'} command`;
+          ? `a ${armyName ? armyName + ' ' : ''}${unitName} unit`
+          : `${armyName ? armyName + ' ' : 'field '}command`;
 
         const genPrompt =
-          `You are ${subject} in an Advance Wars By Web battle, radioing your commander ${who} over a crackly ` +
-          `field radio because it's ${who}'s turn and you need orders. Voice: a grunt soldier — clipped radio comms ` +
-          `("come in", "over", "say again", "five by five"), real personality, loyal to your army. Address the commander by name. ` +
-          `You don't know grand strategy; you just need to know what to do.\n` +
-          `GROUND IT IN REALITY — only use what's stated here, invent nothing about the battle: ${condition}` +
-          `${
-            lowFuel || lowAmmo
-              ? ` You're also ${[lowFuel ? 'almost out of fuel' : '', lowAmmo ? 'low on ammo' : '']
-                  .filter(Boolean)
-                  .join(' and ')} — it's fine to gripe about that.`
-              : ''
-          }\n` +
-          `Write the transmission, ideally under 160 characters. Use the exact name "${who}".${day ? ` It is day ${day}.` : ''}\n` +
+          `You are ${subject}${persona ? ` — your army's character: ${persona}` : ''}, radioing your commander ${who} ` +
+          `over a crackly field radio because it's ${who}'s turn and you need orders. You're a grunt; use clipped comms flavor ` +
+          `(over, come in, say again, five by five) and let your army's character color the voice — accent, references, even sounds.\n` +
+          `Convey your MOOD, never exact numbers: you're ${mood}.${supplies ? ` You're also ${supplies} — gripe about it.` : ''} ` +
+          `Only use what's stated here — don't invent battles, casualties, or damage.\n` +
+          `Format for THIS transmission: ${style}. (If you can't pull it off well, a sharp call is fine.)\n` +
           `${chatBlock}\n` +
-          `Output ONLY the transmission — no surrounding quotes. Emoji: none, or one at most.`;
+          `It must clearly mean it's ${who}'s turn.${day ? ` It is day ${day}.` : ''} Use the exact name "${who}". ` +
+          `Under ~160 characters. Output ONLY the transmission — no surrounding quotes, at most one emoji.`;
 
         const gen = await client.chat.completions.create({
           model,
@@ -136,9 +175,10 @@ export async function POST(req: NextRequest) {
                 {
                   role: 'user',
                   content:
-                    `Pick the best in-character radio call from a ${armyName || ''} ${unitName || 'command'} grunt to commander ${who}. ` +
-                    `Criteria, in priority order: most in-character and genuinely funny; stays true to the stated condition (no invented damage/combat); ` +
-                    `clearly conveys it's ${who}'s turn (needs orders); lands a callback to the chatter ONLY if there's a real hook; tight (ideally under ~160 chars); not cringe or mean.\n` +
+                    `Pick the best radio call from a ${armyName || ''} ${unitName || 'command'} grunt to commander ${who}. ` +
+                    `Criteria, in priority order: best leans into the army's character and is genuinely funny; nails the intended format (${style}); ` +
+                    `conveys mood/morale without stating HP numbers; clearly conveys it's ${who}'s turn (needs orders); ` +
+                    `lands a callback to the chatter ONLY if there's a real hook; tight (ideally under ~160 chars); not cringe or mean.\n` +
                     `Candidates:\n${list}\n` +
                     `Reply as JSON: {"best": <index>}`,
                 },
