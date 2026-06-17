@@ -297,7 +297,33 @@ async function scrapeCurrentPlayerName(gameId: string): Promise<string | undefin
   return undefined;
 }
 
-type AwbwUnit = { name: string; code?: string; hp: number; lowFuel: boolean; lowAmmo: boolean };
+type AwbwUnit = {
+  name: string;
+  code?: string;
+  hp: number;
+  lowFuel: boolean;
+  lowAmmo: boolean;
+  terrainTile?: string; // AWBW terrain/aw1 tile filename the unit stands on (for the sprite backdrop)
+};
+
+// AWBW country code -> lowercase army name used in building tile filenames (e.g. orangestarhq.gif).
+const ARMY_FULLNAME: Record<string, string> = {
+  os: 'orangestar', bm: 'bluemoon', ge: 'greenearth', yc: 'yellowcomet', bh: 'blackhole',
+  rf: 'redfire', gs: 'greysky', bd: 'browndesert', ab: 'amberblaze', js: 'jadesun',
+  ci: 'cobaltice', pc: 'pinkcosmos', tg: 'tealgalaxy', pl: 'purplelightning', wn: 'whitenova',
+};
+// Building terrain_name -> tile word (army prefix added unless neutral; silo is always neutral art).
+const BUILDING_WORD: Record<string, string> = {
+  Headquarters: 'hq', HQ: 'hq', City: 'city', Base: 'base', Factory: 'base',
+  Airport: 'airport', Port: 'port', Seaport: 'port',
+  'Com Tower': 'comtower', 'Comm Tower': 'comtower', 'Communications Tower': 'comtower',
+  Lab: 'lab', Laboratory: 'lab', 'Missile Silo': 'missilesilo',
+};
+// Base terrain_name -> verified tile filename. ('Wood' aw1 art is wrong/blue, so use plains.)
+const BASE_TILE: Record<string, string> = {
+  Plain: 'plain', Mountain: 'mountain', Sea: 'sea', Reef: 'sea', Shoal: 'sea',
+  Wood: 'plain', Road: 'plain', Bridge: 'plain', River: 'plain',
+};
 
 /** Resolve the current player from the game page: username, army, and their REAL living units.
  *  AWBW exposes `currentTurn = <players_id>` and a `unitsInfo = {...}` map of placed units
@@ -339,12 +365,54 @@ async function resolveCurrentTurn(gameId: string): Promise<
       }
     }
 
+    // Map data for the terrain backdrop: terrain name per (x,y), buildings per [x][y], player->code.
+    const terrainByXY = new Map<string, string>();
+    try {
+      const tm = html.match(/terrainInfo\s*=\s*(\[[^;]*\])\s*;/);
+      if (tm) {
+        const walk = (o: any) => {
+          if (Array.isArray(o)) o.forEach(walk);
+          else if (o && typeof o === 'object' && o.tiles_x !== undefined)
+            terrainByXY.set(`${o.tiles_x},${o.tiles_y}`, o.terrain_name);
+        };
+        walk(JSON.parse(tm[1]));
+      }
+    } catch (e) {
+      console.warn('terrainInfo parse failed', e);
+    }
+    let buildingsByXY: Record<string, Record<string, any>> = {};
+    try {
+      const bm = html.match(/buildingsInfo\s*=\s*(\{[^;]*\})\s*;/);
+      if (bm) buildingsByXY = JSON.parse(bm[1]);
+    } catch (e) {
+      console.warn('buildingsInfo parse failed', e);
+    }
+
     // The current player's actual living units (grounds the unit pick + voice in reality).
     let units: AwbwUnit[] = [];
     const um = html.match(/unitsInfo\s*=\s*(\{[^;]*\})\s*;/);
     if (um) {
       try {
         const obj = JSON.parse(um[1]) as Record<string, any>;
+        // players_id -> countries_code (for coloring buildings the unit stands on).
+        const playerCode: Record<string, string> = {};
+        for (const u of Object.values(obj)) {
+          if (u.units_players_id && u.countries_code) playerCode[String(u.units_players_id)] = u.countries_code;
+        }
+        const tileAt = (x: number, y: number): string => {
+          const b = buildingsByXY[String(x)]?.[String(y)];
+          if (b?.terrain_name) {
+            const word = BUILDING_WORD[b.terrain_name as string];
+            if (word === 'missilesilo') return 'missilesilo';
+            if (word) {
+              const code = b.buildings_players_id ? playerCode[String(b.buildings_players_id)] : undefined;
+              const full = code ? ARMY_FULLNAME[code] : 'neutral';
+              if (full) return `${full}${word}`;
+            }
+          }
+          const tn = terrainByXY.get(`${x},${y}`);
+          return (tn && BASE_TILE[tn]) || 'plain';
+        };
         units = Object.values(obj)
           .filter((u) => String(u.units_players_id) === curId && Number(u.units_hit_points) > 0)
           .map((u) => {
@@ -359,7 +427,14 @@ async function resolveCurrentTurn(gameId: string): Promise<
               (fuel <= Math.ceil(max.fuel * 0.2) || (fuelPerTurn > 0 && fuel <= fuelPerTurn * 2));
             // Low ammo: only for units that carry ammo, at/under ~1/3 of max.
             const lowAmmo = max.ammo > 0 && ammo <= Math.max(1, Math.floor(max.ammo / 3));
-            return { name, code: u.countries_code || undefined, hp: Number(u.units_hit_points), lowFuel, lowAmmo };
+            return {
+              name,
+              code: u.countries_code || undefined,
+              hp: Number(u.units_hit_points),
+              lowFuel,
+              lowAmmo,
+              terrainTile: tileAt(Number(u.units_x), Number(u.units_y)),
+            };
           })
           .filter((u) => u.name);
       } catch (e) {
@@ -383,7 +458,7 @@ async function buildMessage(
   meta: NextTurnMeta,
   recentChat?: Array<{ name?: string; text: string }>,
   army?: { code?: string; name?: string },
-  unit?: { name: string; hp: number; lowFuel: boolean; lowAmmo: boolean }
+  unit?: { name: string; hp: number; lowFuel: boolean; lowAmmo: boolean; terrainTile?: string }
 ): Promise<RenderPayload> {
   const link = gameLink(gameId);
   const gameName = meta.gameName || `Game ${gameId}`;
@@ -1771,7 +1846,13 @@ async function onGroupGameNextTurn(
   const armyCode = chosenUnit?.code || turn?.countryCode;
   const army = armyCode ? { code: armyCode } : undefined;
   const unitInfo = chosenUnit
-    ? { name: chosenUnit.name, hp: chosenUnit.hp, lowFuel: chosenUnit.lowFuel, lowAmmo: chosenUnit.lowAmmo }
+    ? {
+        name: chosenUnit.name,
+        hp: chosenUnit.hp,
+        lowFuel: chosenUnit.lowFuel,
+        lowAmmo: chosenUnit.lowAmmo,
+        terrainTile: chosenUnit.terrainTile,
+      }
     : undefined;
   if (!currentPlayer) {
     // Couldn't name the player, but a turn DID change — notify anyway so it's never silent.

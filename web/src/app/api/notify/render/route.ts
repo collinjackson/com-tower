@@ -28,7 +28,13 @@ export async function POST(req: NextRequest) {
       enableFun?: boolean;
     };
     const army = (body.army || {}) as { code?: string };
-    const unit = (body.unit || {}) as { name?: string; hp?: number; lowFuel?: boolean; lowAmmo?: boolean };
+    const unit = (body.unit || {}) as {
+      name?: string;
+      hp?: number;
+      lowFuel?: boolean;
+      lowAmmo?: boolean;
+      terrainTile?: string;
+    };
 
     if (!gameId || !link) {
       return NextResponse.json({ error: 'gameId and link required' }, { status: 400 });
@@ -169,33 +175,52 @@ export async function POST(req: NextRequest) {
     if (enableFun && army.code && /^[a-z]{2,3}$/.test(army.code) && unitFile) {
       try {
         const sharp = (await import('sharp')).default;
+        const transparent = { r: 0, g: 0, b: 0, alpha: 0 };
         const spriteUrl = `https://awbw.amarriner.com/terrain/ani/${army.code}${unitFile}.gif`;
         const sres = await fetch(spriteUrl);
         if (sres.ok) {
-          const unitBuf = Buffer.from(await sres.arrayBuffer());
+          let unitBuf = Buffer.from(await sres.arrayBuffer());
           const meta = await sharp(unitBuf, { animated: true }).metadata();
           const baseW = meta.width || 16;
-          const pageH = meta.pageHeight || baseW;
+          const uH = meta.pageHeight || baseW;
           const scale = Math.max(1, Math.round(128 / baseW));
 
-          // Terrain backdrop tile, sized to one frame.
-          let unitImg = sharp(unitBuf, { animated: true });
+          // Real terrain the unit stands on (worker resolves it from the map). Fall back to a
+          // unit-appropriate tile. Tall tiles (HQ/city/base/mountain, 16x32) rise above the unit,
+          // so we grow each frame to the tile height and stand the unit at the bottom.
+          const tile = (typeof unit.terrainTile === 'string' && unit.terrainTile) || terrainForUnit(unitFile);
+          let frameH = uH;
           try {
-            const terrName = terrainForUnit(unitFile);
-            const tres = await fetch(`https://awbw.amarriner.com/terrain/aw1/${terrName}.gif`);
-            if (tres.ok) {
-              const terr = await sharp(Buffer.from(await tres.arrayBuffer()))
-                .resize(baseW, pageH, { kernel: 'nearest', fit: 'cover', position: 'bottom' })
-                .png()
+            const tres = await fetch(`https://awbw.amarriner.com/terrain/aw1/${tile}.gif`);
+            const terrSrc = tres.ok
+              ? Buffer.from(await tres.arrayBuffer())
+              : Buffer.from(
+                  await (await fetch('https://awbw.amarriner.com/terrain/aw1/plain.gif')).arrayBuffer()
+                );
+            const tMeta = await sharp(terrSrc).metadata();
+            frameH = Math.max(uH, tMeta.height || uH);
+
+            // Stand the unit at the bottom of a frameH-tall frame (per-frame; resize is page-aware).
+            if (frameH > uH) {
+              unitBuf = await sharp(unitBuf, { animated: true })
+                .resize({ width: baseW, height: frameH, fit: 'contain', position: 'bottom', background: transparent })
+                .gif()
                 .toBuffer();
-              // dest-over draws the terrain BEHIND the unit; tile fills every animation frame.
-              unitImg = unitImg.composite([{ input: terr, blend: 'dest-over', tile: true }]);
             }
+            const terr = await sharp(terrSrc)
+              .resize(baseW, frameH, { kernel: 'nearest', fit: 'cover', position: 'bottom' })
+              .png()
+              .toBuffer();
+            // dest-over draws terrain BEHIND the unit; tile repeats it once per animation frame.
+            unitBuf = await sharp(unitBuf, { animated: true })
+              .composite([{ input: terr, blend: 'dest-over', tile: true }])
+              .gif()
+              .toBuffer();
           } catch (terrErr) {
             console.warn('Terrain backdrop failed (unit only)', terrErr);
           }
 
-          const out = await unitImg
+          const out = await sharp(unitBuf, { animated: true })
             .resize({ width: baseW * scale, kernel: 'nearest' })
             .gif()
             .toBuffer();
