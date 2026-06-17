@@ -10,10 +10,10 @@ const ARMY_NAMES: Record<string, string> = {
 };
 
 // Sprite-file unit name -> a fitting terrain tile to stand on.
+// (Only 'plain', 'mountain', 'sea' are verified-correct AWBW tiles; 'wood' is a different image.)
 function terrainForUnit(unitFile: string): string {
   if (/lander|cruiser|sub|battleship|carrier|blackboat/.test(unitFile)) return 'sea';
   if (/mech/.test(unitFile)) return 'mountain';
-  if (/infantry/.test(unitFile)) return 'wood';
   return 'plain';
 }
 
@@ -28,7 +28,7 @@ export async function POST(req: NextRequest) {
       enableFun?: boolean;
     };
     const army = (body.army || {}) as { code?: string };
-    const unit = (body.unit || {}) as { name?: string; hp?: number; fuel?: number };
+    const unit = (body.unit || {}) as { name?: string; hp?: number; lowFuel?: boolean; lowAmmo?: boolean };
 
     if (!gameId || !link) {
       return NextResponse.json({ error: 'gameId and link required' }, { status: 400 });
@@ -50,7 +50,8 @@ export async function POST(req: NextRequest) {
     const unitName = (unit.name || '').trim();
     const unitFile = unitName.toLowerCase().replace(/[^a-z0-9.-]/g, '');
     const hp = typeof unit.hp === 'number' ? unit.hp : undefined;
-    const lowFuel = typeof unit.fuel === 'number' && unit.fuel <= 12;
+    const lowFuel = unit.lowFuel === true;
+    const lowAmmo = unit.lowAmmo === true;
 
     let caption: string | null = null;
 
@@ -89,7 +90,13 @@ export async function POST(req: NextRequest) {
           `("come in", "over", "say again", "five by five"), real personality, loyal to your army. Address the commander by name. ` +
           `You don't know grand strategy; you just need to know what to do.\n` +
           `GROUND IT IN REALITY — only use what's stated here, invent nothing about the battle: ${condition}` +
-          `${lowFuel ? ' Fuel is running low.' : ''}\n` +
+          `${
+            lowFuel || lowAmmo
+              ? ` You're also ${[lowFuel ? 'almost out of fuel' : '', lowAmmo ? 'low on ammo' : '']
+                  .filter(Boolean)
+                  .join(' and ')} — it's fine to gripe about that.`
+              : ''
+          }\n` +
           `Write the transmission, ideally under 160 characters. Use the exact name "${who}".${day ? ` It is day ${day}.` : ''}\n` +
           `${chatBlock}\n` +
           `Output ONLY the transmission — no surrounding quotes. Emoji: none, or one at most.`;

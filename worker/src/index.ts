@@ -297,7 +297,7 @@ async function scrapeCurrentPlayerName(gameId: string): Promise<string | undefin
   return undefined;
 }
 
-type AwbwUnit = { name: string; code?: string; hp: number; fuel: number };
+type AwbwUnit = { name: string; code?: string; hp: number; lowFuel: boolean; lowAmmo: boolean };
 
 /** Resolve the current player from the game page: username, army, and their REAL living units.
  *  AWBW exposes `currentTurn = <players_id>` and a `unitsInfo = {...}` map of placed units
@@ -325,6 +325,20 @@ async function resolveCurrentTurn(gameId: string): Promise<
     const countryCode = after.match(/"countries_code"\s*:\s*"([a-z]{2,3})"/i)?.[1];
     const countryName = after.match(/"countries_name"\s*:\s*"([^"]+)"/)?.[1];
 
+    // Per-unit-type max fuel/ammo, to decide if the game would show a low warning.
+    const maxByType: Record<string, { fuel: number; ammo: number }> = {};
+    const gm = html.match(/genericUnits\s*=\s*(\{[^;]*\})\s*;/);
+    if (gm) {
+      try {
+        const gu = JSON.parse(gm[1]) as Record<string, any>;
+        for (const [name, def] of Object.entries(gu)) {
+          maxByType[name] = { fuel: Number(def.units_fuel) || 0, ammo: Number(def.units_ammo) || 0 };
+        }
+      } catch (e) {
+        console.warn('genericUnits parse failed', e);
+      }
+    }
+
     // The current player's actual living units (grounds the unit pick + voice in reality).
     let units: AwbwUnit[] = [];
     const um = html.match(/unitsInfo\s*=\s*(\{[^;]*\})\s*;/);
@@ -333,12 +347,20 @@ async function resolveCurrentTurn(gameId: string): Promise<
         const obj = JSON.parse(um[1]) as Record<string, any>;
         units = Object.values(obj)
           .filter((u) => String(u.units_players_id) === curId && Number(u.units_hit_points) > 0)
-          .map((u) => ({
-            name: String(u.units_name || ''),
-            code: u.countries_code || undefined,
-            hp: Number(u.units_hit_points),
-            fuel: Number(u.units_fuel),
-          }))
+          .map((u) => {
+            const name = String(u.units_name || '');
+            const fuel = Number(u.units_fuel);
+            const ammo = Number(u.units_ammo);
+            const fuelPerTurn = Number(u.units_fuel_per_turn) || 0;
+            const max = maxByType[name] || { fuel: 0, ammo: 0 };
+            // Low fuel: <=20% of max, or (for fuel-burning air/naval) within ~2 turns of stranding.
+            const lowFuel =
+              max.fuel > 0 &&
+              (fuel <= Math.ceil(max.fuel * 0.2) || (fuelPerTurn > 0 && fuel <= fuelPerTurn * 2));
+            // Low ammo: only for units that carry ammo, at/under ~1/3 of max.
+            const lowAmmo = max.ammo > 0 && ammo <= Math.max(1, Math.floor(max.ammo / 3));
+            return { name, code: u.countries_code || undefined, hp: Number(u.units_hit_points), lowFuel, lowAmmo };
+          })
           .filter((u) => u.name);
       } catch (e) {
         console.warn('unitsInfo parse failed', e);
@@ -361,7 +383,7 @@ async function buildMessage(
   meta: NextTurnMeta,
   recentChat?: Array<{ name?: string; text: string }>,
   army?: { code?: string; name?: string },
-  unit?: { name: string; hp: number; fuel: number }
+  unit?: { name: string; hp: number; lowFuel: boolean; lowAmmo: boolean }
 ): Promise<RenderPayload> {
   const link = gameLink(gameId);
   const gameName = meta.gameName || `Game ${gameId}`;
@@ -1749,7 +1771,7 @@ async function onGroupGameNextTurn(
   const armyCode = chosenUnit?.code || turn?.countryCode;
   const army = armyCode ? { code: armyCode } : undefined;
   const unitInfo = chosenUnit
-    ? { name: chosenUnit.name, hp: chosenUnit.hp, fuel: chosenUnit.fuel }
+    ? { name: chosenUnit.name, hp: chosenUnit.hp, lowFuel: chosenUnit.lowFuel, lowAmmo: chosenUnit.lowAmmo }
     : undefined;
   if (!currentPlayer) {
     // Couldn't name the player, but a turn DID change — notify anyway so it's never silent.
