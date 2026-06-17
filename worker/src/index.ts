@@ -972,7 +972,10 @@ async function sendGroupReply(groupId: string, text: string): Promise<void> {
 
 /** Join a Signal group via its invite link, by calling the VM join-shim
  *  (which forwards joinGroup to the signal-cli daemon — not exposed via the bridge REST API). */
-async function joinViaLink(uri: string): Promise<void> {
+async function joinViaLink(
+  uri: string,
+  sender?: { aci?: string; number?: string; name?: string }
+): Promise<void> {
   const shimUrl = process.env.JOIN_SHIM_URL;
   const secret = process.env.JOIN_SHIM_SECRET || '';
   if (!shimUrl) {
@@ -990,9 +993,30 @@ async function joinViaLink(uri: string): Promise<void> {
     const errMsg = data?.error?.message;
     console.log(`[bot] joinViaLink -> HTTP ${res.status} groupId=${groupId || '?'} ${errMsg ? `error="${errMsg}"` : 'ok'}`);
     if (res.ok && groupId && !errMsg) {
+      // Whoever sent the invite link becomes the first mod (if none recorded yet).
+      let firstMod = false;
+      if (sender?.aci) {
+        const ref = ggRef(groupId);
+        const snap = await ref.get();
+        const existing = (snap.data() as GroupGame | undefined)?.mods || [];
+        if (existing.length === 0) {
+          await ref.set(
+            {
+              groupId,
+              status: snap.exists ? (snap.data() as GroupGame).status || 'pending' : 'pending',
+              mods: [sender.aci],
+              createdBy: { aci: sender.aci, number: sender.number || null },
+              updatedAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+          );
+          firstMod = true;
+        }
+      }
       await sendGroupReply(
         groupId,
-        '👋 Com Tower reporting in. Set the game with /game <AWBW link>, then each player runs /iam <awbw_name>. /help for all commands.'
+        `👋 Com Tower reporting in.${firstMod && sender?.name ? ` ${sender.name} is the mod.` : ''}\n` +
+          'Set the game with /game <AWBW link>, then each player runs /iam <awbw_name>. /help for all commands.'
       );
     }
   } catch (err) {
@@ -1002,31 +1026,32 @@ async function joinViaLink(uri: string): Promise<void> {
 
 const HELP_TEXT =
   '📋 Com Tower — AWBW turn alerts\n' +
-  '/game <link>         — watch an AWBW game (admin)\n' +
+  '/game <link>         — watch an AWBW game (mod)\n' +
   '/iam <awbw_name>     — claim your player slot\n' +
-  '/setplayer @x <name> — map a member to a player (admin)\n' +
-  '/unsetplayer @x      — remove a mapping (admin)\n' +
+  '/setplayer @x <name> — map a member to a player (mod)\n' +
+  '/unsetplayer @x      — remove a mapping (mod)\n' +
   '/players             — show the roster\n' +
-  '/scope mine|all      — who gets pinged each turn (admin)\n' +
-  '/fun [on|off]        — flavor text (admin)\n' +
+  '/addmod @x           — make someone a mod (mod)\n' +
+  '/removemod @x        — remove a mod (mod)\n' +
+  '/fun [on|off]        — flavor text (mod)\n' +
   '/status              — current state\n' +
-  '/stop                — stop watching (admin)\n' +
+  '/stop                — stop watching (mod)\n' +
   '/ping                — connectivity check';
 
 type PlayerMapping = {
   aci: string;
   number?: string;
   displayName?: string;
-  claimedBy: 'self' | 'admin';
+  claimedBy: 'self' | 'mod';
   claimedAt?: any;
 };
 type GroupGame = {
   groupId: string;
-  gameId: string;
+  gameId?: string;
   gameName?: string;
-  status: 'active' | 'stopped' | 'ended';
+  status: 'pending' | 'active' | 'stopped' | 'ended';
   createdBy?: { aci?: string; number?: string };
-  admins?: string[];
+  mods?: string[];
   players?: Record<string, PlayerMapping>;
   funEnabled?: boolean;
   scope?: 'mine' | 'all';
@@ -1045,12 +1070,12 @@ type CmdCtx = {
 function ggRef(groupId: string) {
   return getFirestore().collection('groupGames').doc(groupId);
 }
-/** Permissive admin check: if no admins recorded yet, anyone may act (friendly games). */
-function isGgAdmin(gg: GroupGame | undefined, aci?: string): boolean {
+/** Permissive mod check: if no mods recorded yet, anyone may act (friendly games). */
+function isGgMod(gg: GroupGame | undefined, aci?: string): boolean {
   if (!gg) return true;
-  const admins = gg.admins || [];
-  if (admins.length === 0) return true;
-  return !!aci && admins.includes(aci);
+  const mods = gg.mods || [];
+  if (mods.length === 0) return true;
+  return !!aci && mods.includes(aci);
 }
 
 async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
@@ -1075,8 +1100,8 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
       await reply('Usage: /game <AWBW game link or id>');
       return;
     }
-    if (gg && !isGgAdmin(gg, senderAci)) {
-      await reply('Only an admin can change the game.');
+    if (gg && !isGgMod(gg, senderAci)) {
+      await reply('Only a mod can change the game. (The mod is whoever brought the bot into this group.)');
       return;
     }
     const [info, gameName] = await Promise.all([
@@ -1091,10 +1116,9 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
         gameName: gameName || null,
         status: 'active',
         createdBy: gg?.createdBy || { aci: senderAci || null, number: senderNumber || null },
-        admins: gg?.admins?.length ? gg.admins : senderAci ? [senderAci] : [],
+        mods: gg?.mods || (senderAci ? [senderAci] : []),
         players: existingPlayers,
         funEnabled: gg?.funEnabled || false,
-        scope: gg?.scope || 'mine',
         updatedAt: FieldValue.serverTimestamp(),
       },
       { merge: true }
@@ -1102,18 +1126,23 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
     const roster = info.players || [];
     const mapped = new Set(Object.keys(existingPlayers).map((s) => s.toLowerCase()));
     const unmapped = roster.filter((p) => !mapped.has(p.toLowerCase()));
+    const switching = !!gg?.gameId && gg.gameId !== gameId;
+    // Carried-over mappings that apply to the new game's roster (mappings are kept across switches).
+    const keptRelevant = roster.filter((p) => mapped.has(p.toLowerCase())).length;
     let msg = `📡 Watching game ${gameId}${gameName ? ` (${gameName})` : ''}.\n${gameLink(gameId)}\n`;
+    if (switching && keptRelevant > 0)
+      msg += `♻️ Kept ${keptRelevant} player mapping${keptRelevant === 1 ? '' : 's'} from before.\n`;
     if (roster.length) msg += `Players: ${roster.join(', ')}\n`;
     msg += unmapped.length
-      ? `Unmapped: ${unmapped.join(', ')}\nEach player: /iam <your_awbw_name>  ·  admin: /setplayer @member <awbw_name>`
-      : `All players mapped — you'll be @mentioned on your turn.`;
+      ? `Unmapped: ${unmapped.join(', ')}\nEach player: /iam <your_awbw_name>  ·  mod: /setplayer @member <awbw_name>`
+      : `All players mapped — each gets @mentioned on their turn.`;
     await reply(msg);
     console.log(`[gg] /game ${gameId} set for group ${groupId.substring(0, 16)}`);
     return;
   }
 
-  if (!gg) {
-    await reply('No game set yet. An admin should run: /game <AWBW link>');
+  if (!gg || !gg.gameId) {
+    await reply('No game set yet. Run /game <AWBW link> to start.');
     return;
   }
 
@@ -1142,8 +1171,8 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
   }
 
   if (cmd === '/setplayer') {
-    if (!isGgAdmin(gg, senderAci)) {
-      await reply('Only an admin can use /setplayer.');
+    if (!isGgMod(gg, senderAci)) {
+      await reply('Only a mod can use /setplayer.');
       return;
     }
     const target = mentions[0];
@@ -1158,7 +1187,7 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
       aci: target.uuid,
       number: target.number,
       displayName: target.name,
-      claimedBy: 'admin',
+      claimedBy: 'mod',
       claimedAt: FieldValue.serverTimestamp(),
     };
     await ggRef(groupId).update({ players, updatedAt: FieldValue.serverTimestamp() });
@@ -1167,8 +1196,8 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
   }
 
   if (cmd === '/unsetplayer' || cmd === '/forget') {
-    if (!isGgAdmin(gg, senderAci)) {
-      await reply('Only an admin can use /unsetplayer.');
+    if (!isGgMod(gg, senderAci)) {
+      await reply('Only a mod can use /unsetplayer.');
       return;
     }
     const target = mentions[0];
@@ -1204,28 +1233,41 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
     return;
   }
 
-  if (cmd === '/scope') {
-    if (!isGgAdmin(gg, senderAci)) {
-      await reply('Only an admin can change scope.');
+  if (cmd === '/addmod') {
+    if (!isGgMod(gg, senderAci)) {
+      await reply('Only a mod can add mods.');
       return;
     }
-    const v = (args[0] || '').toLowerCase();
-    if (v !== 'mine' && v !== 'all') {
-      await reply('Usage: /scope mine | all');
+    const target = mentions[0];
+    if (!target?.uuid) {
+      await reply('Usage: /addmod @member');
       return;
     }
-    await ggRef(groupId).update({ scope: v, updatedAt: FieldValue.serverTimestamp() });
-    await reply(
-      v === 'mine'
-        ? 'Scope set: only the player whose turn it is gets @mentioned.'
-        : 'Scope set: every mapped player is @mentioned each turn.'
-    );
+    const mods = Array.from(new Set([...(gg.mods || []), target.uuid]));
+    await ggRef(groupId).update({ mods, updatedAt: FieldValue.serverTimestamp() });
+    await reply(`✅ ${target.name || 'member'} is now a mod.`);
+    return;
+  }
+
+  if (cmd === '/removemod') {
+    if (!isGgMod(gg, senderAci)) {
+      await reply('Only a mod can remove mods.');
+      return;
+    }
+    const target = mentions[0];
+    if (!target?.uuid) {
+      await reply('Usage: /removemod @member');
+      return;
+    }
+    const mods = (gg.mods || []).filter((m) => m !== target.uuid);
+    await ggRef(groupId).update({ mods, updatedAt: FieldValue.serverTimestamp() });
+    await reply(`Removed ${target.name || 'member'} as a mod.`);
     return;
   }
 
   if (cmd === '/fun') {
-    if (!isGgAdmin(gg, senderAci)) {
-      await reply('Only an admin can toggle fun mode.');
+    if (!isGgMod(gg, senderAci)) {
+      await reply('Only a mod can toggle fun mode.');
       return;
     }
     const explicit = (args[0] || '').toLowerCase();
@@ -1237,8 +1279,9 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
 
   if (cmd === '/status') {
     const n = Object.keys(gg.players || {}).length;
+    const modCount = (gg.mods || []).length;
     let msg = `Game ${gg.gameId}${gg.gameName ? ` (${gg.gameName})` : ''} — ${gg.status}\n${gameLink(gg.gameId)}\n`;
-    msg += `Players mapped: ${n} · scope: ${gg.scope || 'mine'} · fun: ${gg.funEnabled ? 'on' : 'off'}`;
+    msg += `Players mapped: ${n} · mods: ${modCount} · fun: ${gg.funEnabled ? 'on' : 'off'}`;
     if (gg.lastTurn?.awbwUsername)
       msg += `\nLast turn seen: ${gg.lastTurn.awbwUsername}${gg.lastTurn.day ? ` (day ${gg.lastTurn.day})` : ''}`;
     await reply(msg);
@@ -1246,8 +1289,8 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
   }
 
   if (cmd === '/stop' || cmd === '/unwatch') {
-    if (!isGgAdmin(gg, senderAci)) {
-      await reply('Only an admin can stop watching.');
+    if (!isGgMod(gg, senderAci)) {
+      await reply('Only a mod can stop watching.');
       return;
     }
     await ggRef(groupId).update({ status: 'stopped', updatedAt: FieldValue.serverTimestamp() });
@@ -1267,7 +1310,7 @@ async function handleSignalIncoming(item: any): Promise<void> {
   const linkMatch = text.match(/https:\/\/signal\.group\/#\S+/);
   if (linkMatch) {
     console.log('[bot] Received Signal group invite link; attempting join');
-    await joinViaLink(linkMatch[0]);
+    await joinViaLink(linkMatch[0], { aci: env.sourceUuid, number: env.sourceNumber, name: env.sourceName });
     return;
   }
   if (!text.startsWith('/')) return;
@@ -1605,30 +1648,21 @@ async function onGroupGameNextTurn(
   let message = payload.text;
   const players = gg.players || {};
   const mentions: Array<{ author: string; start: number; length: number }> = [];
-  const scope = gg.scope || 'mine';
 
-  // Append an '@' placeholder (length 1) that signal-cli renders as the contact mention.
-  // JS string .length is UTF-16 code units, matching Java/signal-cli char offsets.
-  const appendMention = (aci: string) => {
+  // The message always goes to the whole group; we @-mention the player whose turn it is
+  // (so only they get a notification ping). Append a 1-char '@' placeholder that signal-cli
+  // renders as the contact mention. JS string .length is UTF-16 code units == signal-cli offsets.
+  const key = Object.keys(players).find(
+    (k) => k.toLowerCase() === String(currentPlayer).toLowerCase()
+  );
+  const mapping = key ? players[key] : undefined;
+  if (mapping?.aci) {
     const spacer = message.endsWith(' ') || message.endsWith('\n') ? '' : ' ';
     const start = (message + spacer).length;
     message = `${message}${spacer}@`;
-    mentions.push({ author: aci, start, length: 1 });
-  };
-
-  if (scope === 'all') {
-    const acis = Object.values(players).map((m) => m.aci).filter(Boolean);
-    if (acis.length) {
-      message += '\n';
-      for (const aci of acis) appendMention(aci);
-    }
+    mentions.push({ author: mapping.aci, start, length: 1 });
   } else {
-    const key = Object.keys(players).find(
-      (k) => k.toLowerCase() === String(currentPlayer).toLowerCase()
-    );
-    const mapping = key ? players[key] : undefined;
-    if (mapping?.aci) appendMention(mapping.aci);
-    else message += `\n(Whoever is ${currentPlayer}: send  /iam ${currentPlayer}  to get pinged here.)`;
+    message += `\n(Whoever is ${currentPlayer}: send  /iam ${currentPlayer}  to get pinged here.)`;
   }
 
   try {
@@ -1637,7 +1671,7 @@ async function onGroupGameNextTurn(
       .update({ lastTurn: { day: meta.day ?? null, awbwUsername: currentPlayer }, updatedAt: FieldValue.serverTimestamp() })
       .catch(() => {});
     console.log(
-      `[gg] notified group ${groupId.substring(0, 16)} turn=${currentPlayer} scope=${scope} mentions=${mentions.length}`
+      `[gg] notified group ${groupId.substring(0, 16)} turn=${currentPlayer} mentioned=${mentions.length > 0}`
     );
   } catch (err) {
     console.error('[gg] send failed', err);

@@ -5,21 +5,21 @@
 const BOT_NUMBER = '+1 (904) 878-1337';
 
 const COMMANDS: Array<[string, string]> = [
-  ['/game <link>', "bind this group to an AWBW game (admin)"],
+  ['/game <link>', 'bind this group to an AWBW game (mod)'],
   ['/iam <awbw_name>', 'claim your player slot'],
-  ['/setplayer @x <name>', 'map a member to a player (admin)'],
+  ['/setplayer @x <name>', 'map a member to a player (mod)'],
   ['/players', 'show the roster'],
-  ['/scope mine|all', 'who gets pinged each turn (admin)'],
-  ['/fun [on|off]', 'flavor text (admin)'],
+  ['/addmod @x', 'make someone a mod (mod)'],
+  ['/fun [on|off]', 'flavor text (mod)'],
   ['/status', 'current orders'],
-  ['/stop', 'stand down (admin)'],
+  ['/stop', 'stand down (mod)'],
   ['/help', 'show the command roster'],
 ];
 
 const STEPS: Array<[string, React.ReactNode]> = [
   ['1', 'Create a Signal group for your game.'],
   ['2', <>Open <span className="text-zinc-200">Group settings → Group link</span>, enable it, and copy the link.</>],
-  ['3', <>Send that link to <span className="text-amber-300">Com Tower ({BOT_NUMBER})</span> in a Signal message — it joins automatically.</>],
+  ['3', <>Send that link to <span className="text-amber-300">Com Tower ({BOT_NUMBER})</span> in a Signal message — it joins automatically, and you become the group&rsquo;s <span className="text-zinc-200">mod</span>.</>],
   ['4', <>In the group, run <code className="text-emerald-300">/game &lt;AWBW link&gt;</code>.</>],
   ['5', <>Each player runs <code className="text-emerald-300">/iam &lt;awbw_username&gt;</code> (or an admin maps them with <code className="text-emerald-300">/setplayer</code>).</>],
 ];
