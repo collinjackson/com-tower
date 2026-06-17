@@ -321,7 +321,11 @@ async function resolveCurrentPlayerName(gameId: string): Promise<string | undefi
   }
 }
 
-async function buildMessage(gameId: string, meta: NextTurnMeta): Promise<RenderPayload> {
+async function buildMessage(
+  gameId: string,
+  meta: NextTurnMeta,
+  recentChat?: Array<{ name?: string; text: string }>
+): Promise<RenderPayload> {
   const link = gameLink(gameId);
   const gameName = meta.gameName || `Game ${gameId}`;
   const enableFun = !!meta.funEnabled;
@@ -344,6 +348,7 @@ async function buildMessage(gameId: string, meta: NextTurnMeta): Promise<RenderP
           gameName,
           link,
           enableFun,
+          recentChat: enableFun && recentChat?.length ? recentChat : undefined,
           includeImage: false, // Keep images off for now to focus on reliable sends
         }),
       });
@@ -1324,6 +1329,9 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
   await reply(HELP_TEXT);
 }
 
+// Recent non-command group chat per groupId, for fun-mode context (most recent last).
+const recentChatByGroup = new Map<string, Array<{ name?: string; text: string; at: number }>>();
+
 async function handleSignalIncoming(item: any): Promise<void> {
   const env = item?.envelope;
   const dataMessage = env?.dataMessage;
@@ -1336,8 +1344,15 @@ async function handleSignalIncoming(item: any): Promise<void> {
     await joinViaLink(linkMatch[0], { aci: env.sourceUuid, number: env.sourceNumber, name: env.sourceName });
     return;
   }
-  if (!text.startsWith('/')) return;
   const groupId: string | undefined = dataMessage.groupInfo?.groupId;
+  // Buffer recent group chat (non-command) so fun-mode turn alerts can riff on it.
+  if (groupId && text && !text.startsWith('/')) {
+    const buf = recentChatByGroup.get(groupId) || [];
+    buf.push({ name: env.sourceName, text: text.slice(0, 200), at: Date.now() });
+    while (buf.length > 12) buf.shift();
+    recentChatByGroup.set(groupId, buf);
+  }
+  if (!text.startsWith('/')) return;
   if (!groupId) return; // only handle group commands, not DMs
   const parts = text.split(/\s+/);
   const cmd = parts[0].toLowerCase();
@@ -1671,14 +1686,27 @@ async function onGroupGameNextTurn(
   }
   const info = await loadPlayers(gameId).catch(() => ({ players: [] as string[], countries: [] as string[] }));
   const gameName = gg.gameName || (await loadGameName(gameId)) || undefined;
-  const payload = await buildMessage(gameId, {
-    day: meta.day,
-    playerName: currentPlayer,
-    socketPlayerName: meta.socketPlayer,
-    players: info.players,
-    gameName,
-    funEnabled: gg.funEnabled,
-  });
+  // For fun mode, pass recent group chat (last ~45 min) so the caption can riff on it.
+  let recentChat: Array<{ name?: string; text: string }> | undefined;
+  if (gg.funEnabled) {
+    const cutoff = Date.now() - 45 * 60 * 1000;
+    recentChat = (recentChatByGroup.get(groupId) || [])
+      .filter((c) => c.at >= cutoff)
+      .slice(-6)
+      .map((c) => ({ name: c.name, text: c.text }));
+  }
+  const payload = await buildMessage(
+    gameId,
+    {
+      day: meta.day,
+      playerName: currentPlayer,
+      socketPlayerName: meta.socketPlayer,
+      players: info.players,
+      gameName,
+      funEnabled: gg.funEnabled,
+    },
+    recentChat
+  );
   let message = payload.text;
   const players = gg.players || {};
   const mentions: Array<{ author: string; start: number; length: number }> = [];
