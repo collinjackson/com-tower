@@ -1016,7 +1016,7 @@ async function joinViaLink(
       await sendGroupReply(
         groupId,
         `👋 Com Tower reporting in.${firstMod && sender?.name ? ` ${sender.name} is the mod.` : ''}\n` +
-          'Set the game with /game <AWBW link>, then each player runs /iam <awbw_name>. /help for all commands.'
+          'Set the game with /game <AWBW link>. Players can optionally run /iam <awbw_name> for a personal @ping on their turn. /help for all commands.'
       );
     }
   } catch (err) {
@@ -1027,8 +1027,8 @@ async function joinViaLink(
 const HELP_TEXT =
   '📋 Com Tower — AWBW turn alerts\n' +
   '/game <link>         — watch an AWBW game (mod)\n' +
-  '/iam <awbw_name>     — claim your player slot\n' +
-  '/setplayer @x <name> — map a member to a player (mod)\n' +
+  '/iam <awbw_name>     — get an @ping on your turn (optional)\n' +
+  '/setplayer @x <name> — @ping a member on their turn (mod, optional)\n' +
   '/unsetplayer @x      — remove a mapping (mod)\n' +
   '/players             — show the roster\n' +
   '/addmod @x           — make someone a mod (mod)\n' +
@@ -1125,7 +1125,6 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
     );
     const roster = info.players || [];
     const mapped = new Set(Object.keys(existingPlayers).map((s) => s.toLowerCase()));
-    const unmapped = roster.filter((p) => !mapped.has(p.toLowerCase()));
     const switching = !!gg?.gameId && gg.gameId !== gameId;
     // Carried-over mappings that apply to the new game's roster (mappings are kept across switches).
     const keptRelevant = roster.filter((p) => mapped.has(p.toLowerCase())).length;
@@ -1133,9 +1132,9 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
     if (switching && keptRelevant > 0)
       msg += `♻️ Kept ${keptRelevant} player mapping${keptRelevant === 1 ? '' : 's'} from before.\n`;
     if (roster.length) msg += `Players: ${roster.join(', ')}\n`;
-    msg += unmapped.length
-      ? `Unmapped: ${unmapped.join(', ')}\nEach player: /iam <your_awbw_name>  ·  mod: /setplayer @member <awbw_name>`
-      : `All players mapped — each gets @mentioned on their turn.`;
+    msg +=
+      `I'll post here each turn. To get a personal @ping on your turn, run /iam <your_awbw_name> ` +
+      `(optional — or just turn on notifications for this group).`;
     await reply(msg);
     console.log(`[gg] /game ${gameId} set for group ${groupId.substring(0, 16)}`);
     return;
@@ -1649,20 +1648,21 @@ async function onGroupGameNextTurn(
   const players = gg.players || {};
   const mentions: Array<{ author: string; start: number; length: number }> = [];
 
-  // The message always goes to the whole group; we @-mention the player whose turn it is
-  // (so only they get a notification ping). Append a 1-char '@' placeholder that signal-cli
-  // renders as the contact mention. JS string .length is UTF-16 code units == signal-cli offsets.
+  // The message always goes to the whole group and names whose turn it is, so anyone with
+  // group notifications on is covered. Mapping is optional: if the current player has claimed
+  // their slot (/iam) we ALSO @-mention them so they're pinged even without "always notify".
+  // Unmapped players get no extra text — no per-turn nag.
   const key = Object.keys(players).find(
     (k) => k.toLowerCase() === String(currentPlayer).toLowerCase()
   );
   const mapping = key ? players[key] : undefined;
   if (mapping?.aci) {
+    // Append a 1-char '@' placeholder signal-cli renders as the contact mention.
+    // JS string .length is UTF-16 code units == signal-cli char offsets.
     const spacer = message.endsWith(' ') || message.endsWith('\n') ? '' : ' ';
     const start = (message + spacer).length;
     message = `${message}${spacer}@`;
     mentions.push({ author: mapping.aci, start, length: 1 });
-  } else {
-    message += `\n(Whoever is ${currentPlayer}: send  /iam ${currentPlayer}  to get pinged here.)`;
   }
 
   try {
