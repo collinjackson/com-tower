@@ -1760,6 +1760,34 @@ async function onGroupGameNextTurn(
   }
 }
 
+const BACKSTOP_POLL_MS = 60_000;
+/** Failover only: the websocket is the low-latency path. This poll acts ONLY for games whose
+ *  socket is currently down (e.g. nightly site maintenance) — it scrapes the current player and
+ *  notifies if the turn changed while we were disconnected. When the socket is healthy it does
+ *  nothing, so it never competes with the instant websocket path or double-notifies. */
+async function runBackstopPoll() {
+  let snap;
+  try {
+    snap = await getFirestore().collection('groupGames').where('status', '==', 'active').get();
+  } catch (err) {
+    console.warn('[gg] backstop query failed', err);
+    return;
+  }
+  for (const doc of snap.docs) {
+    const gg = { ...(doc.data() as GroupGame), groupId: doc.id };
+    if (!gg.gameId) continue;
+    const st = activeGGSockets.get(gg.groupId);
+    if (st && st.ws.readyState === WebSocket.OPEN) continue; // socket healthy → trust the websocket
+    const currentPlayer = await resolveCurrentPlayerName(gg.gameId).catch(() => undefined);
+    if (currentPlayer && currentPlayer !== (gg.lastTurn?.awbwUsername || undefined)) {
+      console.log(`[gg] backstop: socket down for ${gg.groupId.substring(0, 16)}, turn=${currentPlayer} — notifying`);
+      await onGroupGameNextTurn(gg.groupId, gg.gameId, { socketPlayer: currentPlayer }).catch((e) =>
+        console.error('[gg] backstop notify failed', e)
+      );
+    }
+  }
+}
+
 async function main() {
   ensureFirebase();
   const db = getFirestore();
@@ -1768,6 +1796,11 @@ async function main() {
 
   // Signal slash-command receiver (poll or websocket, auto-detected)
   startSignalReceiver().catch((err) => console.error('[bot] receiver start failed:', err));
+
+  // Failover backstop: catches turns missed while a game socket is down (site maintenance, etc.).
+  setInterval(() => {
+    runBackstopPoll().catch((err) => console.error('[gg] backstop poll error', err));
+  }, BACKSTOP_POLL_MS);
 
   // Drive one AWBW socket per active group game; notify the group on each turn change.
   db.collection('groupGames').onSnapshot((snap) => {
