@@ -1563,7 +1563,9 @@ type GGSocketState = {
   gameId: string;
 };
 const activeGGSockets = new Map<string, GGSocketState>();
-const GG_HEARTBEAT_MS = 25_000; // keepalive ping so AWBW doesn't drop the idle socket (~60s timeout)
+// AWBW's own client keeps the socket alive by sending an empty-string DATA frame every 45s
+// (webSocket.send("")) — a protocol-level ping frame does NOT reset its idle timer. Match it.
+const GG_HEARTBEAT_MS = 40_000;
 
 function stopGGSocket(groupId: string, reason: string) {
   const st = activeGGSockets.get(groupId);
@@ -1617,7 +1619,7 @@ function startGroupGameSocket(groupId: string, gameId: string) {
     state.heartbeat = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
         try {
-          ws.ping();
+          ws.send(''); // empty-string keepalive, exactly like AWBW's web client
         } catch {
           /* ignore */
         }
