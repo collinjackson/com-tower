@@ -215,7 +215,6 @@ export async function POST(req: NextRequest) {
     if (enableFun && army.code && /^[a-z]{2,3}$/.test(army.code) && unitFile) {
       try {
         const sharp = (await import('sharp')).default;
-        const transparent = { r: 0, g: 0, b: 0, alpha: 0 };
         const spriteUrl = `https://awbw.amarriner.com/terrain/ani/${army.code}${unitFile}.gif`;
         const sres = await fetch(spriteUrl);
         if (sres.ok) {
@@ -226,11 +225,10 @@ export async function POST(req: NextRequest) {
           const uH = meta.pageHeight || baseW;
           const scale = Math.max(1, Math.round(128 / baseW));
 
-          // Real terrain the unit stands on (worker resolves it from the map). Fall back to a
-          // unit-appropriate tile. Tall tiles (HQ/city/base/mountain, 16x32) rise above the unit,
-          // so we grow each frame to the tile height and stand the unit at the bottom.
+          // Real terrain the unit stands on (worker resolves it from the map). Composite it into
+          // the unit's own cell — for tall tiles (HQ/mountain, 16x32) we take the BOTTOM 16x16
+          // (the base the unit stands on), so the unit looks like it's on its tile, in-game style.
           const tile = (typeof unit.terrainTile === 'string' && unit.terrainTile) || terrainForUnit(unitFile);
-          let frameH = uH;
           try {
             const tres = await fetch(`https://awbw.amarriner.com/terrain/aw1/${tile}.gif`);
             const terrSrc: Uint8Array = tres.ok
@@ -238,18 +236,8 @@ export async function POST(req: NextRequest) {
               : Buffer.from(
                   await (await fetch('https://awbw.amarriner.com/terrain/aw1/plain.gif')).arrayBuffer()
                 );
-            const tMeta = await sharp(terrSrc).metadata();
-            frameH = Math.max(uH, tMeta.height || uH);
-
-            // Stand the unit at the bottom of a frameH-tall frame (per-frame; resize is page-aware).
-            if (frameH > uH) {
-              unitBuf = await sharp(unitBuf, { animated: true })
-                .resize({ width: baseW, height: frameH, fit: 'contain', position: 'bottom', background: transparent })
-                .gif()
-                .toBuffer();
-            }
             const terr = await sharp(terrSrc)
-              .resize(baseW, frameH, { kernel: 'nearest', fit: 'cover', position: 'bottom' })
+              .resize(baseW, uH, { kernel: 'nearest', fit: 'cover', position: 'bottom' })
               .png()
               .toBuffer();
             // dest-over draws terrain BEHIND the unit; tile repeats it once per animation frame.
