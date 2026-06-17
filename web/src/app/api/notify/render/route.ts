@@ -47,20 +47,19 @@ export async function POST(req: NextRequest) {
               .slice(-6)
           : [];
         const chatBlock = recentChat.length
-          ? `Recent group chat (oldest first):\n` +
+          ? `Recent chatter (oldest first):\n` +
             recentChat
               .map((c) => `  ${(c.name || 'someone').slice(0, 24)}: ${String(c.text).slice(0, 160)}`)
               .join('\n') +
-            `\nIf there's a genuinely funny hook in the chat, land a quick callback to it; if not, just be a sharp turn reminder. Don't quote verbatim, sensitive, or mean-spirited content, and don't force it.`
-          : `No recent chat — just be a sharp, witty turn reminder.`;
+            `\nIf there's a genuinely funny hook in the chatter, deliver a withering callback to it; otherwise just a contemptuous summons. Don't quote verbatim or punch down cruelly.`
+          : `No chatter — just a contemptuous summons to take their turn.`;
         const genPrompt =
-          `You are "Com Tower", a deadpan military-comms AI that pings Advance Wars By Web players when it's their turn.` +
-          ` Voice: dry, quick, a little mischievous — a war-room operator who's seen it all. Never cringe, never mean.\n` +
-          `Write a turn-reminder alert, UNDER 140 characters, telling ${who} it's their turn` +
-          `${playerName ? ` (use the exact name "${playerName}")` : ''}.` +
-          ` Do NOT invent player names; only use ones given.${day ? ` It is day ${day}.` : ''} ${playersList}\n` +
+          `You are THE ADMINISTRATOR — a sardonic, imperious war-room announcer presiding over an Advance Wars By Web match as if it were your personal blood sport. You address commanders with theatrical contempt, clipped military-radio cadence, and dry menace. Use comms/brevity flavor naturally when it fits (comms check, five by five, stand by, hold, over, say again) but don't pile it on. Never warm, never cringe; your amusement is always at their expense — playful, not genuinely cruel.\n` +
+          `Announce that it is ${who}'s turn, ideally under 160 characters.` +
+          `${playerName ? ` Use the exact name "${playerName}".` : ''}` +
+          ` Do NOT invent commander names; only use ones given.${day ? ` It is day ${day}.` : ''} ${playersList}\n` +
           `${chatBlock}\n` +
-          `Output ONLY the alert text — no surrounding quotes, at most one emoji.`;
+          `Output ONLY the announcement — no surrounding quotes. Emoji: none, or one at most.`;
 
         // Best-of-N: generate diverse candidates, then judge picks the cleverest.
         const gen = await client.chat.completions.create({
@@ -92,10 +91,9 @@ export async function POST(req: NextRequest) {
                 {
                   role: 'user',
                   content:
-                    `Pick the single best turn-reminder alert for ${who}. Criteria, in priority order: ` +
-                    `genuinely funny/clever; lands a natural callback to the chat ONLY if there's a real hook; ` +
-                    `clearly says it's ${who}'s turn; under 140 chars; not mean or cringe; ` +
-                    `prefer ones that don't open with a generic "it's your turn".\n` +
+                    `You are picking the best in-character announcement from THE ADMINISTRATOR (a sardonic, imperious war-room announcer) summoning ${who} to take their turn. Criteria, in priority order: ` +
+                    `most darkly funny and in-character; lands a withering callback to the chatter ONLY if there's a real hook; ` +
+                    `clearly conveys it's ${who}'s turn; tight (ideally under ~160 chars); playfully contemptuous, not genuinely cruel or cringe.\n` +
                     `Candidates:\n${list}\n` +
                     `Reply as JSON: {"best": <index>}`,
                 },
@@ -109,7 +107,7 @@ export async function POST(req: NextRequest) {
             caption = candidates[0];
           }
         }
-        if (caption && caption.length > 180) caption = caption.slice(0, 180);
+        if (caption && caption.length > 240) caption = caption.slice(0, 240);
       } catch (err) {
         console.error('AI render failed', err);
         return NextResponse.json(
