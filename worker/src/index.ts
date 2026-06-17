@@ -297,12 +297,20 @@ async function scrapeCurrentPlayerName(gameId: string): Promise<string | undefin
   return undefined;
 }
 
-/** Resolve the current player's AWBW username AND army from the game page. AWBW exposes
- *  `currentTurn = <players_id>`; each player record has users_username (before players_id) and
- *  countries_code / countries_name (just after it). */
-async function resolveCurrentTurn(
-  gameId: string
-): Promise<{ username?: string; countryCode?: string; countryName?: string } | undefined> {
+type AwbwUnit = { name: string; code?: string; hp: number; fuel: number };
+
+/** Resolve the current player from the game page: username, army, and their REAL living units.
+ *  AWBW exposes `currentTurn = <players_id>` and a `unitsInfo = {...}` map of placed units
+ *  (each with units_players_id, units_name, units_hit_points, units_fuel, countries_code). */
+async function resolveCurrentTurn(gameId: string): Promise<
+  | {
+      username?: string;
+      countryCode?: string;
+      countryName?: string;
+      units: AwbwUnit[];
+    }
+  | undefined
+> {
   try {
     const res = await fetch(gameLink(gameId), { cache: 'no-store' as any });
     const html = await res.text();
@@ -310,17 +318,33 @@ async function resolveCurrentTurn(
     if (!cur) return undefined;
     const curId = cur[1];
     const idMatch = new RegExp(`"players_id"\\s*:\\s*${curId}\\b`).exec(html);
-    if (!idMatch) return undefined;
-    const before = html.slice(Math.max(0, idMatch.index - 500), idMatch.index);
-    const after = html.slice(idMatch.index, idMatch.index + 500);
+    const before = idMatch ? html.slice(Math.max(0, idMatch.index - 500), idMatch.index) : '';
+    const after = idMatch ? html.slice(idMatch.index, idMatch.index + 300) : '';
     const username = [...before.matchAll(/"users_username"\s*:\s*"([^"]+)"/g)].pop()?.[1];
-    const countryCode =
-      (after.match(/"countries_code"\s*:\s*"([a-z]{2,3})"/i) ||
-        before.match(/"countries_code"\s*:\s*"([a-z]{2,3})"/i))?.[1];
-    const countryName =
-      (after.match(/"countries_name"\s*:\s*"([^"]+)"/) ||
-        before.match(/"countries_name"\s*:\s*"([^"]+)"/))?.[1];
-    return { username, countryCode, countryName };
+    // Keep code + name from the SAME (tight) window after players_id for consistency.
+    const countryCode = after.match(/"countries_code"\s*:\s*"([a-z]{2,3})"/i)?.[1];
+    const countryName = after.match(/"countries_name"\s*:\s*"([^"]+)"/)?.[1];
+
+    // The current player's actual living units (grounds the unit pick + voice in reality).
+    let units: AwbwUnit[] = [];
+    const um = html.match(/unitsInfo\s*=\s*(\{[^;]*\})\s*;/);
+    if (um) {
+      try {
+        const obj = JSON.parse(um[1]) as Record<string, any>;
+        units = Object.values(obj)
+          .filter((u) => String(u.units_players_id) === curId && Number(u.units_hit_points) > 0)
+          .map((u) => ({
+            name: String(u.units_name || ''),
+            code: u.countries_code || undefined,
+            hp: Number(u.units_hit_points),
+            fuel: Number(u.units_fuel),
+          }))
+          .filter((u) => u.name);
+      } catch (e) {
+        console.warn('unitsInfo parse failed', e);
+      }
+    }
+    return { username, countryCode, countryName, units };
   } catch (err) {
     console.error('resolveCurrentTurn failed', err);
     return undefined;
@@ -336,7 +360,8 @@ async function buildMessage(
   gameId: string,
   meta: NextTurnMeta,
   recentChat?: Array<{ name?: string; text: string }>,
-  army?: { code?: string; name?: string }
+  army?: { code?: string; name?: string },
+  unit?: { name: string; hp: number; fuel: number }
 ): Promise<RenderPayload> {
   const link = gameLink(gameId);
   const gameName = meta.gameName || `Game ${gameId}`;
@@ -362,6 +387,7 @@ async function buildMessage(
           enableFun,
           recentChat: enableFun && recentChat?.length ? recentChat : undefined,
           army: enableFun && army?.code ? army : undefined,
+          unit: enableFun && unit ? unit : undefined,
         }),
       });
       if (res.ok) {
@@ -1715,10 +1741,16 @@ async function onGroupGameNextTurn(
     turn?.username ||
     (await scrapeCurrentPlayerName(gameId).catch(() => undefined)) ||
     meta.socketPlayer;
-  const army =
-    turn?.countryCode || turn?.countryName
-      ? { code: turn?.countryCode, name: turn?.countryName }
-      : undefined;
+  // Pick one of the player's REAL living units so the voice + sprite are grounded in reality.
+  const liveUnits = turn?.units || [];
+  const chosenUnit = liveUnits.length
+    ? liveUnits[Math.floor(Math.random() * liveUnits.length)]
+    : undefined;
+  const armyCode = chosenUnit?.code || turn?.countryCode;
+  const army = armyCode ? { code: armyCode } : undefined;
+  const unitInfo = chosenUnit
+    ? { name: chosenUnit.name, hp: chosenUnit.hp, fuel: chosenUnit.fuel }
+    : undefined;
   if (!currentPlayer) {
     // Couldn't name the player, but a turn DID change — notify anyway so it's never silent.
     console.log('[gg] turn changed but current player unresolved; sending generic notice');
@@ -1753,7 +1785,8 @@ async function onGroupGameNextTurn(
       funEnabled: gg.funEnabled,
     },
     recentChat,
-    army
+    army,
+    unitInfo
   );
   let message = payload.text;
   const players = gg.players || {};
