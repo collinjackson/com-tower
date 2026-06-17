@@ -1559,15 +1559,18 @@ type GGSocketState = {
   ws: WebSocket;
   shouldReopen: boolean;
   checkInterval?: ReturnType<typeof setInterval>;
+  heartbeat?: ReturnType<typeof setInterval>;
   gameId: string;
 };
 const activeGGSockets = new Map<string, GGSocketState>();
+const GG_HEARTBEAT_MS = 25_000; // keepalive ping so AWBW doesn't drop the idle socket (~60s timeout)
 
 function stopGGSocket(groupId: string, reason: string) {
   const st = activeGGSockets.get(groupId);
   if (!st) return;
   st.shouldReopen = false;
   if (st.checkInterval) clearInterval(st.checkInterval);
+  if (st.heartbeat) clearInterval(st.heartbeat);
   try {
     st.ws.close();
   } catch {
@@ -1582,6 +1585,7 @@ function startGroupGameSocket(groupId: string, gameId: string) {
   if (existing) {
     existing.shouldReopen = false;
     if (existing.checkInterval) clearInterval(existing.checkInterval);
+    if (existing.heartbeat) clearInterval(existing.heartbeat);
     try {
       existing.ws.close();
     } catch {
@@ -1607,7 +1611,19 @@ function startGroupGameSocket(groupId: string, gameId: string) {
       .catch(() => {});
   }, GAME_ENDED_CHECK_MS);
 
-  ws.on('open', () => console.log(`[gg] ws open ${gameId}`));
+  ws.on('open', () => {
+    console.log(`[gg] ws open ${gameId}`);
+    if (state.heartbeat) clearInterval(state.heartbeat);
+    state.heartbeat = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.ping();
+        } catch {
+          /* ignore */
+        }
+      }
+    }, GG_HEARTBEAT_MS);
+  });
   ws.on('message', (msg) => {
     try {
       const parsed = JSON.parse(msg.toString());
@@ -1642,11 +1658,12 @@ function startGroupGameSocket(groupId: string, gameId: string) {
       /* ignore */
     }
   });
-  ws.on('close', () => {
+  ws.on('close', (code) => {
     if (state.checkInterval) clearInterval(state.checkInterval);
+    if (state.heartbeat) clearInterval(state.heartbeat);
     activeGGSockets.delete(groupId);
     if (state.shouldReopen) {
-      console.log(`[gg] reconnecting ${gameId}`);
+      console.log(`[gg] ws closed ${gameId} (code=${code}); reconnecting`);
       setTimeout(() => startGroupGameSocket(groupId, gameId), 1500);
     }
   });
