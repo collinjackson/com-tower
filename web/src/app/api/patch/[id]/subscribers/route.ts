@@ -85,7 +85,7 @@ export async function POST(
     const newSub: any = {
       type: body.type,
       handle: normalizedHandle,
-      funEnabled: !!body.funEnabled,
+      funEnabled: body.funEnabled !== false, // fun mode is the default; only an explicit false opts out
       scope: body.scope === 'my-turn' || body.scope === 'all' ? body.scope : 'all',
     };
     if (body.notifyFrequency !== undefined && validFreq.includes(body.notifyFrequency)) {
