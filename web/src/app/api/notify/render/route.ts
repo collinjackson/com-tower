@@ -58,6 +58,11 @@ const ARMY_COLOR: Record<string, [number, number, number]> = {
 };
 const DEFAULT_COLOR: [number, number, number] = [130, 240, 255]; // teal fallback
 
+// Per-country facing — all units of a country face the same way (the barrel/
+// front reaches the left edge of the cell for these; everyone else faces right).
+// Used to put the hologram's lead room on the side it's looking.
+const FACE_LEFT = new Set(['bm', 'yc', 'bh', 'rf', 'ab', 'pc', 'tg', 'ar', 'ne', 'sc']);
+
 // Brighten a faction color into a glow: scale so the brightest channel hits
 // ~235, preserving hue. Dark armies (Black Hole, Noir) become vivid/ghostly
 // glows instead of vanishing, so everyone stays holographic on black.
@@ -282,18 +287,25 @@ export async function POST(req: NextRequest) {
           // grain. Single sharp chain: the GIF is quantized only once (repeated
           // GIF re-encoding mangles the palette and kills the color).
           // Margin of the dark field around each frame so cropped chat previews
-          // don't clip the unit's head/feet. extend() pads per-page on animated
-          // images; scanlines/grain then cover the full padded frame.
-          const margin = Math.round(outW * 0.22);
-          const padW = outW + margin * 2;
-          const padFullH = outFullH + margin * 2 * pages;
+          // don't clip the unit. Asymmetric: extra lead room on the side the unit
+          // faces, and the unit sits slightly below center (more headroom).
+          // extend() pads per-page on animated GIFs; scanlines/grain then cover
+          // the full padded frame.
+          const facesRight = !(army.code && FACE_LEFT.has(army.code));
+          const m = Math.round(outW * 0.22);
+          const lead = Math.round(m * 1.55), back = Math.round(m * 0.45);
+          const left = facesRight ? back : lead;
+          const right = facesRight ? lead : back;
+          const top = Math.round(m * 1.3), bottom = Math.round(m * 0.7);
+          const padW = outW + left + right;
+          const padFullH = outFullH + (top + bottom) * pages;
           const spec = holoSpec(army.code);
           const out = await sharp(orig, { animated: true })
             .modulate({ saturation: 0 })
             .linear(spec.A, spec.B)
             .flatten({ background: spec.bg })
             .resize({ width: outW, kernel: 'nearest' })
-            .extend({ top: margin, bottom: margin, left: margin, right: margin, background: { ...spec.bg, alpha: 1 } })
+            .extend({ top, bottom, left, right, background: { ...spec.bg, alpha: 1 } })
             .composite([holoScanlines(padW), holoGrain(padW, padFullH, spec.grain)])
             .gif()
             .toBuffer();
