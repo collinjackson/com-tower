@@ -22,7 +22,7 @@ const ARMY_THEME: Record<string, string> = {
   bd: 'Egyptian desert folk — headscarves, ancient ruins, sandstorms, old-world stoicism',
   ab: 'Chinese alliance of three mountain tribes (Three Kingdoms vibe) — scrappy, proud, now modern',
   js: 'Ancient-Rome legion reborn — conquest-hungry, fierce, grandiose, historic arms',
-  ci: 'sentient cyber-DUCKS on stolen Black Hole tech — quacks, waddles, duck/quack puns, webbed-foot bravado, chilly cobalt-ice cool',
+  ci: 'sentient ANTARCTIC PENGUINS on stolen Black Hole tech — waddling, tuxedoed, fish/iceberg/belly-slide references, chilly cobalt-ice cool, squawky bravado',
   pc: 'cosmic religious zealots — fervent, certain, "purifying" the world by the universe’s grand design',
   tg: 'Latin-American revolutionaries — proud, fiery, elite beret commandos, anti-colonial',
   pl: 'French Foreign Legion of mercenaries from everywhere — professional, motley, fighting for citizenship',
