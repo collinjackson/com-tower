@@ -91,7 +91,7 @@ export async function POST(
     const newSubscriber: any = {
       type: 'dm',
       handle: phone,
-      funEnabled: !!body.funEnabled,
+      funEnabled: body.funEnabled !== false, // fun mode is the default; only an explicit false opts out
       scope,
       lastVerifiedAt: Date.now(),
     };

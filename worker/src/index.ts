@@ -1294,7 +1294,7 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
         createdBy: gg?.createdBy || { aci: senderAci || null, number: senderNumber || null },
         mods: gg?.mods || (senderAci ? [senderAci] : []),
         players: existingPlayers,
-        funEnabled: gg?.funEnabled || false,
+        funEnabled: gg?.funEnabled ?? true, // fun mode is the default for new games; preserves an explicit /fun off
         updatedAt: FieldValue.serverTimestamp(),
       },
       { merge: true }
