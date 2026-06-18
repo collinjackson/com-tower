@@ -71,15 +71,24 @@ function glowColor(C: [number, number, number]): [number, number, number] {
   return C.map((c) => Math.min(255, Math.round(c * s))) as [number, number, number];
 }
 
-// Recolor curve + background + grain for a faction's hologram. Glow-on-black
-// for everyone: out_c = G/255 * (CONTRAST*L + FLOOR). The dark field plus the
-// per-pixel luminance gradient is what gives the projection its depth.
+// Recolor curve + background + grain for a faction's hologram. Glow-on-black:
+// per channel, luminance L maps linearly from a dark tinted FLOOR (L=0) to a
+// bright HIGHLIGHT (L=255), so out_c = A*L + B. The highlight is a VIVID version
+// of the hue (max channel pushed to 255 — brightens warm colors without washing
+// them) plus a white bloom that's strong for cool colors (blue/purple read dark
+// and need icy specular highlights) and near-zero for warm ones (orange/yellow
+// stay saturated). The dark field + per-pixel gradient give the projection depth.
+const FLOOR_FRAC = 0.22; // dark-tint floor as a fraction of the glow color
 function holoSpec(code?: string) {
   const G = glowColor((code && ARMY_COLOR[code]) || DEFAULT_COLOR);
-  const CONTRAST = 0.85, FLOOR = 55;
+  const Gv = G.map((c) => Math.min(255, Math.round((c * 255) / Math.max(...G))));
+  const blueDom = (Gv[2] - (Gv[0] + Gv[1]) / 2) / 255; // +cool .. -warm
+  const w = Math.max(0, Math.min(0.45, 0.22 + 0.3 * blueDom));
+  const lo = G.map((c) => c * FLOOR_FRAC);
+  const hi = Gv.map((c) => c + (255 - c) * w);
   return {
-    A: G.map((c) => (c / 255) * CONTRAST) as [number, number, number],
-    B: G.map((c) => (c / 255) * FLOOR) as [number, number, number],
+    A: G.map((c, i) => (hi[i] - lo[i]) / 255) as [number, number, number],
+    B: lo as [number, number, number],
     bg: { r: 2, g: 6, b: 12 },
     grain: [210, 235, 255] as [number, number, number],
   };
