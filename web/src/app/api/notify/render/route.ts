@@ -47,12 +47,56 @@ const STYLES = [
   'bone-dry deadpan humor',
 ];
 
-// Sprite-file unit name -> a fitting terrain tile to stand on.
-// (Only 'plain', 'mountain', 'sea' are verified-correct AWBW tiles; 'wood' is a different image.)
-function terrainForUnit(unitFile: string): string {
-  if (/lander|cruiser|sub|battleship|carrier|blackboat/.test(unitFile)) return 'sea';
-  if (/mech/.test(unitFile)) return 'mountain';
-  return 'plain';
+// AWBW faction glow colors (approx palette). The hologram is rendered in the
+// army's own color instead of a fixed teal.
+const ARMY_COLOR: Record<string, [number, number, number]> = {
+  os: [255, 120, 40], bm: [70, 130, 240], ge: [70, 190, 90], yc: [245, 215, 70],
+  bh: [125, 90, 150], rf: [230, 60, 60], gs: [150, 160, 170], bd: [175, 115, 60],
+  ab: [240, 170, 60], js: [60, 200, 150], ci: [80, 170, 230], pc: [245, 130, 200],
+  tg: [40, 200, 190], pl: [170, 90, 220], ar: [170, 210, 70], wn: [235, 240, 245],
+  aa: [90, 200, 235], ne: [70, 70, 90], sc: [190, 200, 210], uw: [125, 85, 55],
+};
+const DEFAULT_COLOR: [number, number, number] = [130, 240, 255]; // teal fallback
+
+// Brighten a faction color into a glow: scale so the brightest channel hits
+// ~235, preserving hue. Dark armies (Black Hole, Noir) become vivid/ghostly
+// glows instead of vanishing, so everyone stays holographic on black.
+function glowColor(C: [number, number, number]): [number, number, number] {
+  const s = 235 / Math.max(...C);
+  return C.map((c) => Math.min(255, Math.round(c * s))) as [number, number, number];
+}
+
+// Recolor curve + background + grain for a faction's hologram. Glow-on-black
+// for everyone: out_c = G/255 * (CONTRAST*L + FLOOR). The dark field plus the
+// per-pixel luminance gradient is what gives the projection its depth.
+function holoSpec(code?: string) {
+  const G = glowColor((code && ARMY_COLOR[code]) || DEFAULT_COLOR);
+  const CONTRAST = 0.85, FLOOR = 55;
+  return {
+    A: G.map((c) => (c / 255) * CONTRAST) as [number, number, number],
+    B: G.map((c) => (c / 255) * FLOOR) as [number, number, number],
+    bg: { r: 2, g: 6, b: 12 },
+    grain: [210, 235, 255] as [number, number, number],
+  };
+}
+
+// Hologram overlays, built as raw RGBA buffers ready for sharp.composite().
+// Scanlines: one dark row every 3px, tiled down the frame.
+function holoScanlines(w: number) {
+  const period = 3;
+  const buf = Buffer.alloc(w * period * 4, 0);
+  for (let x = 0; x < w; x++) buf[((period - 1) * w + x) * 4 + 3] = 120; // alpha-only black line
+  return { input: buf, raw: { width: w, height: period, channels: 4 as const }, tile: true, blend: 'over' as const };
+}
+// Grain: sparse speckles over the whole field (full height -> per-frame flicker).
+function holoGrain(w: number, h: number, [gr, gg, gb]: [number, number, number]) {
+  const buf = Buffer.alloc(w * h * 4, 0);
+  for (let i = 0; i < w * h; i++) {
+    const o = i * 4;
+    buf[o] = gr; buf[o + 1] = gg; buf[o + 2] = gb;
+    buf[o + 3] = Math.round(Math.random() ** 3 * 40); // cube bias -> mostly transparent
+  }
+  return { input: buf, raw: { width: w, height: h, channels: 4 as const }, blend: 'over' as const };
 }
 
 export async function POST(req: NextRequest) {
@@ -125,7 +169,7 @@ export async function POST(req: NextRequest) {
             ? 'badly shot up — grim, defiant, gallows humor'
             : hp !== undefined && hp < 10
               ? 'a bit banged up — scrappy and weary, but game'
-              : 'at full strength — bored, restless, cocky, itching to move';
+              : 'fresh, sharp, and full of restless energy with no action yet';
         const supplies = [lowFuel ? 'almost out of fuel' : '', lowAmmo ? 'low on ammo' : '']
           .filter(Boolean)
           .join(' and ');
@@ -139,7 +183,8 @@ export async function POST(req: NextRequest) {
           `You are ${subject}${persona ? ` — your army's character: ${persona}` : ''}, radioing your commander ${who} ` +
           `over a crackly field radio because it's ${who}'s turn and you need orders. You're a grunt; use clipped comms flavor ` +
           `(over, come in, say again, five by five) and let your army's character color the voice — accent, references, even sounds.\n` +
-          `Convey your MOOD, never exact numbers: you're ${mood}.${supplies ? ` You're also ${supplies} — gripe about it.` : ''} ` +
+          `Convey your MOOD through HOW you talk — never state it outright (don't say "bored", "restless", "antsy", "nothing to do") and never give exact numbers: you're ${mood}.${supplies ? ` You're also ${supplies} — gripe about it.` : ''} ` +
+          `With no action yet, you fill the dead air — that's WHY you've got a joke or a rhyme — but let the bit speak for itself; don't explain that you're passing time or itching for orders.\n` +
           `Only use what's stated here — don't invent battles, casualties, or damage.\n` +
           `Format for THIS transmission: ${style}. (If you can't pull it off well, a sharp call is fine.)\n` +
           `${chatBlock}\n` +
@@ -177,6 +222,7 @@ export async function POST(req: NextRequest) {
                   content:
                     `Pick the best radio call from a ${armyName || ''} ${unitName || 'command'} grunt to commander ${who}. ` +
                     `Criteria, in priority order: best leans into the army's character and is genuinely funny; nails the intended format (${style}); ` +
+                    `the humor itself shows the idle restlessness — DOWNRANK any that explicitly say they're bored/restless/antsy/itching or that narrate having nothing to do; ` +
                     `conveys mood/morale without stating HP numbers; clearly conveys it's ${who}'s turn (needs orders); ` +
                     `lands a callback to the chatter ONLY if there's a real hook; tight (ideally under ~160 chars); not cringe or mean.\n` +
                     `Candidates:\n${list}\n` +
@@ -207,8 +253,10 @@ export async function POST(req: NextRequest) {
       : ['Next turn is up.', playerName ? `${playerName}, you’re up.` : '', link];
     const text = parts.filter(Boolean).join(' ').trim();
 
-    // Attach the army's animated unit sprite standing on a fitting terrain tile.
-    // Real AWBW art, color-correct, nearest-neighbor upscaled (pixelly, retro). Best-effort.
+    // Attach the army's unit sprite as a Star Wars-style hologram: a cyan,
+    // scanlined, grainy projection on a near-black field. Best-effort.
+    // The black background means we never render a real terrain tile — which
+    // sidesteps tall tiles (HQ/mountain 16x32) that broke the in-cell backdrop.
     let imageData: string | null = null;
     let imageContentType: string | null = null;
     let imageFilename: string | null = null;
@@ -219,38 +267,34 @@ export async function POST(req: NextRequest) {
         const sres = await fetch(spriteUrl);
         if (sres.ok) {
           // Typed as Uint8Array (sharp accepts it) to avoid the strict Buffer<ArrayBuffer> generic.
-          let unitBuf: Uint8Array = Buffer.from(await sres.arrayBuffer());
-          const meta = await sharp(unitBuf, { animated: true }).metadata();
+          const orig: Uint8Array = Buffer.from(await sres.arrayBuffer());
+          const meta = await sharp(orig, { animated: true }).metadata();
           const baseW = meta.width || 16;
-          const uH = meta.pageHeight || baseW;
+          const pageH = meta.pageHeight || baseW;
+          const pages = meta.pages || 1;
           const scale = Math.max(1, Math.round(128 / baseW));
+          const outW = baseW * scale;
+          const outFullH = pageH * pages * scale;
 
-          // Real terrain the unit stands on (worker resolves it from the map). Composite it into
-          // the unit's own cell — for tall tiles (HQ/mountain, 16x32) we take the BOTTOM 16x16
-          // (the base the unit stands on), so the unit looks like it's on its tile, in-game style.
-          const tile = (typeof unit.terrainTile === 'string' && unit.terrainTile) || terrainForUnit(unitFile);
-          try {
-            const tres = await fetch(`https://awbw.amarriner.com/terrain/aw1/${tile}.gif`);
-            const terrSrc: Uint8Array = tres.ok
-              ? Buffer.from(await tres.arrayBuffer())
-              : Buffer.from(
-                  await (await fetch('https://awbw.amarriner.com/terrain/aw1/plain.gif')).arrayBuffer()
-                );
-            const terr = await sharp(terrSrc)
-              .resize(baseW, uH, { kernel: 'nearest', fit: 'cover', position: 'bottom' })
-              .png()
-              .toBuffer();
-            // dest-over draws terrain BEHIND the unit; tile repeats it once per animation frame.
-            unitBuf = await sharp(unitBuf, { animated: true })
-              .composite([{ input: terr, blend: 'dest-over', tile: true }])
-              .gif()
-              .toBuffer();
-          } catch (terrErr) {
-            console.warn('Terrain backdrop failed (unit only)', terrErr);
-          }
-
-          const out = await sharp(unitBuf, { animated: true })
-            .resize({ width: baseW * scale, kernel: 'nearest' })
+          // Recolor to the faction's hologram (desaturate to luminance, then a
+          // per-channel linear curve — .linear leaves alpha alone, so no opaque
+          // color box), flatten on its field, upscale nearest, then scanlines +
+          // grain. Single sharp chain: the GIF is quantized only once (repeated
+          // GIF re-encoding mangles the palette and kills the color).
+          // Margin of the dark field around each frame so cropped chat previews
+          // don't clip the unit's head/feet. extend() pads per-page on animated
+          // images; scanlines/grain then cover the full padded frame.
+          const margin = Math.round(outW * 0.22);
+          const padW = outW + margin * 2;
+          const padFullH = outFullH + margin * 2 * pages;
+          const spec = holoSpec(army.code);
+          const out = await sharp(orig, { animated: true })
+            .modulate({ saturation: 0 })
+            .linear(spec.A, spec.B)
+            .flatten({ background: spec.bg })
+            .resize({ width: outW, kernel: 'nearest' })
+            .extend({ top: margin, bottom: margin, left: margin, right: margin, background: { ...spec.bg, alpha: 1 } })
+            .composite([holoScanlines(padW), holoGrain(padW, padFullH, spec.grain)])
             .gif()
             .toBuffer();
           imageData = out.toString('base64');
