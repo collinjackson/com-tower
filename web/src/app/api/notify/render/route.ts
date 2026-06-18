@@ -13,7 +13,7 @@ const ARMY_NAMES: Record<string, string> = {
 // Drawn from each nation's official lore card (terrain/cinfo_<code>_aw1.gif).
 const ARMY_THEME: Record<string, string> = {
   os: 'all-American pros (USA) — earnest, heroic, academy-trained, can-do',
-  bm: 'Russian winter army — cold, rugged, stoic, grind-it-out attrition',
+  bm: 'Soviet-bloc war machine — rugged, stoic, disciplined; grind-it-out attrition, iron resolve, vodka-dry humor (NO ice/snow/cold shtick — that\'s Cobalt Ice)',
   ge: 'German precision — hyper-efficient, organized, disciplined, by-the-book',
   yc: 'Japan/samurai pride — traditional, honor-bound, reveres the old ways',
   bh: 'otherworldly invaders — sinister, mechanized, coldly villainous',
@@ -22,7 +22,7 @@ const ARMY_THEME: Record<string, string> = {
   bd: 'Egyptian desert folk — headscarves, ancient ruins, sandstorms, old-world stoicism',
   ab: 'Chinese alliance of three mountain tribes (Three Kingdoms vibe) — scrappy, proud, now modern',
   js: 'Ancient-Rome legion reborn — conquest-hungry, fierce, grandiose, historic arms',
-  ci: 'sentient ANTARCTIC PENGUINS running on stolen Black Hole tech — cold, waddling, chilly bravado',
+  ci: 'sentient cyber-DUCKS on stolen Black Hole tech — quacks, waddles, duck/quack puns, webbed-foot bravado, chilly cobalt-ice cool',
   pc: 'cosmic religious zealots — fervent, certain, "purifying" the world by the universe’s grand design',
   tg: 'Latin-American revolutionaries — proud, fiery, elite beret commandos, anti-colonial',
   pl: 'French Foreign Legion of mercenaries from everywhere — professional, motley, fighting for citizenship',
