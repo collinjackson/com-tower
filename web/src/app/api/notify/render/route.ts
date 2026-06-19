@@ -34,34 +34,36 @@ const ARMY_THEME: Record<string, string> = {
   uw: 'feral jungle MONKEYS & APES with scavenged gear — hoots, screeches, coconuts, rebellious attitude',
 };
 
-// Per-unit-type attitude, loosely inspired by the matching SC2 Terran unit's
-// voice (paraphrased vibes, not quotes — the bot never names StarCraft). Keyed
-// by substring of the sprite-file unit name; ordered so specific units win
-// (megatank before tank, blackbomb before bomber, anti-air before air, etc.).
+// Per-unit-type attitude. The descriptors are PURE VIBE — no proper nouns —
+// because this string is fed to the model and it'll parrot any name it sees.
+// The SC2 Terran analog is noted in a trailing comment for maintainer reference
+// ONLY (inspiration, not output). Keyed by substring of the sprite-file unit
+// name; ordered so specific units win (megatank before tank, blackbomb before
+// bomber, anti-air before air, etc.).
 function unitVoice(f: string): string {
-  if (/megatank/.test(f)) return 'a lumbering super-heavy juggernaut (Thor) — slow, booming, big-guns-big-fun bravado';
-  if (/neotank/.test(f)) return 'a top-of-the-line elite walker (Thor) — confident, unstoppable, latest-and-greatest swagger';
-  if (/md\.?tank|medium/.test(f)) return 'an upgunned siege-armor crew (Siege Tank) — heavier, dug-in, crank-it-up loud';
-  if (/tank/.test(f)) return 'a tank crew (Siege Tank) — loud, dug-in, hooah, "ready to roll out" energy';
-  if (/recon/.test(f)) return 'a fast scout buggy (Hellion) — pyro hot-rodder, need-for-speed, hit-and-run cocky';
-  if (/\bapc\b|apc/.test(f)) return 'an armored transport/support (Medivac+SCV) — blue-collar taxi, "need a lift?", keeps the boys moving';
-  if (/mech/.test(f)) return 'an anti-armor heavy trooper (Marauder) — bruiser who loves wrecking armor, "bring it", demolition jock';
-  if (/infantry/.test(f)) return 'a rifle grunt (Marine) — gung-ho, cocky, trigger-happy, rock-and-roll, eager for orders';
-  if (/artillery|rocket/.test(f)) return 'long-range bombardment (Liberator/sieged tank) — patient gunner, fire-for-effect, rains hell from afar';
-  if (/anti.?air|missile/.test(f)) return 'a flak/SAM crew (Goliath AA) — deadpan "you move, you die", locked on, daring planes to come';
-  if (/piperunner/.test(f)) return 'a railbound gun (Diamondback) — relentless but stuck on its track, dry about its lane';
-  if (/b.?cop|bcopter/.test(f)) return 'an attack chopper (Banshee) — menacing death-from-above, engines screaming, itching to strike';
-  if (/t.?cop|tcopter/.test(f)) return 'a transport chopper (Medivac/Dropship) — sassy bus driver, "going up?", ferrying grunts';
-  if (/fighter/.test(f)) return 'an air-superiority pilot (Viking) — by-the-book fighter jock with swagger, dogfighter';
-  if (/stealth/.test(f)) return 'a cloaked striker (Banshee/Wraith) — silent, smug, "never see it coming"';
-  if (/black.?bomb/.test(f)) return 'a tactical nuke (Ghost ordnance) — ominous, clipped, doomsday countdown menace';
-  if (/bomber/.test(f)) return 'a heavy bomber (Liberator) — "bombs away", payload-delivery confidence, flattens whatever\'s below';
-  if (/battleship/.test(f)) return 'a capital warship bridge (Battlecruiser) — booming captain, "make it happen", commands the sea';
-  if (/cruiser/.test(f)) return 'an escort warship (Viking/BC escort) — steady anti-air/anti-sub watchdog, scanning the horizon';
-  if (/carrier/.test(f)) return 'a flattop / mobile airbase (mini-Battlecruiser) — launches the birds, calm deck-officer authority';
-  if (/sub/.test(f)) return 'a lurking submarine — quiet menace from below, patient ambusher, breathy and cold';
-  if (/lander/.test(f)) return 'an amphibious transport (Dropship) — "going down", dropping the boys on the beach';
-  if (/black.?boat/.test(f)) return 'a repair/rescue boat (SCV/Medic) — gruff fix-it crew, "you break \'em, I patch \'em"';
+  if (/megatank/.test(f)) return 'a lumbering super-heavy juggernaut — slow, booming, overwhelming firepower, big-guns-big-fun bravado'; // Thor
+  if (/neotank/.test(f)) return 'a top-of-the-line elite war machine — confident, unstoppable, latest-and-greatest swagger'; // Thor
+  if (/md\.?tank|medium/.test(f)) return 'an upgunned heavy-armor crew — heavier, dug-in, crank-it-up loud'; // upgunned Siege Tank
+  if (/tank/.test(f)) return 'a tank crew — loud, dug-in, hooah, ready-to-roll-out energy'; // Siege Tank
+  if (/recon/.test(f)) return 'a fast scout buggy — pyro hot-rodder, need-for-speed, hit-and-run cocky'; // Hellion
+  if (/\bapc\b|apc/.test(f)) return 'an armored transport and supply rig — blue-collar taxi, "need a lift?", keeps the boys moving'; // Medivac/SCV
+  if (/mech/.test(f)) return 'an anti-armor heavy trooper — bruiser who loves wrecking armor, demolition jock'; // Marauder
+  if (/infantry/.test(f)) return 'a rifle grunt — gung-ho, cocky, trigger-happy, rock-and-roll, eager for orders'; // Marine
+  if (/artillery|rocket/.test(f)) return 'a long-range bombardment crew — patient gunner, fire-for-effect, rains hell from afar'; // Liberator
+  if (/anti.?air|missile/.test(f)) return 'a flak/SAM crew — deadpan, locked on, quietly daring enemy planes to come'; // Goliath AA
+  if (/piperunner/.test(f)) return 'a railbound gun — relentless but stuck on its track, dry about its one lane'; // Diamondback
+  if (/b.?cop|bcopter/.test(f)) return 'an attack chopper — menacing, rotors screaming, itching to strike from above'; // Banshee
+  if (/t.?cop|tcopter/.test(f)) return 'a transport chopper — sassy bus driver, "going up?", ferrying grunts'; // Medivac/Dropship
+  if (/fighter/.test(f)) return 'an air-superiority pilot — by-the-book fighter jock with swagger, dogfighter'; // Viking
+  if (/stealth/.test(f)) return 'a cloaked striker — silent, smug, they-never-see-it-coming'; // Banshee/Wraith
+  if (/black.?bomb/.test(f)) return 'a tactical nuke — ominous, clipped, doomsday-countdown menace'; // Ghost nuke
+  if (/bomber/.test(f)) return 'a heavy bomber — bombs-away payload confidence, flattens whatever\'s below'; // Liberator
+  if (/battleship/.test(f)) return 'a capital-warship bridge — booming captain, make-it-happen authority, commands the sea'; // Battlecruiser
+  if (/cruiser/.test(f)) return 'an escort warship — steady anti-air/anti-sub watchdog, scanning the horizon'; // Viking/escort
+  if (/carrier/.test(f)) return 'a flattop and mobile airbase — launches the birds, calm deck-officer authority'; // mini-Battlecruiser
+  if (/sub/.test(f)) return 'a lurking submarine — quiet menace from below, patient ambusher, breathy and cold'; // Sub
+  if (/lander/.test(f)) return 'an amphibious transport — "going down", dropping the boys on the beach'; // Dropship
+  if (/black.?boat/.test(f)) return 'a repair and rescue boat — gruff fix-it crew, "you break \'em, I patch \'em"'; // SCV/Medic
   return '';
 }
 
