@@ -333,6 +333,7 @@ async function resolveCurrentTurn(gameId: string): Promise<
       username?: string;
       countryCode?: string;
       countryName?: string;
+      co?: { name?: string; imageUrl?: string };
       units: AwbwUnit[];
     }
   | undefined
@@ -350,6 +351,15 @@ async function resolveCurrentTurn(gameId: string): Promise<
     // Keep code + name from the SAME (tight) window after players_id for consistency.
     const countryCode = after.match(/"countries_code"\s*:\s*"([a-z]{2,3})"/i)?.[1];
     const countryName = after.match(/"countries_name"\s*:\s*"([^"]+)"/)?.[1];
+    // Current player's CO (tag-aware: AWBW reports the ACTIVE CO in the current
+    // player's block during their turn). co_image_path has JSON-escaped slashes.
+    const coWindow = idMatch ? html.slice(idMatch.index, idMatch.index + 900) : '';
+    const coName = coWindow.match(/"co_name"\s*:\s*"([^"]+)"/)?.[1];
+    const coPath = coWindow.match(/"co_image_path"\s*:\s*"([^"]+)"/)?.[1];
+    const coImageUrl = coPath
+      ? `https://awbw.amarriner.com/${coPath.replace(/\\\//g, '/').replace(/^\//, '')}`
+      : undefined;
+    const co = coName || coImageUrl ? { name: coName, imageUrl: coImageUrl } : undefined;
 
     // Per-unit-type max fuel/ammo, to decide if the game would show a low warning.
     const maxByType: Record<string, { fuel: number; ammo: number }> = {};
@@ -441,7 +451,7 @@ async function resolveCurrentTurn(gameId: string): Promise<
         console.warn('unitsInfo parse failed', e);
       }
     }
-    return { username, countryCode, countryName, units };
+    return { username, countryCode, countryName, co, units };
   } catch (err) {
     console.error('resolveCurrentTurn failed', err);
     return undefined;
@@ -458,7 +468,8 @@ async function buildMessage(
   meta: NextTurnMeta,
   recentChat?: Array<{ name?: string; text: string }>,
   army?: { code?: string; name?: string },
-  unit?: { name: string; hp: number; lowFuel: boolean; lowAmmo: boolean; terrainTile?: string }
+  unit?: { name: string; hp: number; lowFuel: boolean; lowAmmo: boolean; terrainTile?: string },
+  co?: { name?: string; imageUrl?: string }
 ): Promise<RenderPayload> {
   const link = gameLink(gameId);
   const gameName = meta.gameName || `Game ${gameId}`;
@@ -485,6 +496,7 @@ async function buildMessage(
           recentChat: enableFun && recentChat?.length ? recentChat : undefined,
           army: enableFun && army?.code ? army : undefined,
           unit: enableFun && unit ? unit : undefined,
+          co: enableFun && co ? co : undefined,
         }),
       });
       if (res.ok) {
@@ -1838,11 +1850,14 @@ async function onGroupGameNextTurn(
     turn?.username ||
     (await scrapeCurrentPlayerName(gameId).catch(() => undefined)) ||
     meta.socketPlayer;
-  // Pick one of the player's REAL living units so the voice + sprite are grounded in reality.
+  // Feature either a real living unit or the player's CO. With units: 50/50.
+  // Without units (early game): always the CO. Grounds the voice + sprite in reality.
   const liveUnits = turn?.units || [];
-  const chosenUnit = liveUnits.length
+  const featureCo = liveUnits.length === 0 || Math.random() < 0.5;
+  const chosenUnit = !featureCo && liveUnits.length
     ? liveUnits[Math.floor(Math.random() * liveUnits.length)]
     : undefined;
+  const co = featureCo ? turn?.co : undefined;
   const armyCode = chosenUnit?.code || turn?.countryCode;
   const army = armyCode ? { code: armyCode } : undefined;
   const unitInfo = chosenUnit
@@ -1889,7 +1904,8 @@ async function onGroupGameNextTurn(
     },
     recentChat,
     army,
-    unitInfo
+    unitInfo,
+    co
   );
   let message = payload.text;
   const players = gg.players || {};
