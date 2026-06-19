@@ -74,7 +74,7 @@ const STYLES = [
   'a sharp, punchy radio call',
   'a sharp, punchy radio call',
   'a short rhyming couplet (it must actually rhyme)',
-  'a quick one-liner joke',
+  'a genuine joke — real setup + a punchline that actually lands (if a pun, the wordplay must truly work; no limp non-sequiturs)',
   'a good-natured gripe or complaint',
   'over-the-top praise/hype for the commander',
   'bone-dry deadpan humor',
@@ -164,6 +164,9 @@ export async function POST(req: NextRequest) {
       lowAmmo?: boolean;
       terrainTile?: string;
     };
+    // When the player has no units to feature (or the worker rolled CO this turn),
+    // we feature their commanding officer instead — the active CO in tag games.
+    const co = (body.co || {}) as { name?: string; imageUrl?: string };
 
     if (!gameId || !link) {
       return NextResponse.json({ error: 'gameId and link required' }, { status: 400 });
@@ -223,26 +226,46 @@ export async function POST(req: NextRequest) {
         const persona = (army.code && ARMY_THEME[army.code]) || '';
         const unitVibe = unitFile ? unitVoice(unitFile) : '';
         const style = STYLES[Math.floor(Math.random() * STYLES.length)];
+        // Feature the CO when there's no unit to voice (early game, or the worker
+        // rolled CO this turn). The CO themselves takes the radio.
+        const coName = (co.name || '').trim();
+        const featuringCo = !unitFile && !!(coName || co.imageUrl);
+        // Joke craft applies to both voices — a flagged failure mode (limp non-jokes).
+        const jokeCraft =
+          `If your format is a joke or pun, it MUST work as one — a real setup and a punchline that genuinely lands (the wordplay has to actually make sense); a flat non-sequitur is worse than a straight call.\n`;
+
         const subject = unitName
           ? `a ${armyName ? armyName + ' ' : ''}${unitName} unit`
           : `${armyName ? armyName + ' ' : 'field '}command`;
 
-        const genPrompt =
-          `You are ${subject}${persona ? ` — your army's character: ${persona}` : ''}, radioing your commander ${who} ` +
-          `on a crackly field radio because it's ${who}'s turn and you need orders. You're a grunt; use clipped comms flavor ` +
-          `(come in, say again, five by five) and let your army's character color the voice — accent, references, even sounds.\n` +
-          (unitVibe
-            ? `Your unit's attitude (loose inspiration — channel the vibe, never name it or reference StarCraft): ${unitVibe}.\n`
-            : '') +
-          `Radio word "over" ONLY signals you're done talking: use it at most once, at the very END, and it's optional — never mid-message.\n` +
-          `Convey your MOOD through HOW you talk — never state it outright (don't say "bored", "restless", "antsy", "nothing to do") and never give exact numbers: you're ${mood}.${supplies ? ` You're also ${supplies} — gripe about it.` : ''} ` +
-          `With no action yet, you fill the dead air — that's WHY you've got a joke or a rhyme — but let the bit speak for itself; don't explain that you're passing time or itching for orders.\n` +
-          `Only use what's stated here — don't invent battles, casualties, or damage.\n` +
-          `Pick a FRESH angle — avoid the single most obvious cliché for your faction (the same prop, pun, or catchphrase every time); your character is broad, so mine a different part of it.\n` +
-          `Format for THIS transmission: ${style}. (If you can't pull it off well, a sharp call is fine.)\n` +
-          `${chatBlock}\n` +
-          `It must clearly mean it's ${who}'s turn.${day ? ` It is day ${day}.` : ''} Use the exact name "${who}". ` +
-          `Under ~160 characters. Output ONLY the transmission — no surrounding quotes, at most one emoji.`;
+        const genPrompt = featuringCo
+          ? `You are ${coName || 'the commanding officer'}, the CO (commanding officer) of ${armyName || 'this'} army — this is the Advance Wars CO "${coName || 'unknown'}"; if you genuinely know their personality and quirks, channel them, otherwise play a vivid, distinct commander. ` +
+            `It's ${who}'s turn and you have NO troops on the field yet, so YOU grab the radio to rally your commander ${who} and get the war moving.\n` +
+            `Use clipped field-radio comms (come in, say again, five by five).\n` +
+            `Radio word "over" ONLY signals you're done: at most once, at the very END, optional — never mid-message.\n` +
+            `You're itching to mobilize, but never say so outright — let it show through the bit.\n` +
+            `Pick a FRESH angle; don't lean on one catchphrase.\n` +
+            jokeCraft +
+            `Format for THIS transmission: ${style}. (If you can't pull it off well, a sharp call is fine.)\n` +
+            `${chatBlock}\n` +
+            `It must clearly mean it's ${who}'s turn.${day ? ` It is day ${day}.` : ''} Use the exact name "${who}". ` +
+            `Under ~160 characters. Output ONLY the transmission — no surrounding quotes, at most one emoji.`
+          : `You are ${subject}${persona ? ` — your army's character: ${persona}` : ''}, radioing your commander ${who} ` +
+            `on a crackly field radio because it's ${who}'s turn and you need orders. You're a grunt; use clipped comms flavor ` +
+            `(come in, say again, five by five) and let your army's character color the voice — accent, references, even sounds.\n` +
+            (unitVibe
+              ? `Your unit's attitude (loose inspiration — channel the vibe, never name it or reference StarCraft): ${unitVibe}.\n`
+              : '') +
+            `Radio word "over" ONLY signals you're done talking: use it at most once, at the very END, and it's optional — never mid-message.\n` +
+            `Convey your MOOD through HOW you talk — never state it outright (don't say "bored", "restless", "antsy", "nothing to do") and never give exact numbers: you're ${mood}.${supplies ? ` You're also ${supplies} — gripe about it.` : ''} ` +
+            `With no action yet, you fill the dead air — that's WHY you've got a joke or a rhyme — but let the bit speak for itself; don't explain that you're passing time or itching for orders.\n` +
+            `Only use what's stated here — don't invent battles, casualties, or damage.\n` +
+            `Pick a FRESH angle — avoid the single most obvious cliché for your faction (the same prop, pun, or catchphrase every time); your character is broad, so mine a different part of it.\n` +
+            jokeCraft +
+            `Format for THIS transmission: ${style}. (If you can't pull it off well, a sharp call is fine.)\n` +
+            `${chatBlock}\n` +
+            `It must clearly mean it's ${who}'s turn.${day ? ` It is day ${day}.` : ''} Use the exact name "${who}". ` +
+            `Under ~160 characters. Output ONLY the transmission — no surrounding quotes, at most one emoji.`;
 
         const gen = await client.chat.completions.create({
           model,
@@ -273,8 +296,9 @@ export async function POST(req: NextRequest) {
                 {
                   role: 'user',
                   content:
-                    `Pick the best radio call from a ${armyName || ''} ${unitName || 'command'} grunt to commander ${who}. ` +
-                    `Criteria, in priority order: best leans into the army's character and is genuinely funny; nails the intended format (${style}); ` +
+                    `Pick the best radio call from ${featuringCo ? `the CO ${coName || 'commander'}` : `a ${armyName || ''} ${unitName || 'command'} grunt`} to commander ${who}. ` +
+                    `Criteria, in priority order: best leans into the ${featuringCo ? "CO's" : "army's"} character and is genuinely funny; nails the intended format (${style}); ` +
+                    `if the format is a joke/pun, DOWNRANK any whose punchline or wordplay doesn't actually land (a non-joke is bad); ` +
                     `the humor itself shows the idle restlessness — DOWNRANK any that explicitly say they're bored/restless/antsy/itching or that narrate having nothing to do; ` +
                     `conveys mood/morale without stating HP numbers; clearly conveys it's ${who}'s turn (needs orders); ` +
                     `lands a callback to the chatter ONLY if there's a real hook; tight (ideally under ~160 chars); not cringe or mean.\n` +
@@ -365,6 +389,45 @@ export async function POST(req: NextRequest) {
         }
       } catch (err) {
         console.error('Sprite attach failed (continuing text-only)', err);
+      }
+    }
+
+    // No unit to feature — holographize the player's CO portrait instead. Same
+    // effect (desaturate -> faction-color glow -> scanlines + grain on a black
+    // field); the color uses the army when known, else the default teal.
+    if (!imageData && enableFun && co.imageUrl) {
+      try {
+        const sharp = (await import('sharp')).default;
+        const cres = await fetch(co.imageUrl);
+        if (cres.ok) {
+          const orig: Uint8Array = Buffer.from(await cres.arrayBuffer());
+          const meta = await sharp(orig).metadata();
+          const baseW = meta.width || 48;
+          const baseH = meta.height || baseW;
+          const scale = Math.max(1, Math.round(144 / baseW));
+          const outW = baseW * scale;
+          const outH = baseH * scale;
+          const m = Math.round(outW * 0.18); // centered margin so previews don't clip the CO
+          const padW = outW + m * 2;
+          const padH = outH + m * 2;
+          const spec = holoSpec(army.code);
+          const out = await sharp(orig)
+            .modulate({ saturation: 0 })
+            .linear(spec.A, spec.B)
+            .flatten({ background: spec.bg })
+            .resize({ width: outW, kernel: 'nearest' })
+            .extend({ top: m, bottom: m, left: m, right: m, background: { ...spec.bg, alpha: 1 } })
+            .composite([holoScanlines(padW), holoGrain(padW, padH, spec.grain)])
+            .gif()
+            .toBuffer();
+          imageData = out.toString('base64');
+          imageContentType = 'image/gif';
+          imageFilename = `co-${(co.name || 'co').toLowerCase().replace(/[^a-z0-9]/g, '')}.gif`;
+        } else {
+          console.warn(`CO portrait fetch failed ${cres.status} for ${co.imageUrl}`);
+        }
+      } catch (err) {
+        console.error('CO portrait attach failed (continuing text-only)', err);
       }
     }
 
