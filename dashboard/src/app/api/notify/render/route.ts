@@ -167,6 +167,8 @@ export async function POST(req: NextRequest) {
     // When the player has no units to feature (or the worker rolled CO this turn),
     // we feature their commanding officer instead — the active CO in tag games.
     const co = (body.co || {}) as { name?: string; imageUrl?: string };
+    // Optional per-player language/style for the caption (best effort; guarded below).
+    const language = typeof body.language === 'string' ? body.language.trim().slice(0, 40) : '';
 
     if (!gameId || !link) {
       return NextResponse.json({ error: 'gameId and link required' }, { status: 400 });
@@ -233,6 +235,12 @@ export async function POST(req: NextRequest) {
         // Joke craft applies to both voices — a flagged failure mode (limp non-jokes).
         const jokeCraft =
           `If your format is a joke or pun, it MUST work as one — a real setup and a punchline that genuinely lands (the wordplay has to actually make sense); a flat non-sequitur is worse than a straight call.\n`;
+        // Optional language/style. Guarded: only well-known real or novelty languages,
+        // and never a mocking/offensive impression.
+        const wantsLang = !!language && !/^(english|en)$/i.test(language);
+        const langLine = wantsLang
+          ? `LANGUAGE: write the ENTIRE transmission in ${language} (keep the name "${who}" verbatim and keep the meaning that it's their turn). Only do this if ${language} is a real or well-known constructed/novelty language you can genuinely produce (e.g. Spanish, Japanese, Esperanto, Klingon, Swedish Chef, Pirate, Yoda-speak); if it isn't, or if rendering it would be a mocking or offensive impression of a real group, write plain English instead.\n`
+          : '';
 
         const subject = unitName
           ? `a ${armyName ? armyName + ' ' : ''}${unitName} unit`
@@ -246,6 +254,7 @@ export async function POST(req: NextRequest) {
             `You're itching to mobilize, but never say so outright — let it show through the bit.\n` +
             `Pick a FRESH angle; don't lean on one catchphrase.\n` +
             jokeCraft +
+            langLine +
             `Format for THIS transmission: ${style}. (If you can't pull it off well, a sharp call is fine.)\n` +
             `${chatBlock}\n` +
             `It must clearly mean it's ${who}'s turn.${day ? ` It is day ${day}.` : ''} Use the exact name "${who}". ` +
@@ -262,6 +271,7 @@ export async function POST(req: NextRequest) {
             `Only use what's stated here — don't invent battles, casualties, or damage.\n` +
             `Pick a FRESH angle — avoid the single most obvious cliché for your faction (the same prop, pun, or catchphrase every time); your character is broad, so mine a different part of it.\n` +
             jokeCraft +
+            langLine +
             `Format for THIS transmission: ${style}. (If you can't pull it off well, a sharp call is fine.)\n` +
             `${chatBlock}\n` +
             `It must clearly mean it's ${who}'s turn.${day ? ` It is day ${day}.` : ''} Use the exact name "${who}". ` +

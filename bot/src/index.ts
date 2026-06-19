@@ -40,6 +40,7 @@ type NextTurnMeta = {
   countries?: string[];
   gameName?: string;
   funEnabled?: boolean;
+  language?: string;
 };
 type RenderPayload = {
   text: string;
@@ -497,6 +498,7 @@ async function buildMessage(
           army: enableFun && army?.code ? army : undefined,
           unit: enableFun && unit ? unit : undefined,
           co: enableFun && co ? co : undefined,
+          language: enableFun && meta.language ? meta.language : undefined,
         }),
       });
       if (res.ok) {
@@ -1222,6 +1224,7 @@ const HELP_TEXT =
   '/addmod @x           — make someone a mod (mod)\n' +
   '/removemod @x        — remove a mod (mod)\n' +
   '/fun [on|off]        — flavor text (mod)\n' +
+  '/language <lang>     — your turn pings in another language (e.g. Klingon, Esperanto)\n' +
   '/status              — current state\n' +
   '/stop                — stop watching (mod)\n' +
   '/ping                — connectivity check';
@@ -1232,6 +1235,7 @@ type PlayerMapping = {
   displayName?: string;
   claimedBy: 'self' | 'mod';
   claimedAt?: any;
+  language?: string; // fun-mode turn pings rendered in this language/style (best effort)
 };
 type GroupGame = {
   groupId: string;
@@ -1354,6 +1358,39 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
     };
     await ggRef(groupId).update({ players, updatedAt: FieldValue.serverTimestamp() });
     await reply(`✅ Got it — you're ${username}. You'll be @mentioned on your turn.`);
+    return;
+  }
+
+  if (cmd === '/language' || cmd === '/lang') {
+    if (!senderAci) {
+      await reply("Couldn't read your Signal identity — try again.");
+      return;
+    }
+    const players = gg.players || {};
+    const key = Object.keys(players).find((k) => players[k]?.aci === senderAci);
+    if (!key) {
+      await reply('First claim your player with /iam <your_awbw_username>, then set /language.');
+      return;
+    }
+    const arg = args.join(' ').trim();
+    if (!arg) {
+      const cur = players[key].language;
+      await reply(
+        `🗣️ ${key}'s turn pings: ${cur || 'English'}.\n` +
+          'Set with /language <language> — try: Spanish, French, German, Japanese, Esperanto, Klingon, Swedish Chef, Pirate, Yoda. /language off resets to English.'
+      );
+      return;
+    }
+    if (/^(off|none|english|en|reset|default)$/i.test(arg)) {
+      delete players[key].language;
+      await ggRef(groupId).update({ players, updatedAt: FieldValue.serverTimestamp() });
+      await reply(`🗣️ ${key} → English.`);
+      return;
+    }
+    const lang = arg.slice(0, 40);
+    players[key].language = lang;
+    await ggRef(groupId).update({ players, updatedAt: FieldValue.serverTimestamp() });
+    await reply(`🗣️ ${key} → ${lang}. Your fun-mode turn pings will come through in ${lang} (best effort). /language off to undo.`);
     return;
   }
 
@@ -1892,6 +1929,11 @@ async function onGroupGameNextTurn(
       .slice(-6)
       .map((c) => ({ name: c.name, text: c.text }));
   }
+  // The current player's chosen fun-mode language (if they've claimed their slot and set one).
+  const langKey = Object.keys(gg.players || {}).find(
+    (k) => k.toLowerCase() === String(currentPlayer).toLowerCase()
+  );
+  const playerLang = langKey ? gg.players?.[langKey]?.language : undefined;
   const payload = await buildMessage(
     gameId,
     {
@@ -1901,6 +1943,7 @@ async function onGroupGameNextTurn(
       players: info.players,
       gameName,
       funEnabled: gg.funEnabled,
+      language: playerLang,
     },
     recentChat,
     army,
