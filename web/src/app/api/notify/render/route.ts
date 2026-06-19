@@ -31,7 +31,7 @@ const ARMY_THEME: Record<string, string> = {
   aa: 'sentient blue OOZE/SLIME creatures wielding modern guns — weird, gloopy, oddly competent',
   ne: 'mafia MOBSTERS of the criminal underworld — smooth, menacing, "connections", wiseguy patter',
   sc: 'intelligent high-tech DINOSAURS back from extinction — ancient, roaring, surprisingly advanced',
-  uw: 'feral jungle MONKEYS & APES with scavenged gear — hoots, screeches, coconuts, rebellious attitude',
+  uw: 'feral jungle MONKEYS & APES with jury-rigged scavenged gear — hoots, screeches, chest-thumping, swinging in on vines, fierce troop/tribe loyalty, gleeful chaos, rebellious raiders (bananas are the lazy gag — basically never reach for them; you have a whole jungle of material)',
 };
 
 // Per-unit-type attitude. The descriptors are PURE VIBE — no proper nouns —
@@ -238,6 +238,7 @@ export async function POST(req: NextRequest) {
           `Convey your MOOD through HOW you talk — never state it outright (don't say "bored", "restless", "antsy", "nothing to do") and never give exact numbers: you're ${mood}.${supplies ? ` You're also ${supplies} — gripe about it.` : ''} ` +
           `With no action yet, you fill the dead air — that's WHY you've got a joke or a rhyme — but let the bit speak for itself; don't explain that you're passing time or itching for orders.\n` +
           `Only use what's stated here — don't invent battles, casualties, or damage.\n` +
+          `Pick a FRESH angle — avoid the single most obvious cliché for your faction (the same prop, pun, or catchphrase every time); your character is broad, so mine a different part of it.\n` +
           `Format for THIS transmission: ${style}. (If you can't pull it off well, a sharp call is fine.)\n` +
           `${chatBlock}\n` +
           `It must clearly mean it's ${who}'s turn.${day ? ` It is day ${day}.` : ''} Use the exact name "${who}". ` +
