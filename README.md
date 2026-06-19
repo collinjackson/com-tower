@@ -2,7 +2,7 @@
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-<img width="1195" height="751" alt="Screenshot 2026-02-22 at 2 16 07 PM" src="https://github.com/user-attachments/assets/a53506d7-636f-4015-830f-663c2a8d94cc" />
+<img width="1195" height="751" alt="Screenshot 2026-02-22 at 2 16 07 PM" src="https://github.com/user-attachments/assets/a53506d7-636f-4015-830f-663c2a8d94cc" />
 
 **Turn notifications for [Advance Wars By Web](https://awbw.amarriner.com)** — get Signal alerts when it’s your turn.
 
@@ -15,21 +15,27 @@
 - **Patch a game** — Sign in with Google, paste an AWBW game link, and add your game. Com Tower watches the game and notifies you when it’s your turn.
 - **Choose how you’re notified** — Signal DM or group, “all turns” or “only my turn,” once per turn or hourly reminders.
 - **Invite others** — Share an invite link so friends can subscribe without signing in (they pick their number and settings on the invite page).
+- **Fun mode** — Optional flavor: each turn ping comes as an in-character radio call from one of the player’s real units, with a Star Wars–style holographic unit sprite in the army’s color. On by default for new games.
 - **Activity feed** — See sent notifications, CAPTCHA issues, and subscriber changes. Solve Signal CAPTCHAs from the game page when needed.
-
-The **web app** (Next.js on Vercel) handles auth, patches, and rendering notification text. The **worker** (Cloud Run) keeps AWBW websocket connections, triggers on turn change, calls the web app for message content, and sends via a **Signal bridge** (signal-cli).
 
 ---
 
-## Project structure
+## Architecture
 
-| Directory       | Purpose |
-|----------------|--------|
-| `web/`         | Next.js app: UI, Firebase auth, API routes (game lookup, patches, notify/render, invite, admin). Deploy to Vercel. |
-| `worker/`      | Cloud Run service: Firestore listeners, AWBW websockets, send via Signal bridge, log to `messages`. |
-| `signal-bridge/` | Cloud Run service: runs signal-cli REST API with a mounted Signal identity (e.g. GCS bucket). Called by worker. |
+Com Tower is **primarily a bot**. Two deployables:
 
-**Data (Firestore):** `games`, `patches`, `users`, `messages`, `patchActivity`, `captchaChallenges`.
+- **`bot/`** — the core service (Cloud Run). Holds long-lived AWBW websocket connections, triggers on turn change, asks the dashboard for the notification text/art, and sends it via a **Signal bridge** (signal-cli). Also handles the in-Signal `/game`, `/iam`, `/fun`, `/status` etc. group commands.
+- **`dashboard/`** — the companion web app (Next.js on Vercel). Google auth, patch management, the invite/CAPTCHA flow, the activity feed, and the `/api/notify/render` endpoint the bot calls to generate message text and the hologram unit image.
+
+| Directory     | Purpose |
+|---------------|---------|
+| `bot/`        | Cloud Run service: Firestore listeners, AWBW websockets, render calls, Signal send, message logging, group commands. Deployed manually with `gcloud`. |
+| `dashboard/`  | Next.js app (Vercel): UI, Firebase auth, API routes (game lookup, patches, `notify/render`, invite, admin). Auto-deploys from `main`. |
+| `scripts/`    | Operator helper scripts (Signal group-id lookup, etc.). |
+
+The **Signal bridge** (signal-cli REST) is separate infrastructure, not a folder in this repo — the bot reaches it over a private network via `SIGNAL_CLI_URL`.
+
+**Data (Firestore):** `groupGames`, `patches`, `users`, `messages`, `patchActivity`, `captchaChallenges`.
 
 ---
 
@@ -46,12 +52,12 @@ The **web app** (Next.js on Vercel) handles auth, patches, and rendering notific
 
 - Create a project and enable **Authentication** (Google sign-in) and **Firestore**.
 - Create a **web app** in Firebase and copy the client config (apiKey, authDomain, projectId, etc.).
-- Create a **service account** with Firestore access; download the JSON or use the private key, client email, and project ID for the worker and web server-side APIs.
+- Create a **service account** with Firestore access; use the private key, client email, and project ID for the bot and dashboard server-side APIs.
 
-### 2. Web app (`web/`)
+### 2. Dashboard (`dashboard/`)
 
 ```bash
-cd web
+cd dashboard
 cp .env.local.example .env.local
 # Edit .env.local and fill in your Firebase and optional vars
 npm install
@@ -60,49 +66,49 @@ npm run dev
 
 **`.env.local` (and Vercel env vars):**
 
-- **Client (required for auth):**  
+- **Client (required for auth):**
   `NEXT_PUBLIC_FIREBASE_API_KEY`, `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN`, `NEXT_PUBLIC_FIREBASE_PROJECT_ID`, `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET`, `NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID`, `NEXT_PUBLIC_FIREBASE_APP_ID`
-- **Server (for API routes that use Firestore/admin):**  
+- **Server (for API routes that use Firestore/admin):**
   `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`
-- **Optional:**  
-  `OPENAI_API_KEY` (fun-mode captions in `/api/notify/render`),  
-  `NEXT_PUBLIC_SITE_URL` (e.g. `https://your-app.vercel.app` for invite links),  
-  `COM_TOWER_WORKER_URL` (your worker URL),  
-  `INVITE_SHARED_SECRET` (shared secret for worker ↔ web invite/captcha calls)
+- **Optional:**
+  `OPENAI_API_KEY` (fun-mode captions in `/api/notify/render`),
+  `NEXT_PUBLIC_SITE_URL` (e.g. `https://your-app.vercel.app` for invite links),
+  `COM_TOWER_WORKER_URL` (your bot URL),
+  `INVITE_SHARED_SECRET` (shared secret for bot ↔ dashboard invite/captcha calls)
 
-Deploy to Vercel and set the same env vars in the dashboard.
+Deploy to Vercel (Root Directory = `dashboard`) and set the same env vars in the dashboard.
 
-### 3. Worker (`worker/`)
+### 3. Bot (`bot/`)
 
-The worker needs Firestore (admin), the URL of your web app’s notify/render endpoint, and the Signal bridge.
+The bot needs Firestore (admin), the URL of the dashboard’s notify/render endpoint, and the Signal bridge.
 
-**Required env (or Secret Manager equivalents, see below):**
+**Required env (or Secret Manager equivalents):**
 
 - `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`
-- `SIGNAL_CLI_URL` — base URL of your signal-cli REST API (e.g. the Signal bridge)
+- `SIGNAL_CLI_URL` — base URL of your signal-cli REST API (the Signal bridge)
 - `SIGNAL_BOT_NUMBER` — Signal number used by the bridge
 - `NOTIFY_RENDER_URL` — e.g. `https://your-app.vercel.app/api/notify/render`
 
-**Optional:** `RENDER_BYPASS_TOKEN`, `AWBW_WS_BASE`, `OPENAI_API_KEY`, etc.
+**Optional:** `RENDER_BYPASS_TOKEN`, `AWBW_WS_BASE`, `OPENAI_API_KEY`, `JOIN_SHIM_URL`/`JOIN_SHIM_SECRET`, etc.
 
 **Local run:**
 
 ```bash
-cd worker
+cd bot
 npm install
 # Set env vars, then:
 npm run dev
 ```
 
-**Deploy to Cloud Run:** use `worker/deploy.sh`. It supports plain env or GCP Secret Manager (e.g. `SECRET_FIREBASE_PRIVATE_KEY=your-secret-name`). See the comments at the top of `deploy.sh` for the full list.
+**Deploy to Cloud Run:** the bot is a Cloud Run service (`com-tower-worker`). Deploy with `gcloud run deploy com-tower-worker --source=. --region=us-central1` from `bot/` — a bare source deploy preserves the existing env/secrets/VPC config and just rebuilds. `bot/deploy.sh` documents the full env/Secret-Manager mapping for a first-time deploy.
 
 ### 4. Signal bridge
 
-You need a running signal-cli REST API that the worker can call. The reference setup runs it on Cloud Run with the Signal identity in a GCS bucket; the worker calls it with IAM (Invoker). For a minimal self-host, run signal-cli locally or in a container and set `SIGNAL_CLI_URL` (and optionally protect it with a shared secret if you add that to the worker).
+You need a running signal-cli REST API the bot can call. The reference setup runs it on Cloud Run / a VM with the Signal identity in a GCS bucket; the bot calls it over a private network. For a minimal self-host, run signal-cli locally or in a container and set `SIGNAL_CLI_URL`.
 
 ### 5. Firestore rules and indexes
 
-Deploy rules and indexes for your Firebase project (see Firebase console or `firebase deploy` if you have a config). Ensure indexes exist for the queries used in `web/src/app/api/game/[id]/activity/route.ts` and any admin/captcha routes (e.g. `gameId` + `createdAt`, `status`, etc.).
+Deploy rules and indexes for your Firebase project (see `dashboard/firestore.rules`). Ensure indexes exist for the queries used in `dashboard/src/app/api/game/[id]/activity/route.ts` and the admin/captcha routes.
 
 ---
 
@@ -111,35 +117,35 @@ Deploy rules and indexes for your Firebase project (see Firebase console or `fir
 ### Setup
 
 1. Fork and clone the repo.
-2. Set up Firebase and `.env.local` for `web/` as above (you can use a dev project).
-3. `cd web && npm install && npm run dev` — the app runs at http://localhost:3000. You can use the UI without a worker (patch UI, invite links, activity feed will load if Firestore is populated).
-4. To test the worker locally, run it with env pointing at your Firestore and a Signal bridge (or a stub).
+2. Set up Firebase and `.env.local` for `dashboard/` as above (a dev project is fine).
+3. `cd dashboard && npm install && npm run dev` — the app runs at http://localhost:3000. You can use the UI without a running bot (patch UI, invite links, activity feed load if Firestore is populated).
+4. To test the bot locally, run it with env pointing at your Firestore and a Signal bridge (or a stub).
 
 ### Codebase overview
 
-- **Web:** Next.js App Router. Main UI is `web/src/app/page.tsx`; API routes live under `web/src/app/api/`. Firebase client config in `web/src/lib/firebase.ts`, admin in `web/src/lib/firebase-admin.ts`.
-- **Worker:** Single entry `worker/src/index.ts` — Firestore listeners, AWBW websocket per game, render call to web, Signal send, message logging. Deploy script and env in `worker/deploy.sh`.
+- **Dashboard:** Next.js App Router. Main UI is `dashboard/src/app/page.tsx`; API routes live under `dashboard/src/app/api/`. Firebase client config in `dashboard/src/lib/firebase.ts`, admin in `dashboard/src/lib/firebase-admin.ts`. The fun-mode caption + hologram renderer is `dashboard/src/app/api/notify/render/route.ts` (`dashboard/scripts/holo-proto.mjs` is a standalone preview harness for the hologram look).
+- **Bot:** Single entry `bot/src/index.ts` — Firestore listeners, AWBW websocket per game, render call to the dashboard, Signal send, message logging, and the in-Signal group commands.
 
 ### Making changes
 
-- **Web:** Follow existing patterns (React hooks, Tailwind, existing API shapes). Run `npm run lint` in `web/`.
-- **Worker:** TypeScript; ensure env and error handling stay consistent with the current style.
-- **API contracts:** If you change request/response shapes for `/api/notify/render`, `/api/game/...`, or invite/captcha routes, update the worker or any callers that depend on them.
+- **Dashboard:** Follow existing patterns (React hooks, Tailwind, existing API shapes). Run `npm run lint` in `dashboard/`.
+- **Bot:** TypeScript; keep env and error handling consistent with the current style.
+- **API contracts:** If you change request/response shapes for `/api/notify/render`, `/api/game/...`, or invite/captcha routes, update the bot or any callers that depend on them.
 
 ### Submitting changes
 
 1. Open an issue or discussion first if you’re planning a larger change.
 2. Branch from `main`, make focused commits, and open a PR with a short description of what and why.
-3. Ensure the app still builds and that you haven’t broken the flow (patch → worker → Signal → messages).
+3. Ensure the app still builds and that you haven’t broken the flow (patch → bot → Signal → messages).
 
 ---
 
 ## Flow (reference)
 
-1. User adds a game in the web app and adds subscribers (or shares an invite link). Patches and subscribers are stored in Firestore (`patches`, `users`).
-2. Worker listens to `patches`, opens an AWBW websocket per game, and on `NextTurn` fetches notification text from the web app (`NOTIFY_RENDER_URL`).
-3. Worker sends messages via the Signal bridge and writes results to Firestore `messages`.
-4. The web app shows an activity feed from `messages` and patch activity; users can resolve CAPTCHAs from the game page when needed.
+1. A user adds a game and subscribers in the dashboard (or shares an invite link). Patches and subscribers are stored in Firestore.
+2. The bot listens to Firestore, opens an AWBW websocket per game, and on a turn change fetches notification text/art from the dashboard (`NOTIFY_RENDER_URL`).
+3. The bot sends messages via the Signal bridge and writes results to Firestore `messages`.
+4. The dashboard shows an activity feed from `messages` and patch activity; users resolve CAPTCHAs from the game page when needed.
 
 ---
 
