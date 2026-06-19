@@ -239,7 +239,7 @@ export async function POST(req: NextRequest) {
         // and never a mocking/offensive impression.
         const wantsLang = !!language && !/^(english|en)$/i.test(language);
         const langLine = wantsLang
-          ? `LANGUAGE: write the ENTIRE transmission in ${language} (keep the name "${who}" verbatim and keep the meaning that it's their turn). Only do this if ${language} is a real or well-known constructed/novelty language you can genuinely produce (e.g. Spanish, Japanese, Esperanto, Klingon, Swedish Chef, Pirate, Yoda-speak); if it isn't, or if rendering it would be a mocking or offensive impression of a real group, write plain English instead.\n`
+          ? `LANGUAGE: write the ENTIRE transmission in ${language} (keep the name "${who}" verbatim and keep the meaning that it's their turn). Genuinely COMMIT to it — for novelty/fictional languages a recognizable flavored rendition is exactly right (Klingon: weave in real Klingon like "nuqneH"/"Qapla'"/"tlhIngan"; Swedish Chef: "bork bork" mock-Swedish; Yoda: object-subject-verb inversion; Pirate: "arr/ye/be"). Fall back to plain English ONLY if ${language} would come out as meaningless gibberish, or if it would be a mocking/offensive impression of a real ethnic group.\n`
           : '';
 
         const subject = unitName
