@@ -34,6 +34,59 @@ const ARMY_THEME: Record<string, string> = {
   uw: 'feral jungle MONKEYS & APES with jury-rigged scavenged gear — hoots, screeches, chest-thumping, swinging in on vines, fierce troop/tribe loyalty, gleeful chaos, rebellious raiders (bananas are the lazy gag — basically never reach for them; you have a whole jungle of material)',
 };
 
+// CO personalities (Advance Wars + Days of Ruin), so the CO voice is grounded in
+// the real character rather than the model guessing. Keyed by lowercase co_name.
+// Sourced from the Advance Wars wikis (advancewars.fandom.com / warswiki.org).
+const CO_LORE: Record<string, string> = {
+  // Orange Star
+  andy: 'young gung-ho mechanic — loves machines and wrenches, naive and impulsive, endlessly upbeat rookie',
+  max: 'beefy hot-blooded brawler — blunt, proud, all about raw firepower and close combat, not subtlety',
+  sami: 'Orange Star special forces — serious, disciplined, fiercely infantry-proud, competitive, soldier-first',
+  nell: 'Orange Star’s easygoing chief CO — confident, teasing, leans on luck, warm mentor',
+  rachel: 'Nell’s younger sister — responsible and fierce, no-nonsense, scolds but cares deeply',
+  hachi: 'jolly old shopkeeper-general — money-minded, wily, grandfatherly bargain-hawking',
+  jake: 'young streetwise hotshot — skater slang ("totally"), cool and eager, reads the battle like a beat',
+  // Blue Moon
+  olaf: 'gruff blustery Blue Moon veteran — obsessed with snow and winter, quick-tempered, comedic grump',
+  grit: 'laid-back country sniper — slow drawl ("well now"), relaxed and lazy but a deadly marksman',
+  colin: 'timid young rich noble — insecure and apologetic, wins by throwing money at problems',
+  sasha: 'Colin’s elegant composed sister — poised, political, money-savvy, gracious but shrewd',
+  // Green Earth
+  eagle: 'proud ace pilot — hot-blooded about honor and air power, intense, impatient, rivalry-driven',
+  drake: 'big burly good-natured admiral — jovial, salt-of-the-sea, commands weather and waves',
+  jess: 'serious dutiful tank commander — blunt and mission-focused, soft heart under the armor',
+  javier: 'chivalrous knight — archaic formal speech, forever invoking "vision", defense and honor',
+  // Yellow Comet
+  kanbei: 'proud samurai emperor — bombastic, honor-bound, dignified, splurges on elite units',
+  sonja: 'Kanbei’s brainy daughter — calm, analytical, intel-obsessed, quietly outsmarts everyone',
+  sensei: 'beloved jolly old master — warm, humble, comedic hero, loves infantry and copters',
+  grimm: 'cheerful reckless gunner — all-out attack, carefree "yeehaw" energy, no thought for defense',
+  // Black Hole
+  flak: 'brutish dim thug — loud, relies on dumb luck and raw muscle, comedic lunkhead',
+  lash: 'gleeful child prodigy — hyper and giggly, sadistic, loves terrain tricks and her own genius',
+  adder: 'smug slimy snake — arrogant, condescending, a cowardly schemer who gloats',
+  hawke: 'stoic dark commander — brooding, honorable menace, calm and crushing',
+  sturm: 'cold alien overlord — terse, destructive, meteor-summoning, the ultimate detached villain',
+  jugger: 'battle android — speaks in glitchy beeps and garbled bursts, luck-driven, eerie and mechanical',
+  koal: 'cool collected road-loving officer — calm, professional, terse, all business',
+  kindle: 'haughty glamorous diva — vain, cruel, posh, looks down on everyone',
+  'von bolt': 'ancient wheelchair-bound tyrant — raspy and decrepit, greedy for life and power, sinister geezer',
+  // Days of Ruin / Dark Conflict
+  will: 'earnest young cadet — idealistic, determined, never-give-up rookie hero',
+  brenner: 'noble fatherly commander — compassionate, protects the weak, steady and brave',
+  lin: 'sharp loyal lieutenant — disciplined, observant, level-headed second-in-command',
+  isabella: 'gentle mysterious amnesiac — calm, kind, quietly resolute',
+  tasha: 'hotshot fighter pilot — brash and vengeful, fast and fierce, avenging her brother',
+  gage: 'quiet naval sniper — stoic, precise, melancholy man of few words',
+  forsythe: 'honorable old general — dignified, principled warrior who respects a fair fight',
+  waylon: 'vain cowardly ace — preening and flashy, self-serving, bolts when it counts',
+  greyfield: 'corrupt gluttonous admiral — pompous, power-hungry, self-righteous tyrant',
+  penny: 'eerie childlike girl — sing-song and innocent-creepy, speaks through her teddy "Mr. Bear"',
+  tabitha: 'cold proud aristocrat — haughty, ruthless perfectionist (Caulder’s daughter)',
+  caulder: 'amoral mad scientist — coldly cheerful, treats war as an experiment, utterly inhuman',
+  davis: 'ruthless coup commander — calculating, militaristic, ambitious traitor',
+};
+
 // Per-unit-type attitude. The descriptors are PURE VIBE — no proper nouns —
 // because this string is fed to the model and it'll parrot any name it sees.
 // The SC2 Terran analog is noted in a trailing comment for maintainer reference
@@ -231,6 +284,7 @@ export async function POST(req: NextRequest) {
         // Feature the CO when there's no unit to voice (early game, or the worker
         // rolled CO this turn). The CO themselves takes the radio.
         const coName = (co.name || '').trim();
+        const coLore = CO_LORE[coName.toLowerCase()] || '';
         const featuringCo = !unitFile && !!(coName || co.imageUrl);
         // Joke craft applies to both voices — a flagged failure mode (limp non-jokes).
         const jokeCraft =
@@ -247,7 +301,7 @@ export async function POST(req: NextRequest) {
           : `${armyName ? armyName + ' ' : 'field '}command`;
 
         const genPrompt = featuringCo
-          ? `You are ${coName || 'the commanding officer'}, the CO (commanding officer) of ${armyName || 'this'} army — this is the Advance Wars CO "${coName || 'unknown'}"; if you genuinely know their personality and quirks, channel them, otherwise play a vivid, distinct commander. ` +
+          ? `You are ${coName || 'the commanding officer'}, the CO (commanding officer) of ${armyName || 'this'} army.${coLore ? ` Your character: ${coLore}. Channel it hard — let it drive your speech style, quirks, and attitude.` : ` This is an Advance Wars CO; if you know their personality, channel it, otherwise play a vivid, distinct commander.`} ` +
             `It's ${who}'s turn and you have NO troops on the field yet, so YOU grab the radio to rally your commander ${who} and get the war moving.\n` +
             `Use clipped field-radio comms (come in, say again, five by five).\n` +
             `Radio word "over" ONLY signals you're done: at most once, at the very END, optional — never mid-message.\n` +
