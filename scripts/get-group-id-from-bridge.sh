@@ -16,7 +16,7 @@ if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
   echo "$RESPONSE" | jq -r '.error'
   echo ""
   echo "The Signal bridge may be slow or unavailable."
-  echo "Alternative: Close Signal Desktop and run: ./get-signal-group-id.sh"
+  echo "Alternative: Close Signal Desktop and run: scripts/get-signal-group-id.sh"
   exit 1
 fi
 
@@ -29,7 +29,7 @@ if [ "$COUNT" -eq 0 ]; then
   echo "  2. The API request timed out (Signal bridge can be slow)"
   echo ""
   echo "Alternative methods:"
-  echo "  1. Close Signal Desktop and run: ./get-signal-group-id.sh"
+  echo "  1. Close Signal Desktop and run: scripts/get-signal-group-id.sh"
   echo "  2. Use the web UI 'Load groups' button (may also be slow)"
   echo "  3. Get the group ID from Signal Desktop manually:"
   echo "     - Close Signal Desktop"

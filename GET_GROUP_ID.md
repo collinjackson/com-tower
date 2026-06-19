@@ -13,7 +13,7 @@ Based on Signal's design, group IDs are not easily accessible from Signal Deskto
 
 2. **Extract the group ID:**
    ```bash
-   ./extract-group-id-from-link.sh "https://signal.group/#CjQKICLkMKbor17qZpL-qxyeZWwqxSAZk3fNNwwMMLcvhwi2EhBszH85V-3MGzYVnzSuB67W"
+   ./scripts/extract-group-id-from-link.sh "https://signal.group/#CjQKICLkMKbor17qZpL-qxyeZWwqxSAZk3fNNwwMMLcvhwi2EhBszH85V-3MGzYVnzSuB67W"
    ```
 
    The group ID will be the base64 part after the `#` in the URL.
