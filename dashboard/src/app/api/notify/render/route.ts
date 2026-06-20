@@ -301,7 +301,7 @@ export async function POST(req: NextRequest) {
           ? `BATTLEFIELD CONTEXT (inspiration ONLY — do NOT state HP numbers, coordinates, or name terrain types/unit types outright; evoke the situation indirectly, e.g. "wedged in the rocks", "sitting ducks out here", "patched up and twitchy"):\n` +
             `${unit.hpChange === 'hurt' ? '- You just took a beating this round.\n' : unit.hpChange === 'healed' ? '- You just got patched up this round.\n' : ''}` +
             `${unit.surroundings ? `- You are ${unit.surroundings}\n` : ''}` +
-            `${unit.map ? `- Local map (X = you, u = your side, E = enemy):\n${unit.map}\n` : ''}`
+            `${unit.map ? `- Local map — X just MARKS YOUR POSITION (it is NOT your name/callsign), u = your side, E = enemy:\n${unit.map}\n` : ''}`
           : '';
         const wantsLang = !!language && !/^(english|en)$/i.test(language);
         const langLine = wantsLang
