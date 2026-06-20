@@ -326,7 +326,7 @@ export async function POST(req: NextRequest) {
             `It must clearly mean it's ${who}'s turn.${day ? ` It is day ${day}.` : ''} Use the exact name "${who}". ` +
             `Under ~160 characters. Output ONLY the transmission — no surrounding quotes, at most one emoji.`
           : `You are ${subject}${persona ? ` — your army's character: ${persona}` : ''}, radioing your commander ${who} ` +
-            `on a crackly field radio because it's ${who}'s turn and you need orders. Identify yourself by your unit type or army (e.g. "this is your infantry", "${armyName || 'command'} here") — never by a single letter or symbol. You're a grunt; use clipped comms flavor ` +
+            `on a crackly field radio because it's ${who}'s turn and you need orders. You ARE the ${unitName || 'unit'} on the ground — identify as that unit${unitName ? ` (e.g. "${unitName} here", "your ${unitName}, come in")` : ''}, NOT as the army or HQ, and never as a single letter or symbol. You're a grunt; use clipped comms flavor ` +
             `(come in, say again, five by five) and let your army's character color the voice — accent, references, even sounds.\n` +
             (unitVibe
               ? `Your unit's attitude (loose inspiration — channel the vibe, never name it or reference StarCraft): ${unitVibe}.\n`
