@@ -305,6 +305,17 @@ type AwbwUnit = {
   lowFuel: boolean;
   lowAmmo: boolean;
   terrainTile?: string; // AWBW terrain/aw1 tile filename the unit stands on (for the sprite backdrop)
+  id?: string; // AWBW units_id (stable across turns, for HP-change tracking)
+  x?: number;
+  y?: number;
+  terrainName?: string; // human terrain/building name the unit stands on (e.g. Mountain, City)
+};
+// One battlefield tile/unit snapshot, for the ASCII map + adjacency context.
+type Battlefield = {
+  width: number;
+  height: number;
+  terrainName: Record<string, string>; // "x,y" -> terrain or building name
+  units: Array<{ x: number; y: number; code?: string; name: string; hp: number; playerId: string }>;
 };
 
 // AWBW country code -> lowercase army name used in building tile filenames (e.g. orangestarhq.gif).
@@ -325,6 +336,62 @@ const BASE_TILE: Record<string, string> = {
   Plain: 'plain', Mountain: 'mountain', Sea: 'sea', Reef: 'sea', Shoal: 'sea',
   Wood: 'plain', Road: 'plain', Bridge: 'plain', River: 'plain',
 };
+// terrain_name -> single ASCII char for the battlefield map.
+const TERRAIN_CHAR: Record<string, string> = {
+  Plain: '.', Wood: 'T', Mountain: '^', Road: '-', Bridge: '=', River: 'r',
+  Sea: '~', Shoal: '_', Reef: 'o', Pipe: '#', 'Pipe Seam': '+',
+};
+const BUILDING_CHAR: Record<string, string> = {
+  Headquarters: 'H', HQ: 'H', City: 'c', Base: 'b', Factory: 'b',
+  Airport: 'a', Port: 'p', Seaport: 'p',
+  'Com Tower': 't', 'Comm Tower': 't', 'Communications Tower': 't',
+  Lab: 'l', Laboratory: 'l', 'Missile Silo': 'i',
+};
+
+// Render the battlefield as ASCII: terrain chars, units overlaid (your other
+// units lowercase 'u', enemies 'E'), and an 'X' "you are here" on the featured
+// unit. Windowed to a manageable box around the featured unit for big maps.
+function renderMapAscii(bf: Battlefield, fx: number, fy: number): string {
+  const RAD = 6; // 13x13 window keeps tokens bounded and centers on the unit
+  const x0 = Math.max(0, Math.min(fx - RAD, bf.width - (RAD * 2 + 1)));
+  const y0 = Math.max(0, Math.min(fy - RAD, bf.height - (RAD * 2 + 1)));
+  const x1 = Math.min(bf.width - 1, x0 + RAD * 2);
+  const y1 = Math.min(bf.height - 1, y0 + RAD * 2);
+  const unitAt = new Map<string, { code?: string; playerId: string }>();
+  for (const u of bf.units) unitAt.set(`${u.x},${u.y}`, u);
+  const featuredCode = unitAt.get(`${fx},${fy}`)?.playerId;
+  const lines: string[] = [];
+  for (let y = y0; y <= y1; y++) {
+    let row = '';
+    for (let x = x0; x <= x1; x++) {
+      if (x === fx && y === fy) { row += 'X'; continue; } // you are here
+      const u = unitAt.get(`${x},${y}`);
+      if (u) { row += u.playerId === featuredCode ? 'u' : 'E'; continue; }
+      const name = bf.terrainName[`${x},${y}`];
+      row += (name && (BUILDING_CHAR[name] || TERRAIN_CHAR[name])) || '.';
+    }
+    lines.push(row);
+  }
+  return lines.join('\n');
+}
+
+// Plain-language read of the featured unit's tile and its 4 neighbors (terrain +
+// whether a friendly/enemy unit sits there) — for subtle situational flavor.
+function describeSurroundings(bf: Battlefield, fx: number, fy: number, ownCode?: string): string {
+  const unitAt = new Map<string, { code?: string; playerId: string }>();
+  for (const u of bf.units) unitAt.set(`${u.x},${u.y}`, u);
+  const here = bf.terrainName[`${fx},${fy}`] || 'open ground';
+  const dirs: Array<[string, number, number]> = [['north', 0, -1], ['east', 1, 0], ['south', 0, 1], ['west', -1, 0]];
+  const neigh = dirs.map(([d, dx, dy]) => {
+    const k = `${fx + dx},${fy + dy}`;
+    if (fx + dx < 0 || fy + dy < 0 || fx + dx >= bf.width || fy + dy >= bf.height) return `${d}: edge of the map`;
+    const t = bf.terrainName[k] || 'open ground';
+    const u = unitAt.get(k);
+    const occ = u ? (ownCode && u.code === ownCode ? ' (friendly unit)' : ' (ENEMY unit!)') : '';
+    return `${d}: ${t}${occ}`;
+  });
+  return `standing on ${here}. Adjacent — ${neigh.join('; ')}.`;
+}
 
 /** Resolve the current player from the game page: username, army, and their REAL living units.
  *  AWBW exposes `currentTurn = <players_id>` and a `unitsInfo = {...}` map of placed units
@@ -336,6 +403,7 @@ async function resolveCurrentTurn(gameId: string): Promise<
       countryName?: string;
       co?: { name?: string; imageUrl?: string };
       units: AwbwUnit[];
+      battlefield?: Battlefield;
     }
   | undefined
 > {
@@ -401,6 +469,7 @@ async function resolveCurrentTurn(gameId: string): Promise<
 
     // The current player's actual living units (grounds the unit pick + voice in reality).
     let units: AwbwUnit[] = [];
+    let battlefield: Battlefield | undefined;
     const um = html.match(/unitsInfo\s*=\s*(\{[^;]*\})\s*;/);
     if (um) {
       try {
@@ -424,9 +493,15 @@ async function resolveCurrentTurn(gameId: string): Promise<
           const tn = terrainByXY.get(`${x},${y}`);
           return (tn && BASE_TILE[tn]) || 'plain';
         };
-        units = Object.values(obj)
-          .filter((u) => String(u.units_players_id) === curId && Number(u.units_hit_points) > 0)
-          .map((u) => {
+        // Human terrain/building name at a tile (building wins), for the map + adjacency.
+        const nameAt = (x: number, y: number): string => {
+          const b = buildingsByXY[String(x)]?.[String(y)];
+          if (b?.terrain_name) return String(b.terrain_name);
+          return terrainByXY.get(`${x},${y}`) || 'Plain';
+        };
+        units = Object.entries(obj)
+          .filter(([, u]) => String(u.units_players_id) === curId && Number(u.units_hit_points) > 0)
+          .map(([id, u]) => {
             const name = String(u.units_name || '');
             const fuel = Number(u.units_fuel);
             const ammo = Number(u.units_ammo);
@@ -438,21 +513,53 @@ async function resolveCurrentTurn(gameId: string): Promise<
               (fuel <= Math.ceil(max.fuel * 0.2) || (fuelPerTurn > 0 && fuel <= fuelPerTurn * 2));
             // Low ammo: only for units that carry ammo, at/under ~1/3 of max.
             const lowAmmo = max.ammo > 0 && ammo <= Math.max(1, Math.floor(max.ammo / 3));
+            const x = Number(u.units_x);
+            const y = Number(u.units_y);
             return {
               name,
               code: u.countries_code || undefined,
               hp: Number(u.units_hit_points),
               lowFuel,
               lowAmmo,
-              terrainTile: tileAt(Number(u.units_x), Number(u.units_y)),
+              terrainTile: tileAt(x, y),
+              id,
+              x,
+              y,
+              terrainName: nameAt(x, y),
             };
           })
           .filter((u) => u.name);
+
+        // Battlefield snapshot (ALL living units + terrain/building names + dims) for the ASCII map.
+        let maxX = 0, maxY = 0;
+        for (const k of terrainByXY.keys()) {
+          const [sx, sy] = k.split(',').map(Number);
+          if (sx > maxX) maxX = sx;
+          if (sy > maxY) maxY = sy;
+        }
+        const terrainName: Record<string, string> = {};
+        for (const [k, v] of terrainByXY) terrainName[k] = v;
+        for (const xs of Object.keys(buildingsByXY))
+          for (const ys of Object.keys(buildingsByXY[xs])) {
+            const tn = buildingsByXY[xs][ys]?.terrain_name;
+            if (tn) terrainName[`${xs},${ys}`] = String(tn);
+          }
+        const allUnits = Object.values(obj)
+          .filter((u) => Number(u.units_hit_points) > 0)
+          .map((u) => ({
+            x: Number(u.units_x),
+            y: Number(u.units_y),
+            code: u.countries_code || undefined,
+            name: String(u.units_name || ''),
+            hp: Number(u.units_hit_points),
+            playerId: String(u.units_players_id),
+          }));
+        battlefield = { width: maxX + 1, height: maxY + 1, terrainName, units: allUnits };
       } catch (e) {
         console.warn('unitsInfo parse failed', e);
       }
     }
-    return { username, countryCode, countryName, co, units };
+    return { username, countryCode, countryName, co, units, battlefield };
   } catch (err) {
     console.error('resolveCurrentTurn failed', err);
     return undefined;
@@ -469,7 +576,17 @@ async function buildMessage(
   meta: NextTurnMeta,
   recentChat?: Array<{ name?: string; text: string }>,
   army?: { code?: string; name?: string },
-  unit?: { name: string; hp: number; lowFuel: boolean; lowAmmo: boolean; terrainTile?: string },
+  unit?: {
+    name: string;
+    hp: number;
+    lowFuel: boolean;
+    lowAmmo: boolean;
+    terrainTile?: string;
+    terrainName?: string;
+    hpChange?: 'hurt' | 'healed';
+    surroundings?: string;
+    map?: string;
+  },
   co?: { name?: string; imageUrl?: string }
 ): Promise<RenderPayload> {
   const link = gameLink(gameId);
@@ -1248,6 +1365,7 @@ type GroupGame = {
   funEnabled?: boolean;
   scope?: 'mine' | 'all';
   lastTurn?: { day?: number | null; awbwUsername?: string };
+  lastUnitHp?: Record<string, number>; // units_id -> hp at last sighting, for HP-change detection
 };
 type CmdCtx = {
   groupId: string;
@@ -1890,13 +2008,27 @@ async function onGroupGameNextTurn(
   // Feature either a real living unit or the player's CO. With units: 50/50.
   // Without units (early game): always the CO. Grounds the voice + sprite in reality.
   const liveUnits = turn?.units || [];
+  const lastHp = gg.lastUnitHp || {};
+  // HP change since this player's last turn (damage taken in the round, or healing).
+  const withDelta = liveUnits.map((u) => ({
+    u,
+    delta: u.id && lastHp[u.id] !== undefined ? u.hp - lastHp[u.id] : 0,
+  }));
   const featureCo = liveUnits.length === 0 || Math.random() < 0.5;
-  const chosenUnit = !featureCo && liveUnits.length
-    ? liveUnits[Math.floor(Math.random() * liveUnits.length)]
-    : undefined;
+  let chosenUnit: AwbwUnit | undefined;
+  if (!featureCo && liveUnits.length) {
+    // Prefer a unit that just took damage; else one that was healed; else any.
+    const damaged = withDelta.filter((w) => w.delta < 0);
+    const healed = withDelta.filter((w) => w.delta > 0);
+    const pool = damaged.length ? damaged : healed.length ? healed : withDelta;
+    chosenUnit = pool[Math.floor(Math.random() * pool.length)].u;
+  }
+  const chosenDelta = chosenUnit ? withDelta.find((w) => w.u === chosenUnit)?.delta ?? 0 : 0;
   const co = featureCo ? turn?.co : undefined;
   const armyCode = chosenUnit?.code || turn?.countryCode;
   const army = armyCode ? { code: armyCode } : undefined;
+  const bf = turn?.battlefield;
+  const hasPos = !!chosenUnit && typeof chosenUnit.x === 'number' && typeof chosenUnit.y === 'number';
   const unitInfo = chosenUnit
     ? {
         name: chosenUnit.name,
@@ -1904,6 +2036,10 @@ async function onGroupGameNextTurn(
         lowFuel: chosenUnit.lowFuel,
         lowAmmo: chosenUnit.lowAmmo,
         terrainTile: chosenUnit.terrainTile,
+        terrainName: chosenUnit.terrainName,
+        hpChange: chosenDelta < 0 ? ('hurt' as const) : chosenDelta > 0 ? ('healed' as const) : undefined,
+        surroundings: bf && hasPos ? describeSurroundings(bf, chosenUnit.x!, chosenUnit.y!, chosenUnit.code) : undefined,
+        map: bf && hasPos ? renderMapAscii(bf, chosenUnit.x!, chosenUnit.y!) : undefined,
       }
     : undefined;
   if (!currentPlayer) {
@@ -1979,10 +2115,18 @@ async function onGroupGameNextTurn(
       }
     : undefined;
 
+  // Snapshot the current player's unit HP (merged) so next time we can detect damage/healing.
+  const newUnitHp: Record<string, number> = { ...(gg.lastUnitHp || {}) };
+  for (const u of liveUnits) if (u.id) newUnitHp[u.id] = u.hp;
+
   try {
     await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined, attachment);
     await ggRef(groupId)
-      .update({ lastTurn: { day: meta.day ?? null, awbwUsername: currentPlayer }, updatedAt: FieldValue.serverTimestamp() })
+      .update({
+        lastTurn: { day: meta.day ?? null, awbwUsername: currentPlayer },
+        lastUnitHp: newUnitHp,
+        updatedAt: FieldValue.serverTimestamp(),
+      })
       .catch(() => {});
     console.log(
       `[gg] notified group ${groupId.substring(0, 16)} turn=${currentPlayer} mentioned=${mentions.length > 0}`
