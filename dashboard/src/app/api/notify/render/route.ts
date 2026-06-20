@@ -298,10 +298,10 @@ export async function POST(req: NextRequest) {
         // Battlefield context (unit voice only): the ASCII map + surroundings + HP swing.
         // STRONGLY guarded — it's inspiration, not script; the output must stay subtle.
         const battleCtx = unit.map || unit.surroundings
-          ? `BATTLEFIELD CONTEXT (inspiration ONLY — do NOT state HP numbers, coordinates, or name terrain types/unit types outright; evoke the situation indirectly, e.g. "wedged in the rocks", "sitting ducks out here", "patched up and twitchy"):\n` +
+          ? `BATTLEFIELD CONTEXT (inspiration ONLY — evoke the situation indirectly; do NOT state HP numbers or coordinates, and NEVER write the literal terrain words you see here (plain, woods, mountain, river, road, bridge, sea, shoal, reef, city, base, HQ, airport, port, lab, silo) — imply terrain through imagery instead, e.g. "wedged in the rocks", "knee-deep in the drink", "sitting ducks in the open", "patched up and twitchy"):\n` +
             `${unit.hpChange === 'hurt' ? '- You just took a beating this round.\n' : unit.hpChange === 'healed' ? '- You just got patched up this round.\n' : ''}` +
             `${unit.surroundings ? `- You are ${unit.surroundings}\n` : ''}` +
-            `${unit.map ? `- Local map — X just MARKS YOUR POSITION (it is NOT your name/callsign), u = your side, E = enemy:\n${unit.map}\n` : ''}`
+            `${unit.map ? `- Local map — the '@' is just a pin for WHERE YOU ARE (never your name/callsign), u = your side, E = enemy:\n${unit.map}\n` : ''}`
           : '';
         const wantsLang = !!language && !/^(english|en)$/i.test(language);
         const langLine = wantsLang
