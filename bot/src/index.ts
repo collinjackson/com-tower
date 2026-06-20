@@ -375,22 +375,35 @@ function renderMapAscii(bf: Battlefield, fx: number, fy: number): string {
   return lines.join('\n');
 }
 
-// Plain-language read of the featured unit's tile and its 4 neighbors (terrain +
-// whether a friendly/enemy unit sits there) — for subtle situational flavor.
+// Evocative terrain hints — we deliberately DON'T pass AWBW's literal terrain
+// words to the LLM (it parrots them); these nudge imagery while staying subtle.
+const TERRAIN_HINT: Record<string, string> = {
+  Plain: 'open ground', Wood: 'tree cover', Mountain: 'high rocky ground', Road: 'a road',
+  Bridge: 'a bridge', River: 'a river crossing', Sea: 'open water', Shoal: 'the shallows', Reef: 'a reef',
+  Pipe: 'a pipeline', 'Pipe Seam': 'a pipe seam',
+  Headquarters: 'the home base', HQ: 'the home base', City: 'a town', Base: 'a factory yard', Factory: 'a factory yard',
+  Airport: 'an airfield', Port: 'a harbor', Seaport: 'a harbor',
+  'Com Tower': 'a comms tower', 'Comm Tower': 'a comms tower', 'Communications Tower': 'a comms tower',
+  Lab: 'a lab', Laboratory: 'a lab', 'Missile Silo': 'a missile silo',
+};
+const terrainHint = (name?: string): string => (name && TERRAIN_HINT[name]) || 'open ground';
+
+// Plain-language read of the featured unit's tile and its 4 neighbors (evocative
+// terrain hint + whether a friendly/enemy unit sits there) — for subtle flavor.
 function describeSurroundings(bf: Battlefield, fx: number, fy: number, ownCode?: string): string {
   const unitAt = new Map<string, { code?: string; playerId: string }>();
   for (const u of bf.units) unitAt.set(`${u.x},${u.y}`, u);
-  const here = bf.terrainName[`${fx},${fy}`] || 'open ground';
+  const here = terrainHint(bf.terrainName[`${fx},${fy}`]);
   const dirs: Array<[string, number, number]> = [['north', 0, -1], ['east', 1, 0], ['south', 0, 1], ['west', -1, 0]];
   const neigh = dirs.map(([d, dx, dy]) => {
     const k = `${fx + dx},${fy + dy}`;
     if (fx + dx < 0 || fy + dy < 0 || fx + dx >= bf.width || fy + dy >= bf.height) return `${d}: edge of the map`;
-    const t = bf.terrainName[k] || 'open ground';
+    const t = terrainHint(bf.terrainName[k]);
     const u = unitAt.get(k);
     const occ = u ? (ownCode && u.code === ownCode ? ' (friendly unit)' : ' (ENEMY unit!)') : '';
     return `${d}: ${t}${occ}`;
   });
-  return `standing on ${here}. Adjacent — ${neigh.join('; ')}.`;
+  return `on ${here}. Adjacent — ${neigh.join('; ')}.`;
 }
 
 /** Resolve the current player from the game page: username, army, and their REAL living units.
