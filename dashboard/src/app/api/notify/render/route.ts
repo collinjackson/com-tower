@@ -301,7 +301,7 @@ export async function POST(req: NextRequest) {
           ? `BATTLEFIELD CONTEXT (inspiration ONLY — evoke the situation indirectly; do NOT state HP numbers or coordinates, and NEVER write the literal terrain words you see here (plain, woods, mountain, river, road, bridge, sea, shoal, reef, city, base, HQ, airport, port, lab, silo) — imply terrain through imagery instead, e.g. "wedged in the rocks", "knee-deep in the drink", "sitting ducks in the open", "patched up and twitchy"):\n` +
             `${unit.hpChange === 'hurt' ? '- You just took a beating this round.\n' : unit.hpChange === 'healed' ? '- You just got patched up this round.\n' : ''}` +
             `${unit.surroundings ? `- You are ${unit.surroundings}\n` : ''}` +
-            `${unit.map ? `- Local map — the '@' is just a pin for WHERE YOU ARE (never your name/callsign), u = your side, E = enemy:\n${unit.map}\n` : ''}`
+            `${unit.map ? `- Local map for YOUR sense of position — '@' is your spot, u = allies, E = enemies. These are map notation ONLY: NEVER say, spell, or use @/u/E as a name or callsign. Refer to yourself as your unit or army.\n${unit.map}\n` : ''}`
           : '';
         const wantsLang = !!language && !/^(english|en)$/i.test(language);
         const langLine = wantsLang
@@ -326,7 +326,7 @@ export async function POST(req: NextRequest) {
             `It must clearly mean it's ${who}'s turn.${day ? ` It is day ${day}.` : ''} Use the exact name "${who}". ` +
             `Under ~160 characters. Output ONLY the transmission — no surrounding quotes, at most one emoji.`
           : `You are ${subject}${persona ? ` — your army's character: ${persona}` : ''}, radioing your commander ${who} ` +
-            `on a crackly field radio because it's ${who}'s turn and you need orders. You're a grunt; use clipped comms flavor ` +
+            `on a crackly field radio because it's ${who}'s turn and you need orders. Identify yourself by your unit type or army (e.g. "this is your infantry", "${armyName || 'command'} here") — never by a single letter or symbol. You're a grunt; use clipped comms flavor ` +
             `(come in, say again, five by five) and let your army's character color the voice — accent, references, even sounds.\n` +
             (unitVibe
               ? `Your unit's attitude (loose inspiration — channel the vibe, never name it or reference StarCraft): ${unitVibe}.\n`
