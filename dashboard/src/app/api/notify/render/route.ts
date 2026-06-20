@@ -216,6 +216,10 @@ export async function POST(req: NextRequest) {
       lowFuel?: boolean;
       lowAmmo?: boolean;
       terrainTile?: string;
+      terrainName?: string;
+      hpChange?: 'hurt' | 'healed';
+      surroundings?: string;
+      map?: string;
     };
     // When the player has no units to feature (or the worker rolled CO this turn),
     // we feature their commanding officer instead — the active CO in tag games.
@@ -291,6 +295,14 @@ export async function POST(req: NextRequest) {
           `If your format is a joke or pun, it MUST work as one — a real setup and a punchline that genuinely lands (the wordplay has to actually make sense); a flat non-sequitur is worse than a straight call.\n`;
         // Optional language/style. Guarded: only well-known real or novelty languages,
         // and never a mocking/offensive impression.
+        // Battlefield context (unit voice only): the ASCII map + surroundings + HP swing.
+        // STRONGLY guarded — it's inspiration, not script; the output must stay subtle.
+        const battleCtx = unit.map || unit.surroundings
+          ? `BATTLEFIELD CONTEXT (inspiration ONLY — do NOT state HP numbers, coordinates, or name terrain types/unit types outright; evoke the situation indirectly, e.g. "wedged in the rocks", "sitting ducks out here", "patched up and twitchy"):\n` +
+            `${unit.hpChange === 'hurt' ? '- You just took a beating this round.\n' : unit.hpChange === 'healed' ? '- You just got patched up this round.\n' : ''}` +
+            `${unit.surroundings ? `- You are ${unit.surroundings}\n` : ''}` +
+            `${unit.map ? `- Local map (X = you, u = your side, E = enemy):\n${unit.map}\n` : ''}`
+          : '';
         const wantsLang = !!language && !/^(english|en)$/i.test(language);
         const langLine = wantsLang
           ? `LANGUAGE: write the ENTIRE transmission in ${language} (keep the name "${who}" verbatim and keep the meaning that it's their turn). Genuinely COMMIT to it — for novelty/fictional languages a recognizable flavored rendition is exactly right (Klingon: weave in real Klingon like "nuqneH"/"Qapla'"/"tlhIngan"; Swedish Chef: "bork bork" mock-Swedish; Yoda: object-subject-verb inversion; Pirate: "arr/ye/be"). Fall back to plain English ONLY if ${language} would come out as meaningless gibberish, or if it would be a mocking/offensive impression of a real ethnic group.\n`
@@ -319,6 +331,7 @@ export async function POST(req: NextRequest) {
             (unitVibe
               ? `Your unit's attitude (loose inspiration — channel the vibe, never name it or reference StarCraft): ${unitVibe}.\n`
               : '') +
+            battleCtx +
             `Radio word "over" ONLY signals you're done talking: use it at most once, at the very END, and it's optional — never mid-message.\n` +
             `Convey your MOOD through HOW you talk — never state it outright (don't say "bored", "restless", "antsy", "nothing to do") and never give exact numbers: you're ${mood}.${supplies ? ` You're also ${supplies} — gripe about it.` : ''} ` +
             `With no action yet, you fill the dead air — that's WHY you've got a joke or a rhyme — but let the bit speak for itself; don't explain that you're passing time or itching for orders.\n` +
