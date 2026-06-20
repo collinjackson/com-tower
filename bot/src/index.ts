@@ -349,8 +349,8 @@ const BUILDING_CHAR: Record<string, string> = {
 };
 
 // Render the battlefield as ASCII: terrain chars, units overlaid (your other
-// units lowercase 'u', enemies 'E'), and an 'X' "you are here" on the featured
-// unit. Windowed to a manageable box around the featured unit for big maps.
+// units lowercase 'u', enemies 'E'), and an '@' "you are here" pin on the
+// featured unit. Windowed to a manageable box around the unit for big maps.
 function renderMapAscii(bf: Battlefield, fx: number, fy: number): string {
   const RAD = 6; // 13x13 window keeps tokens bounded and centers on the unit
   const x0 = Math.max(0, Math.min(fx - RAD, bf.width - (RAD * 2 + 1)));
@@ -364,7 +364,7 @@ function renderMapAscii(bf: Battlefield, fx: number, fy: number): string {
   for (let y = y0; y <= y1; y++) {
     let row = '';
     for (let x = x0; x <= x1; x++) {
-      if (x === fx && y === fy) { row += 'X'; continue; } // you are here
+      if (x === fx && y === fy) { row += '@'; continue; } // you are here
       const u = unitAt.get(`${x},${y}`);
       if (u) { row += u.playerId === featuredCode ? 'u' : 'E'; continue; }
       const name = bf.terrainName[`${x},${y}`];
