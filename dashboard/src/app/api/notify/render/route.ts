@@ -217,13 +217,14 @@ export async function POST(req: NextRequest) {
       lowAmmo?: boolean;
       terrainTile?: string;
       terrainName?: string;
+      count?: number;
       hpChange?: 'hurt' | 'healed';
       surroundings?: string;
       map?: string;
     };
-    // When the player has no units to feature (or the worker rolled CO this turn),
-    // we feature their commanding officer instead — the active CO in tag games.
-    const co = (body.co || {}) as { name?: string; imageUrl?: string };
+    // We feature the CO when there are no units, or when a CO power is charged
+    // (the active CO in tag games). COs issue orders; they don't request them.
+    const co = (body.co || {}) as { name?: string; imageUrl?: string; power?: 'SCOP' | 'COP' };
     // Optional per-player language/style for the caption (best effort; guarded below).
     const language = typeof body.language === 'string' ? body.language.trim().slice(0, 40) : '';
 
@@ -289,7 +290,12 @@ export async function POST(req: NextRequest) {
         // rolled CO this turn). The CO themselves takes the radio.
         const coName = (co.name || '').trim();
         const coLore = CO_LORE[coName.toLowerCase()] || '';
+        const coPower = co.power; // 'SCOP' | 'COP' | undefined — a charged power to crow about
         const featuringCo = !unitFile && !!(coName || co.imageUrl);
+        // Unit callsign: a made-up number ≤ how many of that type are fielded.
+        const unitCount = typeof unit.count === 'number' ? unit.count : 0;
+        const callNum = unitCount >= 2 ? 1 + Math.floor(Math.random() * unitCount) : 0;
+        const callsign = callNum >= 1 ? `${unitName} ${callNum}` : unitName;
         // Joke craft applies to both voices — a flagged failure mode (limp non-jokes).
         const jokeCraft =
           `If your format is a joke or pun, it MUST work as one — a real setup and a punchline that genuinely lands (the wordplay has to actually make sense); a flat non-sequitur is worse than a straight call.\n`;
@@ -301,7 +307,7 @@ export async function POST(req: NextRequest) {
           ? `BATTLEFIELD CONTEXT (inspiration ONLY — evoke the situation indirectly; do NOT state HP numbers or coordinates, and NEVER write the literal terrain words you see here (plain, woods, mountain, river, road, bridge, sea, shoal, reef, city, base, HQ, airport, port, lab, silo) — imply terrain through imagery instead, e.g. "wedged in the rocks", "knee-deep in the drink", "sitting ducks in the open", "patched up and twitchy"):\n` +
             `${unit.hpChange === 'hurt' ? '- You just took a beating this round.\n' : unit.hpChange === 'healed' ? '- You just got patched up this round.\n' : ''}` +
             `${unit.surroundings ? `- You are ${unit.surroundings}\n` : ''}` +
-            `${unit.map ? `- Local map for YOUR sense of position — '@' is your spot, u = allies, E = enemies. These are map notation ONLY: NEVER say, spell, or use @/u/E as a name or callsign. Refer to yourself as your unit or army.\n${unit.map}\n` : ''}`
+            `${unit.map ? `- Local map for YOUR sense of position — '@' is your spot, u = allies, E = enemies. These are map notation ONLY: NEVER say, spell, or use @/u/E as a name or callsign — you sign on as "${callsign}".\n${unit.map}\n` : ''}`
           : '';
         const wantsLang = !!language && !/^(english|en)$/i.test(language);
         const langLine = wantsLang
@@ -313,20 +319,21 @@ export async function POST(req: NextRequest) {
           : `${armyName ? armyName + ' ' : 'field '}command`;
 
         const genPrompt = featuringCo
-          ? `You are ${coName || 'the commanding officer'}, the CO (commanding officer) of ${armyName || 'this'} army.${coLore ? ` Your character: ${coLore}. Channel it hard — let it drive your speech style, quirks, and attitude.` : ` This is an Advance Wars CO; if you know their personality, channel it, otherwise play a vivid, distinct commander.`} ` +
-            `It's ${who}'s turn and you have NO troops on the field yet, so YOU grab the radio to rally your commander ${who} and get the war moving.\n` +
-            `Use clipped field-radio comms (come in, say again, five by five).\n` +
-            `Radio word "over" ONLY signals you're done: at most once, at the very END, optional — never mid-message.\n` +
-            `You're itching to mobilize, but never say so outright — let it show through the bit.\n` +
+          ? `You are ${coName || 'the commanding officer'}, the CO of ${armyName || 'this'} army.${coLore ? ` Your character: ${coLore}. Channel it hard — let it drive your tone, quirks, and attitude.` : ` This is an Advance Wars CO; channel their personality if you know it, otherwise play a vivid, distinct commander.`} ` +
+            `It is ${who}'s turn to move. You COMMAND — you ISSUE the order to advance and rally the troops; you do NOT ask ${who} for orders or permission. Speak with authority.\n` +
+            (coPower
+              ? `BIG MOMENT: your ${coPower === 'SCOP' ? 'Super CO Power' : 'CO Power'} is fully charged and ready to unleash — let that fuel the message (menace, hype, a flourish), but don't say game terms like "SCOP" or "charge meter" outright.\n`
+              : '') +
+            `Skip radio-net jargon — NO "come in", "say again", "five by five", or "over". You're the commander, not a grunt sharing a net.\n` +
             `Pick a FRESH angle; don't lean on one catchphrase.\n` +
             jokeCraft +
             langLine +
-            `Format for THIS transmission: ${style}. (If you can't pull it off well, a sharp call is fine.)\n` +
+            `Format for THIS transmission: ${style}. (If you can't pull it off well, a commanding one-liner is fine.)\n` +
             `${chatBlock}\n` +
-            `It must clearly mean it's ${who}'s turn.${day ? ` It is day ${day}.` : ''} Use the exact name "${who}". ` +
+            `It must clearly signal it's ${who}'s turn to move (you're commanding them to act).${day ? ` It is day ${day}.` : ''} Use the exact name "${who}". ` +
             `Under ~160 characters. Output ONLY the transmission — no surrounding quotes, at most one emoji.`
           : `You are ${subject}${persona ? ` — your army's character: ${persona}` : ''}, radioing your commander ${who} ` +
-            `on a crackly field radio because it's ${who}'s turn and you need orders. You ARE the ${unitName || 'unit'} on the ground — identify as that unit${unitName ? ` (e.g. "${unitName} here", "your ${unitName}, come in")` : ''}, NOT as the army or HQ, and never as a single letter or symbol. You're a grunt; use clipped comms flavor ` +
+            `on a crackly field radio because it's ${who}'s turn and you need orders. You ARE the ${unitName || 'unit'} on the ground — sign on as "${callsign}"${callNum >= 1 ? ` (you're one of ${unitCount} ${unitName}s, so "${callNum}" is your callsign number)` : ''}, NOT as the army or HQ, and never as a single letter or symbol. You're a grunt; use clipped comms flavor ` +
             `(come in, say again, five by five) and let your army's character color the voice — accent, references, even sounds.\n` +
             (unitVibe
               ? `Your unit's attitude (loose inspiration — channel the vibe, never name it or reference StarCraft): ${unitVibe}.\n`

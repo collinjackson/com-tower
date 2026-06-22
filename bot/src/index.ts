@@ -414,7 +414,7 @@ async function resolveCurrentTurn(gameId: string): Promise<
       username?: string;
       countryCode?: string;
       countryName?: string;
-      co?: { name?: string; imageUrl?: string };
+      co?: { name?: string; imageUrl?: string; power?: 'SCOP' | 'COP' };
       units: AwbwUnit[];
       battlefield?: Battlefield;
     }
@@ -434,14 +434,27 @@ async function resolveCurrentTurn(gameId: string): Promise<
     const countryCode = after.match(/"countries_code"\s*:\s*"([a-z]{2,3})"/i)?.[1];
     const countryName = after.match(/"countries_name"\s*:\s*"([^"]+)"/)?.[1];
     // Current player's CO (tag-aware: AWBW reports the ACTIVE CO in the current
-    // player's block during their turn). co_image_path has JSON-escaped slashes.
-    const coWindow = idMatch ? html.slice(idMatch.index, idMatch.index + 900) : '';
+    // player's block during their turn). Bound the window to THIS player's object
+    // (up to the next players_id) so power values aren't read from another player.
+    let coWindow = '';
+    if (idMatch) {
+      const rest = html.slice(idMatch.index + 12);
+      const nextId = rest.search(/"players_id"\s*:\s*\d/);
+      coWindow = html.slice(idMatch.index, idMatch.index + 12 + (nextId >= 0 ? nextId : 3000));
+    }
     const coName = coWindow.match(/"co_name"\s*:\s*"([^"]+)"/)?.[1];
-    const coPath = coWindow.match(/"co_image_path"\s*:\s*"([^"]+)"/)?.[1];
+    const coPath = coWindow.match(/"co_image_path"\s*:\s*"([^"]+)"/)?.[1]; // JSON-escaped slashes
     const coImageUrl = coPath
       ? `https://awbw.amarriner.com/${coPath.replace(/\\\//g, '/').replace(/^\//, '')}`
       : undefined;
-    const co = coName || coImageUrl ? { name: coName, imageUrl: coImageUrl } : undefined;
+    // CO power charge: is a CO Power / Super CO Power ready to fire?
+    const numF = (re: RegExp): number => { const m = coWindow.match(re); return m ? Number(m[1]) : 0; };
+    const coPow = numF(/"players_co_power"\s*:\s*"?(\d+)/);
+    const coMaxP = numF(/"players_co_max_power"\s*:\s*"?(\d+)/) || numF(/"co_max_power"\s*:\s*"?(\d+)/);
+    const coMaxS = numF(/"players_co_max_spower"\s*:\s*"?(\d+)/) || numF(/"co_max_spower"\s*:\s*"?(\d+)/);
+    const power: 'SCOP' | 'COP' | undefined =
+      coMaxS > 0 && coPow >= coMaxS ? 'SCOP' : coMaxP > 0 && coPow >= coMaxP ? 'COP' : undefined;
+    const co = coName || coImageUrl ? { name: coName, imageUrl: coImageUrl, power } : undefined;
 
     // Per-unit-type max fuel/ammo, to decide if the game would show a low warning.
     const maxByType: Record<string, { fuel: number; ammo: number }> = {};
@@ -596,11 +609,12 @@ async function buildMessage(
     lowAmmo: boolean;
     terrainTile?: string;
     terrainName?: string;
+    count?: number;
     hpChange?: 'hurt' | 'healed';
     surroundings?: string;
     map?: string;
   },
-  co?: { name?: string; imageUrl?: string }
+  co?: { name?: string; imageUrl?: string; power?: 'SCOP' | 'COP' }
 ): Promise<RenderPayload> {
   const link = gameLink(gameId);
   const gameName = meta.gameName || `Game ${gameId}`;
@@ -638,7 +652,9 @@ async function buildMessage(
         }
         if (data?.text) {
           let text = data.text as string;
-          const nameChunk = gameName ? `(${gameName})` : '';
+          // Only append a REAL game name — never the "Game <id>" fallback, which
+          // is redundant with the game id already in the URL.
+          const nameChunk = meta.gameName ? `(${meta.gameName})` : '';
           if (!text.includes(link)) {
             text = `${text} ${nameChunk ? `${nameChunk} ` : ''}${link}`;
           } else if (nameChunk && !text.includes(nameChunk)) {
@@ -2018,8 +2034,9 @@ async function onGroupGameNextTurn(
     turn?.username ||
     (await scrapeCurrentPlayerName(gameId).catch(() => undefined)) ||
     meta.socketPlayer;
-  // Feature either a real living unit or the player's CO. With units: 50/50.
-  // Without units (early game): always the CO. Grounds the voice + sprite in reality.
+  // Feature a real living unit by default. Only feature the CO when there's a
+  // CO-related reason — a CO Power / Super CO Power is charged — or there are no
+  // units to feature (early game). COs command; they don't chatter for no reason.
   const liveUnits = turn?.units || [];
   const lastHp = gg.lastUnitHp || {};
   // HP change since this player's last turn (damage taken in the round, or healing).
@@ -2027,7 +2044,7 @@ async function onGroupGameNextTurn(
     u,
     delta: u.id && lastHp[u.id] !== undefined ? u.hp - lastHp[u.id] : 0,
   }));
-  const featureCo = liveUnits.length === 0 || Math.random() < 0.5;
+  const featureCo = liveUnits.length === 0 || !!turn?.co?.power;
   let chosenUnit: AwbwUnit | undefined;
   if (!featureCo && liveUnits.length) {
     // Prefer a unit that just took damage; else one that was healed; else any.
@@ -2042,6 +2059,9 @@ async function onGroupGameNextTurn(
   const army = armyCode ? { code: armyCode } : undefined;
   const bf = turn?.battlefield;
   const hasPos = !!chosenUnit && typeof chosenUnit.x === 'number' && typeof chosenUnit.y === 'number';
+  // How many of this exact unit type the player fields — so the unit can give
+  // itself a plausible callsign number (≤ that count).
+  const typeCount = chosenUnit ? liveUnits.filter((u) => u.name === chosenUnit!.name).length : 0;
   const unitInfo = chosenUnit
     ? {
         name: chosenUnit.name,
@@ -2050,6 +2070,7 @@ async function onGroupGameNextTurn(
         lowAmmo: chosenUnit.lowAmmo,
         terrainTile: chosenUnit.terrainTile,
         terrainName: chosenUnit.terrainName,
+        count: typeCount,
         hpChange: chosenDelta < 0 ? ('hurt' as const) : chosenDelta > 0 ? ('healed' as const) : undefined,
         surroundings: bf && hasPos ? describeSurroundings(bf, chosenUnit.x!, chosenUnit.y!, chosenUnit.code) : undefined,
         map: bf && hasPos ? renderMapAscii(bf, chosenUnit.x!, chosenUnit.y!) : undefined,
