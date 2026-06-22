@@ -217,7 +217,6 @@ export async function POST(req: NextRequest) {
       lowAmmo?: boolean;
       terrainTile?: string;
       terrainName?: string;
-      count?: number;
       hpChange?: 'hurt' | 'healed';
       surroundings?: string;
       map?: string;
@@ -292,10 +291,8 @@ export async function POST(req: NextRequest) {
         const coLore = CO_LORE[coName.toLowerCase()] || '';
         const coPower = co.power; // 'SCOP' | 'COP' | undefined — a charged power to crow about
         const featuringCo = !unitFile && !!(coName || co.imageUrl);
-        // Unit callsign: a made-up number ≤ how many of that type are fielded.
-        const unitCount = typeof unit.count === 'number' ? unit.count : 0;
-        const callNum = unitCount >= 2 ? 1 + Math.floor(Math.random() * unitCount) : 0;
-        const callsign = callNum >= 1 ? `${unitName} ${callNum}` : unitName;
+        // Unit callsign: just the unit type — no number (less confusing).
+        const callsign = unitName;
         // Joke craft applies to both voices — a flagged failure mode (limp non-jokes).
         const jokeCraft =
           `If your format is a joke or pun, it MUST work as one — a real setup and a punchline that genuinely lands (the wordplay has to actually make sense); a flat non-sequitur is worse than a straight call.\n`;
@@ -333,7 +330,7 @@ export async function POST(req: NextRequest) {
             `It must clearly signal it's ${who}'s turn to move (you're commanding them to act).${day ? ` It is day ${day}.` : ''} Use the exact name "${who}". ` +
             `Under ~160 characters. Output ONLY the transmission — no surrounding quotes, at most one emoji.`
           : `You are ${subject}${persona ? ` — your army's character: ${persona}` : ''}, radioing your commander ${who} ` +
-            `on a crackly field radio because it's ${who}'s turn and you need orders. You ARE the ${unitName || 'unit'} on the ground — sign on as "${callsign}"${callNum >= 1 ? ` (you're one of ${unitCount} ${unitName}s, so "${callNum}" is your callsign number)` : ''}, NOT as the army or HQ, and never as a single letter or symbol. You're a grunt; use clipped comms flavor ` +
+            `on a crackly field radio because it's ${who}'s turn and you need orders. You ARE the ${unitName || 'unit'} on the ground — sign on as "${callsign}", NOT as the army or HQ, and never as a single letter or symbol. You're a grunt; use clipped comms flavor ` +
             `(come in, say again, five by five) and let your army's character color the voice — accent, references, even sounds.\n` +
             (unitVibe
               ? `Your unit's attitude (loose inspiration — channel the vibe, never name it or reference StarCraft): ${unitVibe}.\n`
@@ -348,7 +345,7 @@ export async function POST(req: NextRequest) {
             langLine +
             `Format for THIS transmission: ${style}. (If you can't pull it off well, a sharp call is fine.)\n` +
             `${chatBlock}\n` +
-            `It must clearly mean it's ${who}'s turn.${day ? ` It is day ${day}.` : ''} Use the exact name "${who}". ` +
+            `It still has to land as "it's ${who}'s turn" — but don't pad it: when the bit is strong, the orders-request can shrink to a quick tag like "awaiting orders, over" or even just "${who}, over". The joke is the star; the sign-off can be tiny.${day ? ` It is day ${day}.` : ''} Use the exact name "${who}". ` +
             `Under ~160 characters. Output ONLY the transmission — no surrounding quotes, at most one emoji.`;
 
         const gen = await client.chat.completions.create({
