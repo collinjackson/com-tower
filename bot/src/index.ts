@@ -609,7 +609,6 @@ async function buildMessage(
     lowAmmo: boolean;
     terrainTile?: string;
     terrainName?: string;
-    count?: number;
     hpChange?: 'hurt' | 'healed';
     surroundings?: string;
     map?: string;
@@ -2059,9 +2058,6 @@ async function onGroupGameNextTurn(
   const army = armyCode ? { code: armyCode } : undefined;
   const bf = turn?.battlefield;
   const hasPos = !!chosenUnit && typeof chosenUnit.x === 'number' && typeof chosenUnit.y === 'number';
-  // How many of this exact unit type the player fields — so the unit can give
-  // itself a plausible callsign number (≤ that count).
-  const typeCount = chosenUnit ? liveUnits.filter((u) => u.name === chosenUnit!.name).length : 0;
   const unitInfo = chosenUnit
     ? {
         name: chosenUnit.name,
@@ -2070,7 +2066,6 @@ async function onGroupGameNextTurn(
         lowAmmo: chosenUnit.lowAmmo,
         terrainTile: chosenUnit.terrainTile,
         terrainName: chosenUnit.terrainName,
-        count: typeCount,
         hpChange: chosenDelta < 0 ? ('hurt' as const) : chosenDelta > 0 ? ('healed' as const) : undefined,
         surroundings: bf && hasPos ? describeSurroundings(bf, chosenUnit.x!, chosenUnit.y!, chosenUnit.code) : undefined,
         map: bf && hasPos ? renderMapAscii(bf, chosenUnit.x!, chosenUnit.y!) : undefined,
