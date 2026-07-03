@@ -487,13 +487,30 @@ export function BackgroundCanvas() {
         }
       }
 
-      const MAX_PITCH = 0.5;
-      const MAX_PITCH_EVADE = 0.75;
+      const MAX_PITCH = 0.6;
+      const MAX_PITCH_EVADE = 0.9;
       const MAX_SPEED_CRUISE = 2.0;
       const MAX_SPEED_CHASE = 2.9;
       const nowF = Date.now();
       for (let fi = 0; fi < fighters.length; fi++) {
         const f = fighters[fi];
+        // Always engage the NEAREST other plane, re-picked every frame — keeps everyone
+        // dogfighting and turning instead of droning off in a straight line.
+        {
+          let nearest = -1;
+          let nd2 = Infinity;
+          for (let fj = 0; fj < fighters.length; fj++) {
+            if (fj === fi) continue;
+            const ndx = fighters[fj].x - f.x;
+            const ndy = fighters[fj].y - f.y;
+            const d2 = ndx * ndx + ndy * ndy;
+            if (d2 < nd2) { nd2 = d2; nearest = fj; }
+          }
+          if (nearest >= 0) f.targetIndex = nearest;
+        }
+        // Confine the fight to a band clear of the top edge and the ground.
+        const CEILING = Math.max(72, height * 0.16);
+        const FLOOR = getTerrainY(frontTerrain.points, f.x, width) + craterOffsetAt(f.x) - 30;
         const target = fighters[f.targetIndex];
         const dx = target.x - f.x;
         const dy = target.y - f.y;
@@ -505,7 +522,11 @@ export function BackgroundCanvas() {
         const behindY = target.y - Math.sin(target.angle) * CHASE_KEEP_DISTANCE;
         const dxAim = isChaser ? behindX - f.x : dx;
         const dyAim = isChaser ? behindY - f.y : dy;
-        const desiredAngle = Math.atan2(dyAim || dy, dxAim || dx);
+        // Bank away from the band edges instead of skimming them (no bobbing on the top edge).
+        let aimY = dyAim || dy;
+        if (f.y < CEILING) aimY = Math.max(aimY, (CEILING - f.y) * 0.6 + 10);
+        else if (f.y > FLOOR) aimY = Math.min(aimY, -((f.y - FLOOR) * 0.6 + 10));
+        const desiredAngle = Math.atan2(aimY, dxAim || dx);
         const targetAhead = dx * Math.cos(f.angle) + dy * Math.sin(f.angle) > dist * 0.25;
         let isEvader = false;
         for (let fj = 0; fj < fighters.length; fj++) {
@@ -532,7 +553,9 @@ export function BackgroundCanvas() {
           const evadeBias = 0.08 * Math.sin(nowF * 0.002 + fi * 2.1);
           targetAngle = Math.max(-pitchCap, Math.min(pitchCap, targetAngle + evadeBias));
         }
-        const maxTurn = 0.035;
+        // A constant slight jink so nobody ever flies perfectly straight.
+        targetAngle += 0.05 * Math.sin(nowF * 0.0045 + fi * 1.9);
+        const maxTurn = 0.05;
         let da = targetAngle - f.angle;
         if (da > Math.PI) da -= Math.PI * 2;
         if (da < -Math.PI) da += Math.PI * 2;
@@ -546,10 +569,12 @@ export function BackgroundCanvas() {
         f.y += f.vy;
         if (f.x < -25) f.x = width + 25;
         if (f.x > width + 25) f.x = -25;
-        if (f.y < 25) { f.y = 25; f.vy *= -0.5; }
+        // Hard backstops only — the band-steering above normally turns them before they arrive,
+        // so there's no bounce/bob against the edges.
+        if (f.y < CEILING - 10) f.y = CEILING - 10;
         const horizonY = getTerrainY(frontTerrain.points, f.x, width) + craterOffsetAt(f.x);
         const minY = horizonY - 18;
-        if (f.y > minY) { f.y = minY; f.vy *= -0.5; }
+        if (f.y > minY) f.y = minY;
         f.propPhase += 0.55;
         f.trail = (f.trail + 0.2) % (Math.PI * 2);
         f.fireCooldown--;
