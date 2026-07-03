@@ -1,0 +1,9 @@
+node_modules
+dist
+.next
+loadtest
+*.log
+firestore-debug.log
+.env.local
+Dockerfile
+.dockerignore

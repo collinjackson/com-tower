@@ -1,0 +1,6 @@
+apiVersion: v2
+name: com-tower-worker
+description: Com Tower bot (AWBW turn notifier) — Kubernetes workload
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

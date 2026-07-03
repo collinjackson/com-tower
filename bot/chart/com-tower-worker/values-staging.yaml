@@ -1,0 +1,7 @@
+# Staging on GKE Autopilot (project com-tower). Overrides only what differs from defaults.
+scalingMode: singleton
+ingress:
+  enabled: true
+  className: gce
+  pathPrefix: /worker
+# SIGNAL_CLI_URL / secrets are supplied at deploy time via --set or an existing Secret, not here.
