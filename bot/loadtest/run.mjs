@@ -118,26 +118,26 @@ function spawnBot(index, replicas, logPath) {
     env.SHARD_INDEX = String(index);
     env.SHARD_COUNT = String(replicas);
   }
-  if (cfg.scalingMode === 'leader') {
-    env.LEADER_ID = `replica-${index}`;
-    env.LEADER_TTL_MS = String(cfg.leaderTtlMs);
-    env.LEADER_RENEW_MS = String(cfg.leaderRenewMs);
-  }
+  // Stable holder id + fast lease timing for both leader mode and the shard receiver election.
+  env.LEADER_ID = `replica-${index}`;
+  env.LEADER_TTL_MS = String(cfg.leaderTtlMs);
+  env.LEADER_RENEW_MS = String(cfg.leaderRenewMs);
   const out = fs.openSync(logPath, 'w');
   const child = spawn('node', [BOT_ENTRY], { env, stdio: ['ignore', out, out] });
   child._replicaIndex = index;
   return child;
 }
 
-async function currentLeaderId() {
+async function currentLease(key) {
   try {
-    const snap = await db.collection('_locks').doc('leader').get();
+    const snap = await db.collection('_locks').doc(key).get();
     const d = snap.data();
     return d && (d.expiresAt ?? 0) > Date.now() ? d.holder || null : null;
   } catch {
     return null;
   }
 }
+const currentLeaderId = () => currentLease('leader');
 
 // Sample RSS for all live bots in ONE async ps call, so we never block the event loop that also
 // serves the render/bridge stubs (a blocking sampler manufactured latency/drops under load).
@@ -244,6 +244,19 @@ async function runOne(g) {
       recoveredLeadership: !!newLeader && newLeader !== leaderId,
       recoveryMs: firstAfter ? firstAfter.t - killAt : null,
     };
+  } else if (cfg.failover && cfg.scalingMode === 'shard') {
+    // Receiver-HA test: the Signal receiver is a lease-elected singleton across shards. Kill the
+    // shard holding it and confirm the 'receiver' lease moves to a live shard. (The killed shard's
+    // GAMES are lost until its pod restarts — static shard has no game failover; that's separate.)
+    for (let r = 1; r <= Math.max(2, Math.floor(cfg.rounds / 2)); r++) { await emitRound(g, r); await sleep(cfg.turnIntervalMs); }
+    const before = await currentLease('receiver');
+    const victim = bots.find((b) => `replica-${b._replicaIndex}` === before);
+    if (victim) { console.log(`  ! killing receiver ${before} (pid ${victim.pid})`); victim.kill('SIGKILL'); victim.killed = true; }
+    else console.warn(`  ! no live receiver found to kill (holder=${before})`);
+    let after = before, waited = 0;
+    while (waited < Math.max(cfg.leaderTtlMs * 4, 20000)) { await sleep(1000); waited += 1000; after = await currentLease('receiver'); if (after && after !== before) break; }
+    const liveHolders = bots.filter((b) => !b.killed).map((b) => `replica-${b._replicaIndex}`);
+    failover = { role: 'receiver', killed: before, newHolder: after, movedToLive: !!after && after !== before && liveHolders.includes(after), recoveryMs: waited };
   } else {
     for (let round = 1; round <= cfg.rounds; round++) { await emitRound(g, round); await sleep(cfg.turnIntervalMs); }
     await drainQuiesce(Math.max(15000, g * 20, cfg.bridgeLatencyMs * 4));
@@ -257,16 +270,18 @@ async function runOne(g) {
   const stats = await ctlStats();
   const m = computeMetrics(stats.emits, stats.sends);
   const maxPodRss = Math.max(...peakPerPod);
-  // In failover we EXPECT a handover gap (drops), so don't fail on drops there; dupes must stay 0.
+  // In failover we EXPECT a handover gap, so don't gate on drops; the property is that the role
+  // moved to a live replica (leader: also 0 dupes since games resume on the new leader).
   const pass = cfg.failover
-    ? m.dupes === 0 && failover?.recoveredLeadership === true
+    ? (failover?.role === 'receiver' ? failover.movedToLive === true : m.dupes === 0 && failover?.recoveredLeadership === true)
     : m.drops === 0 && m.dupes === 0 && m.p95 <= cfg.sloMs && maxPodRss <= cfg.memCeilingMb;
   console.log(
     `  connected=${connected}/${g} emitted=${m.emitted} delivered=${m.delivered} ` +
     `drops=${m.drops} dupes=${m.dupes} | latency p50=${m.p50}ms p95=${m.p95}ms max=${m.max}ms | ` +
     `maxPodRSS=${maxPodRss.toFixed(0)}MB (per-pod=[${peakPerPod.map((x) => x.toFixed(0)).join(',')}]) | ${pass ? 'PASS' : 'FAIL'}`
   );
-  if (failover) console.log(`  failover: killed=${failover.killedLeader} -> new=${failover.newLeader} recovered=${failover.recoveredLeadership} recovery=${failover.recoveryMs}ms drops(gap)=${m.drops}`);
+  if (failover?.role === 'receiver') console.log(`  receiver-failover: killed=${failover.killed} -> new=${failover.newHolder} movedToLive=${failover.movedToLive} recovery=${failover.recoveryMs}ms`);
+  else if (failover) console.log(`  failover: killed=${failover.killedLeader} -> new=${failover.newLeader} recovered=${failover.recoveredLeadership} recovery=${failover.recoveryMs}ms drops(gap)=${m.drops}`);
   return { g, connected, ...m, maxPodRssMb: Math.round(maxPodRss), perPodRss: peakPerPod.map((x) => Math.round(x)), failover, pass };
 }
 

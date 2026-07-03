@@ -31,8 +31,10 @@ export interface Ownership {
 // (local + prod) and can swap to a k8s coordination.k8s.io/Lease later without touching the
 // strategy. tryAcquire renews-or-acquires and returns the current holder after the attempt.
 export interface LeaseStore {
-  tryAcquire(holderId: string, ttlMs: number): Promise<string | null>;
-  release(holderId: string): Promise<void>;
+  // `key` names the role being contended (e.g. 'leader', 'receiver') so one backend can hold
+  // several independent elections. Returns the current holder after the attempt.
+  tryAcquire(key: string, holderId: string, ttlMs: number): Promise<string | null>;
+  release(key: string, holderId: string): Promise<void>;
 }
 
 export interface OwnershipDeps {
@@ -88,28 +90,38 @@ class SingletonOwnership implements Ownership {
   stop(): void {}
 }
 
+interface ShardOpts { store?: LeaseStore; holderId?: string; ttlMs?: number; renewMs?: number }
+
 class ShardOwnership implements Ownership {
   readonly mode = 'shard' as const;
   private readonly lo: number;
   private readonly hi: number;
-  constructor(private readonly index: number, private readonly count: number) {
+  // The Signal receiver is one role across ALL shards. Elect it (HA) when a lease backend is
+  // available, so if the current receiver's pod dies another shard picks it up — instead of a
+  // static shard-0 receiver that's a single point of failure. Falls back to shard-0 with no lease.
+  private readonly receiverElection: LeaseElection | null;
+  constructor(private readonly index: number, private readonly count: number, opts: ShardOpts = {}) {
     if (!Number.isInteger(index) || !Number.isInteger(count) || count < 1 || index < 0 || index >= count) {
       throw new Error(`Invalid shard config: SHARD_INDEX=${index} SHARD_COUNT=${count}`);
     }
     // This replica owns the half-open shardKey range [index/count, (index+1)/count).
     this.lo = index / count;
     this.hi = (index + 1) / count;
+    this.receiverElection = opts.store
+      ? new LeaseElection(opts.store, 'receiver', opts.holderId || `shard-${index}`, opts.ttlMs ?? 10000, opts.renewMs ?? 3000)
+      : null;
   }
   owns(gameId: string): boolean {
     const k = shardKeyFor(gameId);
     return k >= this.lo && k < this.hi;
   }
   isReceiver(): boolean {
-    // The singleton receive poller runs on shard 0 (a later refinement can leader-elect it).
-    return this.index === 0;
+    return this.receiverElection ? this.receiverElection.isLeader() : this.index === 0;
   }
-  onChange(): void {
-    /* static: SHARD_COUNT change = a redeploy, not a runtime event */
+  onChange(cb: () => void): void {
+    // Game ownership is static (SHARD_COUNT change = redeploy), but the receiver role can move —
+    // fire so main() can start/stop the receiver on this replica.
+    this.receiverElection?.onChange(cb);
   }
   narrowSnapshotQuery<Q extends Shardable>(q: Q): Q {
     // Only subscribe to our slice — so listener memory + Firestore read load scale with replicas
@@ -117,59 +129,85 @@ class ShardOwnership implements Ownership {
     // hi=1.0 still captures the top shard. Single-field range: no composite index needed.
     return q.where('shardKey', '>=', this.lo).where('shardKey', '<', this.hi) as Q;
   }
-  async start(): Promise<void> {}
-  stop(): void {}
+  async start(): Promise<void> {
+    if (this.receiverElection) await this.receiverElection.start();
+  }
+  stop(): void {
+    this.receiverElection?.stop();
+  }
 }
 
-class LeaderOwnership implements Ownership {
-  readonly mode = 'leader' as const;
-  private amLeader = false;
+// Reusable "elect one holder among N for a role" primitive over a LeaseStore. Both leader mode
+// (role = all the work) and shard mode (role = the singleton Signal receiver) use it, keyed by role.
+class LeaseElection {
+  private leader = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private cbs: Array<() => void> = [];
   constructor(
     private readonly store: LeaseStore,
+    private readonly key: string,
     private readonly holderId: string,
     private readonly ttlMs: number,
     private readonly renewMs: number
   ) {}
-  owns(): boolean {
-    return this.amLeader;
-  }
-  isReceiver(): boolean {
-    return this.amLeader; // the single receiver runs on the leader
+  isLeader(): boolean {
+    return this.leader;
   }
   onChange(cb: () => void): void {
     this.cbs.push(cb);
   }
-  narrowSnapshotQuery<Q extends Shardable>(q: Q): Q {
-    return q; // every replica watches all docs so a standby can take over instantly on failover
-  }
   private async renew(): Promise<void> {
     let holder: string | null = null;
     try {
-      holder = await this.store.tryAcquire(this.holderId, this.ttlMs);
+      holder = await this.store.tryAcquire(this.key, this.holderId, this.ttlMs);
     } catch (err) {
-      // Treat a failed renewal as loss of leadership — safer than risking two active leaders.
-      console.error('[ownership] lease renew failed', err);
+      // Fail safe: drop the role rather than risk two holders (split brain).
+      console.error(`[ownership] lease '${this.key}' renew failed`, err);
       holder = null;
     }
-    const nowLeader = holder === this.holderId;
-    if (nowLeader !== this.amLeader) {
-      this.amLeader = nowLeader;
-      console.log(`[ownership] leadership ${nowLeader ? 'ACQUIRED' : 'LOST'} by ${this.holderId}`);
+    const now = holder === this.holderId;
+    if (now !== this.leader) {
+      this.leader = now;
+      console.log(`[ownership] role '${this.key}' ${now ? 'ACQUIRED' : 'LOST'} by ${this.holderId}`);
       for (const cb of this.cbs) {
         try { cb(); } catch (e) { console.error('[ownership] onChange cb failed', e); }
       }
     }
   }
   async start(): Promise<void> {
-    await this.renew(); // resolve leadership before the caller wires up watches
+    await this.renew(); // resolve the role before the caller wires up work
     this.timer = setInterval(() => { this.renew().catch(() => {}); }, this.renewMs);
   }
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    if (this.amLeader) this.store.release(this.holderId).catch(() => {});
+    if (this.leader) this.store.release(this.key, this.holderId).catch(() => {});
+  }
+}
+
+class LeaderOwnership implements Ownership {
+  readonly mode = 'leader' as const;
+  private readonly election: LeaseElection;
+  constructor(store: LeaseStore, holderId: string, ttlMs: number, renewMs: number) {
+    this.election = new LeaseElection(store, 'leader', holderId, ttlMs, renewMs);
+  }
+  owns(): boolean {
+    return this.election.isLeader();
+  }
+  isReceiver(): boolean {
+    return this.election.isLeader(); // the single receiver runs on the leader
+  }
+  onChange(cb: () => void): void {
+    this.election.onChange(cb);
+  }
+  narrowSnapshotQuery<Q extends Shardable>(q: Q): Q {
+    return q; // every replica watches all docs so a standby can take over instantly on failover
+  }
+  async start(): Promise<void> {
+    return this.election.start();
+  }
+  stop(): void {
+    this.election.stop();
   }
 }
 
@@ -188,7 +226,12 @@ export function createOwnership(deps: OwnershipDeps = {}): Ownership {
     case 'singleton':
       return new SingletonOwnership();
     case 'shard':
-      return new ShardOwnership(resolveShardIndex(), Number(process.env.SHARD_COUNT || '1'));
+      return new ShardOwnership(resolveShardIndex(), Number(process.env.SHARD_COUNT || '1'), {
+        store: deps.leaseStore, // present => receiver is lease-elected (HA); absent => static shard-0
+        holderId: deps.holderId || process.env.LEADER_ID || `${process.env.HOSTNAME || 'local'}-${process.pid}`,
+        ttlMs: Number(process.env.LEADER_TTL_MS || '10000'),
+        renewMs: Number(process.env.LEADER_RENEW_MS || '3000'),
+      });
     case 'leader': {
       if (!deps.leaseStore) throw new Error('SCALING_MODE=leader requires a LeaseStore');
       const holderId = deps.holderId || process.env.LEADER_ID || `${process.env.HOSTNAME || 'local'}-${process.pid}`;
