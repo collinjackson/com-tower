@@ -1,0 +1,12 @@
+{{ include "cw.fullname" . }} deployed in mode "{{ .Values.scalingMode }}" (replicas: {{ if eq .Values.scalingMode "singleton" }}1{{ else }}{{ .Values.replicaCount }}{{ end }}).
+
+Check it:
+  kubectl get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+  kubectl port-forward svc/{{ include "cw.fullname" . }} 8080:{{ .Values.service.port }}
+  curl localhost:8080/healthz && curl localhost:8080/readyz
+{{ if .Values.ingress.enabled }}
+Ingress enabled at path {{ .Values.ingress.pathPrefix }} (className: {{ .Values.ingress.className | default "default" }}).
+Get the external IP (may take a few minutes to provision):
+  kubectl get ingress {{ include "cw.fullname" . }}
+{{ end }}
+Workload Identity SA: {{ .Values.serviceAccount.gcpServiceAccount | default "(none — using node SA / key)" }}

@@ -1,0 +1,56 @@
+# Defaults. Override per environment with -f values-<env>.yaml or --set. The same built image runs
+# everywhere; only config/scale differ (build once, deploy many).
+
+image:
+  repo: us-central1-docker.pkg.dev/com-tower/com-tower/com-tower-worker
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# singleton | leader | shard  (see bot/src/ownership.ts)
+#   singleton -> Deployment, replicas 1 (current prod behavior)
+#   leader    -> Deployment, replicas N (Firestore-lease election; HA, capacity == singleton)
+#   shard     -> StatefulSet, replicas N (games hash-partitioned across pods; scales capacity)
+scalingMode: singleton
+replicaCount: 1                 # used by leader/shard
+
+serviceAccount:
+  name: com-tower-worker
+  # GCP service account for Workload Identity (no key file). Empty => no WI annotation.
+  gcpServiceAccount: com-tower-worker@com-tower.iam.gserviceaccount.com
+
+# Non-secret config -> ConfigMap -> env. (SCALING_MODE / SHARD_COUNT / PORT are set by the template.)
+config:
+  FIREBASE_PROJECT_ID: com-tower
+  NOTIFY_RENDER_URL: https://com-tower.vercel.app/api/notify/render
+  AWBW_WS_BASE: wss://awbw.amarriner.com
+  AWBW_HTTP_BASE: https://awbw.amarriner.com
+  SIGNAL_CLI_URL: ""            # set per env (the Signal bridge)
+
+# Secret config -> Secret -> env. With Workload Identity, FIREBASE_PRIVATE_KEY/CLIENT_EMAIL are NOT
+# needed (the pod authenticates as the GCP SA via ADC). Prefer --set or existingSecret over commits.
+existingSecret: ""             # if set, use this Secret instead of creating one from `secrets`
+secrets:
+  SIGNAL_BOT_NUMBER: ""
+  INVITE_SHARED_SECRET: ""
+  RENDER_BYPASS_TOKEN: ""
+
+signalNoAuth: false            # SIGNAL_CLI_NO_AUTH=1 — only for a plain-HTTP / in-cluster bridge
+
+resources:                     # Autopilot enforces requests; ~matches observed usage (§12)
+  requests: { cpu: 250m, memory: 512Mi }
+  limits:   { cpu: "1",  memory: 512Mi }
+
+probes:
+  liveness:  { path: /healthz }
+  readiness: { path: /readyz }
+
+service:
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: false
+  className: ""                # e.g. "gce" on GKE
+  host: ""
+  pathPrefix: /worker          # each service routed under its own prefix (infra convention)
+  annotations: {}

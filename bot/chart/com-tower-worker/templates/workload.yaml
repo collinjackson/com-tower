@@ -1,0 +1,60 @@
+{{- $isShard := eq .Values.scalingMode "shard" -}}
+{{- $port := .Values.service.targetPort -}}
+apiVersion: apps/v1
+kind: {{ if $isShard }}StatefulSet{{ else }}Deployment{{ end }}
+metadata:
+  name: {{ include "cw.fullname" . }}
+  labels: {{- include "cw.labels" . | nindent 4 }}
+spec:
+  {{- if $isShard }}
+  serviceName: {{ include "cw.fullname" . }}
+  podManagementPolicy: Parallel   # all shards start together; SHARD_INDEX comes from the pod ordinal
+  replicas: {{ .Values.replicaCount }}
+  {{- else }}
+  replicas: {{ if eq .Values.scalingMode "singleton" }}1{{ else }}{{ .Values.replicaCount }}{{ end }}
+  strategy:
+    type: Recreate   # no overlapping old+new pod during rollout => no double-send for a singleton
+  {{- end }}
+  selector:
+    matchLabels: {{- include "cw.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "cw.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+        - name: worker
+          image: "{{ .Values.image.repo }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ $port }}
+          env:
+            - name: SCALING_MODE
+              value: {{ .Values.scalingMode | quote }}
+            - name: PORT
+              value: {{ $port | quote }}
+            {{- if $isShard }}
+            - name: SHARD_COUNT          # SHARD_INDEX is derived from the StatefulSet pod ordinal (HOSTNAME)
+              value: {{ .Values.replicaCount | quote }}
+            {{- end }}
+            {{- if .Values.signalNoAuth }}
+            - name: SIGNAL_CLI_NO_AUTH
+              value: "1"
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "cw.fullname" . }}-config
+            - secretRef:
+                name: {{ .Values.existingSecret | default (printf "%s-secrets" (include "cw.fullname" .)) }}
+          startupProbe:                  # gate liveness during boot (Firestore attach can take a moment)
+            httpGet: { path: {{ .Values.probes.readiness.path }}, port: {{ $port }} }
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:                 # process alive? restart on fail
+            httpGet: { path: {{ .Values.probes.liveness.path }}, port: {{ $port }} }
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:                # watching games? pull from Service endpoints while not ready
+            httpGet: { path: {{ .Values.probes.readiness.path }}, port: {{ $port }} }
+            periodSeconds: 10
+          resources: {{- toYaml .Values.resources | nindent 12 }}

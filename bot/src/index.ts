@@ -769,6 +769,7 @@ const SIGNAL_RECEIVE_POLL_MS = 5000; // Poll for incoming Signal messages every 
 type ReceiverMode = 'unknown' | 'poll' | 'ws' | 'off';
 let receiverMode: ReceiverMode = 'unknown';
 let receiverActive = false; // is this replica currently running the Signal receiver?
+let snapshotReady = false; // has the groupGames listener attached (initial snapshot received)?
 let receiverWs: WebSocket | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let wsFailCount = 0;
@@ -2444,6 +2445,7 @@ async function main() {
   ownership.narrowSnapshotQuery(db.collection('groupGames')).onSnapshot((snap) => {
     if (!ggSnapshotBootstrapped) {
       ggSnapshotBootstrapped = true;
+      snapshotReady = true; // readiness: we're now watching our games
       for (const doc of snap.docs) {
         applyGroupGameWatch(doc.id, doc.data() as GroupGame, 'bootstrap');
       }
@@ -2459,6 +2461,21 @@ async function main() {
   const server = http.createServer(async (_, res) => {
     try {
       const url = new URL(_.url || '/', 'http://localhost');
+      // Liveness: cheap, dependency-free — is the process/event loop alive? (restart on fail)
+      if (url.pathname === '/healthz') {
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ ok: true, mode: ownership?.mode, receiver: receiverActive }));
+        return;
+      }
+      // Readiness: are we actually doing our job? Ready once the groupGames listener has attached.
+      // (Removed from Service endpoints while not ready; NOT restarted.)
+      if (url.pathname === '/readyz') {
+        res.statusCode = snapshotReady ? 200 : 503;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ ready: snapshotReady, watching: activeGGSockets.size, receiver: receiverActive }));
+        return;
+      }
       if (url.pathname === '/debug/receive') {
         // Diagnostics for the Signal receive path. Gated by INVITE_SHARED_SECRET when set
         // (pass ?secret=... or x-shared-secret header); open otherwise.
