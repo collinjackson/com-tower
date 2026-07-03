@@ -27,6 +27,19 @@ export interface Ownership {
   stop(): void;
 }
 
+// Backend for leader-election. Kept abstract so leader mode works over a Firestore doc lock now
+// (local + prod) and can swap to a k8s coordination.k8s.io/Lease later without touching the
+// strategy. tryAcquire renews-or-acquires and returns the current holder after the attempt.
+export interface LeaseStore {
+  tryAcquire(holderId: string, ttlMs: number): Promise<string | null>;
+  release(holderId: string): Promise<void>;
+}
+
+export interface OwnershipDeps {
+  leaseStore?: LeaseStore;
+  holderId?: string;
+}
+
 // FNV-1a: cheap, stable, no crypto dependency. Same input -> same shard on every replica.
 function hashToInt(s: string): number {
   let h = 2166136261 >>> 0;
@@ -73,6 +86,55 @@ class ShardOwnership implements Ownership {
   stop(): void {}
 }
 
+class LeaderOwnership implements Ownership {
+  readonly mode = 'leader' as const;
+  private amLeader = false;
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private cbs: Array<() => void> = [];
+  constructor(
+    private readonly store: LeaseStore,
+    private readonly holderId: string,
+    private readonly ttlMs: number,
+    private readonly renewMs: number
+  ) {}
+  owns(): boolean {
+    return this.amLeader;
+  }
+  isReceiver(): boolean {
+    return this.amLeader; // the single receiver runs on the leader
+  }
+  onChange(cb: () => void): void {
+    this.cbs.push(cb);
+  }
+  private async renew(): Promise<void> {
+    let holder: string | null = null;
+    try {
+      holder = await this.store.tryAcquire(this.holderId, this.ttlMs);
+    } catch (err) {
+      // Treat a failed renewal as loss of leadership — safer than risking two active leaders.
+      console.error('[ownership] lease renew failed', err);
+      holder = null;
+    }
+    const nowLeader = holder === this.holderId;
+    if (nowLeader !== this.amLeader) {
+      this.amLeader = nowLeader;
+      console.log(`[ownership] leadership ${nowLeader ? 'ACQUIRED' : 'LOST'} by ${this.holderId}`);
+      for (const cb of this.cbs) {
+        try { cb(); } catch (e) { console.error('[ownership] onChange cb failed', e); }
+      }
+    }
+  }
+  async start(): Promise<void> {
+    await this.renew(); // resolve leadership before the caller wires up watches
+    this.timer = setInterval(() => { this.renew().catch(() => {}); }, this.renewMs);
+  }
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    if (this.amLeader) this.store.release(this.holderId).catch(() => {});
+  }
+}
+
 // In a StatefulSet the pod name is `<name>-<ordinal>`; derive the shard index from HOSTNAME
 // when SHARD_INDEX isn't set explicitly.
 function resolveShardIndex(): number {
@@ -82,17 +144,20 @@ function resolveShardIndex(): number {
   throw new Error('shard mode: set SHARD_INDEX or run as a StatefulSet pod (HOSTNAME=name-N)');
 }
 
-export function createOwnership(): Ownership {
+export function createOwnership(deps: OwnershipDeps = {}): Ownership {
   const mode = (process.env.SCALING_MODE || 'singleton') as ScalingMode;
   switch (mode) {
     case 'singleton':
       return new SingletonOwnership();
     case 'shard':
       return new ShardOwnership(resolveShardIndex(), Number(process.env.SHARD_COUNT || '1'));
-    case 'leader':
-      // Implemented in a follow-up commit (Firestore/k8s-Lease election). Fail loud until then
-      // rather than silently behaving like a singleton.
-      throw new Error("SCALING_MODE=leader not yet implemented; use 'singleton' or 'shard'");
+    case 'leader': {
+      if (!deps.leaseStore) throw new Error('SCALING_MODE=leader requires a LeaseStore');
+      const holderId = deps.holderId || process.env.LEADER_ID || `${process.env.HOSTNAME || 'local'}-${process.pid}`;
+      const ttlMs = Number(process.env.LEADER_TTL_MS || '10000');
+      const renewMs = Number(process.env.LEADER_RENEW_MS || '3000');
+      return new LeaderOwnership(deps.leaseStore, holderId, ttlMs, renewMs);
+    }
     default:
       throw new Error(`Unknown SCALING_MODE: ${mode}`);
   }
