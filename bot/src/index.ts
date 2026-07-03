@@ -4,7 +4,7 @@ import WebSocket from 'ws';
 import { GoogleAuth, IdTokenClient } from 'google-auth-library';
 import http from 'http';
 import { FieldValue } from 'firebase-admin/firestore';
-import { createOwnership, type Ownership } from './ownership.js';
+import { createOwnership, type Ownership, type LeaseStore } from './ownership.js';
 
 /** once = first notification only; hourly = at most once per hour; undefined = every turn */
 export type NotifyFrequency = 'once' | 'hourly';
@@ -2362,12 +2362,38 @@ async function runTurnPoll() {
   }
 }
 
+// Firestore-backed leader-election lease. A single doc `_locks/leader` holds { holder, expiresAt }.
+// A transaction grants/renews the lease only if it's unheld, expired, or already ours — so at most
+// one replica is leader at a time. (The k8s-native swap-in later is a coordination.k8s.io/Lease.)
+function firestoreLeaseStore(db: Firestore): LeaseStore {
+  const ref = db.collection('_locks').doc('leader');
+  return {
+    async tryAcquire(holderId: string, ttlMs: number): Promise<string | null> {
+      return db.runTransaction(async (tx) => {
+        const snap = await tx.get(ref);
+        const data = snap.data() as { holder?: string; expiresAt?: number } | undefined;
+        const now = Date.now();
+        const held = data?.holder && (data.expiresAt ?? 0) > now && data.holder !== holderId;
+        if (held) return data!.holder!; // someone else holds a live lease
+        tx.set(ref, { holder: holderId, expiresAt: now + ttlMs });
+        return holderId;
+      });
+    },
+    async release(holderId: string): Promise<void> {
+      await db.runTransaction(async (tx) => {
+        const snap = await tx.get(ref);
+        if ((snap.data() as any)?.holder === holderId) tx.set(ref, { holder: null, expiresAt: 0 });
+      });
+    },
+  };
+}
+
 async function main() {
   ensureFirebase();
   const db = getFirestore();
 
   // Decide which games this replica owns (SCALING_MODE). start() acquires any lease (leader).
-  ownership = createOwnership();
+  ownership = createOwnership({ leaseStore: firestoreLeaseStore(db) });
   await ownership.start();
   ownership.onChange(() => {
     reevaluateOwnership().catch((err) => console.error('[gg] ownership re-eval failed', err));
