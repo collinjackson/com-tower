@@ -2415,9 +2415,11 @@ async function main() {
     runTurnPoll().catch((err) => console.error('[gg] turn-poll error', err));
   }, TURN_POLL_MS);
 
-  // Drive one AWBW socket per active group game; notify the group on each turn change.
+  // Drive one AWBW socket per active group game; notify the group on each turn change. In shard
+  // mode the query is narrowed to this replica's shardKey slice, so listener memory + Firestore
+  // read load scale with replicas instead of every replica streaming the whole collection.
   let ggSnapshotBootstrapped = false;
-  db.collection('groupGames').onSnapshot((snap) => {
+  ownership.narrowSnapshotQuery(db.collection('groupGames')).onSnapshot((snap) => {
     if (!ggSnapshotBootstrapped) {
       ggSnapshotBootstrapped = true;
       for (const doc of snap.docs) {
