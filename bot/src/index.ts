@@ -41,6 +41,7 @@ type NextTurnMeta = {
   gameName?: string;
   funEnabled?: boolean;
   language?: string;
+  inviterUid?: string;
 };
 type RenderPayload = {
   text: string;
@@ -631,6 +632,7 @@ async function buildMessage(
         },
         body: JSON.stringify({
           gameId,
+          inviterUid: meta.inviterUid,
           day: meta.day,
           playerName: effectivePlayerName,
           players: meta.players,
@@ -902,6 +904,7 @@ function startSocket(data: PatchData) {
               countries: info.countries,
               gameName,
               playerName: effectivePlayerName,
+              inviterUid: patchId.replace(`${data.gameId}-`, ''),
             };
             sendNotifications(data, baseMeta, deliverSubs, 'NextTurn').catch(() => {});
           });
@@ -1475,6 +1478,10 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
       `(optional — or just turn on notifications for this group).`;
     await reply(msg);
     console.log(`[gg] /game ${gameId} set for group ${groupId.substring(0, 16)}`);
+    applyGroupGameWatch(groupId, { ...gg, groupId, gameId, status: 'active' } as GroupGame, 'modified');
+    void syncGroupGameIfTurnChanged(groupId, gameId, '/game bind').catch((e) =>
+      console.error('[gg] /game sync failed', e)
+    );
     return;
   }
 
@@ -1650,10 +1657,19 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
   if (cmd === '/status') {
     const n = Object.keys(gg.players || {}).length;
     const modCount = (gg.mods || []).length;
+    const st = activeGGSockets.get(groupId);
+    const wsState =
+      st?.ws.readyState === WebSocket.OPEN
+        ? 'connected'
+        : st
+          ? `state ${st.ws.readyState}`
+          : 'not watching';
     let msg = `Game ${gg.gameId}${gg.gameName ? ` (${gg.gameName})` : ''} — ${gg.status}\n${gameLink(gg.gameId)}\n`;
-    msg += `Players mapped: ${n} · mods: ${modCount} · fun: ${gg.funEnabled ? 'on' : 'off'}`;
+    msg += `Players mapped: ${n} · mods: ${modCount} · fun: ${gg.funEnabled ? 'on' : 'off'} · ws: ${wsState}`;
     if (gg.lastTurn?.awbwUsername)
       msg += `\nLast turn seen: ${gg.lastTurn.awbwUsername}${gg.lastTurn.day ? ` (day ${gg.lastTurn.day})` : ''}`;
+    if (st?.lastNextTurnAt)
+      msg += `\nLast ws NextTurn: ${new Date(st.lastNextTurnAt).toISOString()}`;
     await reply(msg);
     return;
   }
@@ -1903,6 +1919,8 @@ type GGSocketState = {
   checkInterval?: ReturnType<typeof setInterval>;
   heartbeat?: ReturnType<typeof setInterval>;
   gameId: string;
+  lastWsAt?: number;
+  lastNextTurnAt?: number;
 };
 const activeGGSockets = new Map<string, GGSocketState>();
 // AWBW's own client keeps the socket alive by sending an empty-string DATA frame every 45s
@@ -1971,22 +1989,34 @@ function startGroupGameSocket(groupId: string, gameId: string) {
   ws.on('message', (msg) => {
     try {
       const parsed = JSON.parse(msg.toString());
-      if (parsed?.GameOver || parsed?.GameEnd || parsed?.type === 'GameOver' || parsed?.type === 'GameEnd') {
-        ggRef(groupId).update({ status: 'ended', updatedAt: FieldValue.serverTimestamp() }).catch(() => {});
-        stopGGSocket(groupId, 'game over (ws)');
+      state.lastWsAt = Date.now();
+      const msgType =
+        parsed?.type ||
+        (parsed?.NextTurn && 'NextTurn') ||
+        (parsed?.Pause && 'Pause') ||
+        (parsed?.GameOver && 'GameOver') ||
+        (parsed?.GameEnd && 'GameEnd') ||
+        'unknown';
+      if (msgType !== 'NextTurn') {
+        console.log(`[gg] ws ${gameId}: ${msgType}`);
+        if (parsed?.GameOver || parsed?.GameEnd || msgType === 'GameOver' || msgType === 'GameEnd') {
+          ggRef(groupId).update({ status: 'ended', updatedAt: FieldValue.serverTimestamp() }).catch(() => {});
+          stopGGSocket(groupId, 'game over (ws)');
+        }
         return;
       }
-      const isNextTurn = parsed?.type === 'NextTurn' || parsed?.NextTurn;
-      if (!isNextTurn) return;
       const next = parsed?.NextTurn || parsed?.nextTurn || parsed || {};
       const socketPlayer =
         next.playerName || next.player_name || next.player || next.username || next.name;
       const day = next.day;
-      const dedupKey = `gg-${groupId}-${gameId}-${day}-${next.playerId || next.player_id || socketPlayer}`;
+      const nextPId = next.nextPId ?? next.playerId ?? next.player_id;
+      const dedupKey = `gg-${groupId}-${gameId}-${day}-${nextPId ?? next.nextTurnStart ?? socketPlayer}`;
       const now = Date.now();
       const last = recentNextTurns.get(dedupKey);
       if (last && now - last < NEXT_TURN_DEDUP_WINDOW_MS) return;
       recentNextTurns.set(dedupKey, now);
+      state.lastNextTurnAt = now;
+      console.log(`[gg] NextTurn ${gameId} day=${day} pid=${nextPId ?? '?'}`);
       onGroupGameNextTurn(groupId, gameId, { day, socketPlayer }).catch((e) =>
         console.error('[gg] notify error', e)
       );
@@ -2149,7 +2179,16 @@ async function onGroupGameNextTurn(
   for (const u of liveUnits) if (u.id) newUnitHp[u.id] = u.hp;
 
   try {
-    await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined, attachment);
+    try {
+      await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined, attachment);
+    } catch (sendErr) {
+      if (attachment) {
+        console.warn('[gg] send with attachment failed; retrying text-only', sendErr);
+        await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined);
+      } else {
+        throw sendErr;
+      }
+    }
     await ggRef(groupId)
       .update({
         lastTurn: { day: meta.day ?? null, awbwUsername: currentPlayer },
@@ -2165,12 +2204,34 @@ async function onGroupGameNextTurn(
   }
 }
 
-const BACKSTOP_POLL_MS = 60_000;
-/** Failover only: the websocket is the low-latency path. This poll acts ONLY for games whose
- *  socket is currently down (e.g. nightly site maintenance) — it scrapes the current player and
- *  notifies if the turn changed while we were disconnected. When the socket is healthy it does
- *  nothing, so it never competes with the instant websocket path or double-notifies. */
-async function runBackstopPoll() {
+/** Scrape current player vs lastTurn; notify if the turn advanced (websocket fallback). */
+async function syncGroupGameIfTurnChanged(groupId: string, gameId: string, reason: string) {
+  const snap = await ggRef(groupId).get();
+  if (!snap.exists) return;
+  const gg = snap.data() as GroupGame;
+  if (gg.status !== 'active' || gg.gameId !== gameId) return;
+  const currentPlayer = await resolveCurrentPlayerName(gameId).catch(() => undefined);
+  if (!currentPlayer || currentPlayer === (gg.lastTurn?.awbwUsername || undefined)) return;
+  console.log(`[gg] ${reason}: turn=${currentPlayer} for group ${groupId.substring(0, 16)}`);
+  await onGroupGameNextTurn(groupId, gameId, { socketPlayer: currentPlayer }).catch((e) =>
+    console.error('[gg] sync notify failed', e)
+  );
+}
+
+function applyGroupGameWatch(groupId: string, gg: GroupGame, changeType: string) {
+  if (gg.status !== 'active' || !gg.gameId) {
+    stopGGSocket(groupId, changeType === 'removed' ? 'doc removed' : `status ${gg.status}`);
+    return;
+  }
+  const st = activeGGSockets.get(groupId);
+  if (st && st.gameId === gg.gameId && st.shouldReopen) return;
+  startGroupGameSocket(groupId, gg.gameId);
+}
+
+const TURN_POLL_MS = 60 * 60 * 1000; // hourly — slow is fine; this exists so missed turns are eventually caught
+/** Poll the game page and compare current player to lastTurn. Independent of websocket health.
+ *  The websocket is the fast path; this is the recovery path when we never noticed a turn change. */
+async function runTurnPoll() {
   let snap;
   try {
     snap = await getFirestore().collection('groupGames').where('status', '==', 'active').get();
@@ -2181,15 +2242,7 @@ async function runBackstopPoll() {
   for (const doc of snap.docs) {
     const gg = { ...(doc.data() as GroupGame), groupId: doc.id };
     if (!gg.gameId) continue;
-    const st = activeGGSockets.get(gg.groupId);
-    if (st && st.ws.readyState === WebSocket.OPEN) continue; // socket healthy → trust the websocket
-    const currentPlayer = await resolveCurrentPlayerName(gg.gameId).catch(() => undefined);
-    if (currentPlayer && currentPlayer !== (gg.lastTurn?.awbwUsername || undefined)) {
-      console.log(`[gg] backstop: socket down for ${gg.groupId.substring(0, 16)}, turn=${currentPlayer} — notifying`);
-      await onGroupGameNextTurn(gg.groupId, gg.gameId, { socketPlayer: currentPlayer }).catch((e) =>
-        console.error('[gg] backstop notify failed', e)
-      );
-    }
+    await syncGroupGameIfTurnChanged(gg.groupId, gg.gameId, 'turn-poll');
   }
 }
 
@@ -2202,23 +2255,22 @@ async function main() {
   // Signal slash-command receiver (poll or websocket, auto-detected)
   startSignalReceiver().catch((err) => console.error('[bot] receiver start failed:', err));
 
-  // Failover backstop: catches turns missed while a game socket is down (site maintenance, etc.).
+  // Hourly page poll: if current player ≠ last notified, we missed a turn — post now.
   setInterval(() => {
-    runBackstopPoll().catch((err) => console.error('[gg] backstop poll error', err));
-  }, BACKSTOP_POLL_MS);
+    runTurnPoll().catch((err) => console.error('[gg] turn-poll error', err));
+  }, TURN_POLL_MS);
 
   // Drive one AWBW socket per active group game; notify the group on each turn change.
+  let ggSnapshotBootstrapped = false;
   db.collection('groupGames').onSnapshot((snap) => {
-    snap.docChanges().forEach((change) => {
-      const groupId = change.doc.id;
-      const gg = change.doc.data() as GroupGame;
-      if (change.type === 'removed' || gg.status !== 'active' || !gg.gameId) {
-        stopGGSocket(groupId, change.type === 'removed' ? 'doc removed' : `status ${gg.status}`);
-        return;
+    if (!ggSnapshotBootstrapped) {
+      ggSnapshotBootstrapped = true;
+      for (const doc of snap.docs) {
+        applyGroupGameWatch(doc.id, doc.data() as GroupGame, 'bootstrap');
       }
-      const st = activeGGSockets.get(groupId);
-      if (st && st.gameId === gg.gameId && st.shouldReopen) return; // already watching this game
-      startGroupGameSocket(groupId, gg.gameId);
+    }
+    snap.docChanges().forEach((change) => {
+      applyGroupGameWatch(change.doc.id, change.doc.data() as GroupGame, change.type);
     });
   });
 

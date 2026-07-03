@@ -216,3 +216,4 @@ invite link, the bot's number, or a QR code — TBD by how we want people to add
   `BackgroundCanvas.tsx`; replace `page.tsx` with the static memo.)
 - Worker: `Subscriber` / `playerPhoneMap` / `scope` / `notifyFrequency` / hourly-reminder code.
 - Firestore: `patches`, `users`, `captchaChallenges`, invite docs.
+
