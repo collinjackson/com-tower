@@ -40,6 +40,19 @@ export interface OwnershipDeps {
   holderId?: string;
 }
 
+// Minimal shape of a Firestore query/collection ref — lets ownership narrow the listener without
+// importing firebase-admin. Both CollectionReference and Query satisfy it.
+export interface Shardable {
+  where(field: string, op: any, value: any): Shardable;
+}
+
+// Extend the interface with a way to narrow the collection listener to just this replica's slice.
+export interface Ownership {
+  /** Narrow a groupGames query to only the docs this replica should watch. Passthrough unless
+   *  sharding (leader/singleton must see all docs — a leader owns them all when elected). */
+  narrowSnapshotQuery<Q extends Shardable>(q: Q): Q;
+}
+
 // FNV-1a: cheap, stable, no crypto dependency. Same input -> same shard on every replica.
 function hashToInt(s: string): number {
   let h = 2166136261 >>> 0;
@@ -48,6 +61,13 @@ function hashToInt(s: string): number {
     h = Math.imul(h, 16777619) >>> 0;
   }
   return h >>> 0;
+}
+
+// Stable shard key in [0, 1) for a game. Stored on each groupGames doc so the listener can be
+// range-partitioned per replica; also computed live for owns(). Range partitioning means rescaling
+// SHARD_COUNT just moves boundaries — no doc re-bucketing, and no Firestore `in`/bucket limits.
+export function shardKeyFor(gameId: string): number {
+  return hashToInt(gameId) / 4294967296; // 2**32
 }
 
 class SingletonOwnership implements Ownership {
@@ -61,19 +81,28 @@ class SingletonOwnership implements Ownership {
   onChange(): void {
     /* never changes */
   }
+  narrowSnapshotQuery<Q extends Shardable>(q: Q): Q {
+    return q; // singleton watches everything
+  }
   async start(): Promise<void> {}
   stop(): void {}
 }
 
 class ShardOwnership implements Ownership {
   readonly mode = 'shard' as const;
+  private readonly lo: number;
+  private readonly hi: number;
   constructor(private readonly index: number, private readonly count: number) {
     if (!Number.isInteger(index) || !Number.isInteger(count) || count < 1 || index < 0 || index >= count) {
       throw new Error(`Invalid shard config: SHARD_INDEX=${index} SHARD_COUNT=${count}`);
     }
+    // This replica owns the half-open shardKey range [index/count, (index+1)/count).
+    this.lo = index / count;
+    this.hi = (index + 1) / count;
   }
   owns(gameId: string): boolean {
-    return hashToInt(gameId) % this.count === this.index;
+    const k = shardKeyFor(gameId);
+    return k >= this.lo && k < this.hi;
   }
   isReceiver(): boolean {
     // The singleton receive poller runs on shard 0 (a later refinement can leader-elect it).
@@ -81,6 +110,12 @@ class ShardOwnership implements Ownership {
   }
   onChange(): void {
     /* static: SHARD_COUNT change = a redeploy, not a runtime event */
+  }
+  narrowSnapshotQuery<Q extends Shardable>(q: Q): Q {
+    // Only subscribe to our slice — so listener memory + Firestore read load scale with replicas
+    // instead of every replica streaming the whole collection. shardKey<1 always, so `< hi` at
+    // hi=1.0 still captures the top shard. Single-field range: no composite index needed.
+    return q.where('shardKey', '>=', this.lo).where('shardKey', '<', this.hi) as Q;
   }
   async start(): Promise<void> {}
   stop(): void {}
@@ -105,6 +140,9 @@ class LeaderOwnership implements Ownership {
   }
   onChange(cb: () => void): void {
     this.cbs.push(cb);
+  }
+  narrowSnapshotQuery<Q extends Shardable>(q: Q): Q {
+    return q; // every replica watches all docs so a standby can take over instantly on failover
   }
   private async renew(): Promise<void> {
     let holder: string | null = null;

@@ -13,6 +13,7 @@ import fs from 'fs';
 import { initializeApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { startAwbwMock, startRenderStub, startBridgeStub } from './mocks.mjs';
+import { shardKeyFor } from '../dist/ownership.js'; // same hash the bot uses, so seeded shardKey matches owns()
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BOT_ENTRY = path.join(HERE, '..', 'dist', 'index.js');
@@ -82,6 +83,7 @@ async function seedGames(g) {
       status: 'active',
       players: {},
       funEnabled: false,
+      shardKey: shardKeyFor(gameIdFor(i)), // denormalized so the sharded listener can range-query
     });
     if (++n % 400 === 0) { await batch.commit(); batch = db.batch(); }
   }
