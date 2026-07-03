@@ -1,0 +1,4 @@
+# load-test run artifacts
+results-*.json
+bot-*.log
+firestore-debug.log
