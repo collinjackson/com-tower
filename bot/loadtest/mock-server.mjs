@@ -16,7 +16,11 @@ const gameIdFor = (i) => String(100000 + i);
 
 const awbw = startAwbwMock({ port: P.awbw });
 const render = startRenderStub({ port: P.render });
-const bridge = startBridgeStub({ port: P.bridge, latencyMs: Number(process.env.BRIDGE_LATENCY_MS || 0) });
+const bridge = startBridgeStub({
+  port: P.bridge,
+  latencyMs: Number(process.env.BRIDGE_LATENCY_MS || 0),
+  maxConcurrency: process.env.BRIDGE_CONCURRENCY ? Number(process.env.BRIDGE_CONCURRENCY) : Infinity,
+});
 let emits = [];
 
 const control = http.createServer((req, res) => {
