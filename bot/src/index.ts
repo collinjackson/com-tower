@@ -1374,6 +1374,7 @@ const HELP_TEXT =
   '/fun [on|off]        — flavor text (mod)\n' +
   '/language <lang>     — your turn pings in another language (e.g. Klingon, Esperanto)\n' +
   '/status              — current state\n' +
+  '/sync                — check AWBW now and post if we missed a turn\n' +
   '/stop                — stop watching (mod)\n' +
   '/ping                — connectivity check';
 
@@ -1668,9 +1669,26 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
     msg += `Players mapped: ${n} · mods: ${modCount} · fun: ${gg.funEnabled ? 'on' : 'off'} · ws: ${wsState}`;
     if (gg.lastTurn?.awbwUsername)
       msg += `\nLast turn seen: ${gg.lastTurn.awbwUsername}${gg.lastTurn.day ? ` (day ${gg.lastTurn.day})` : ''}`;
+    else msg += `\nLast turn seen: never — run /sync to catch up`;
     if (st?.lastNextTurnAt)
       msg += `\nLast ws NextTurn: ${new Date(st.lastNextTurnAt).toISOString()}`;
     await reply(msg);
+    return;
+  }
+
+  if (cmd === '/sync' || cmd === '/catchup') {
+    const result = await syncGroupGameIfTurnChanged(groupId, gg.gameId, '/sync');
+    if (result === 'notified') {
+      await reply('✅ Posted a turn notification for whoever is up now.');
+    } else if (result === 'unchanged') {
+      const last = gg.lastTurn?.awbwUsername || 'never';
+      const current = (await resolveCurrentPlayerName(gg.gameId).catch(() => undefined)) || '?';
+      await reply(`Up to date — ${current} is up (last notified: ${last}).`);
+    } else if (result === 'no_player') {
+      await reply("Couldn't read the current player from AWBW — try again in a moment.");
+    } else {
+      await reply('Not watching an active game.');
+    }
     return;
   }
 
@@ -2205,17 +2223,26 @@ async function onGroupGameNextTurn(
 }
 
 /** Scrape current player vs lastTurn; notify if the turn advanced (websocket fallback). */
-async function syncGroupGameIfTurnChanged(groupId: string, gameId: string, reason: string) {
+async function syncGroupGameIfTurnChanged(
+  groupId: string,
+  gameId: string,
+  reason: string
+): Promise<'notified' | 'unchanged' | 'no_player' | 'inactive'> {
   const snap = await ggRef(groupId).get();
-  if (!snap.exists) return;
+  if (!snap.exists) return 'inactive';
   const gg = snap.data() as GroupGame;
-  if (gg.status !== 'active' || gg.gameId !== gameId) return;
+  if (gg.status !== 'active' || gg.gameId !== gameId) return 'inactive';
   const currentPlayer = await resolveCurrentPlayerName(gameId).catch(() => undefined);
-  if (!currentPlayer || currentPlayer === (gg.lastTurn?.awbwUsername || undefined)) return;
+  if (!currentPlayer) return 'no_player';
+  if (currentPlayer === (gg.lastTurn?.awbwUsername || undefined)) return 'unchanged';
   console.log(`[gg] ${reason}: turn=${currentPlayer} for group ${groupId.substring(0, 16)}`);
-  await onGroupGameNextTurn(groupId, gameId, { socketPlayer: currentPlayer }).catch((e) =>
-    console.error('[gg] sync notify failed', e)
-  );
+  try {
+    await onGroupGameNextTurn(groupId, gameId, { socketPlayer: currentPlayer });
+    return 'notified';
+  } catch (e) {
+    console.error('[gg] sync notify failed', e);
+    return 'no_player';
+  }
 }
 
 function applyGroupGameWatch(groupId: string, gg: GroupGame, changeType: string) {
