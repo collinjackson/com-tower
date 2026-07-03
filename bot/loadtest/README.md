@@ -38,7 +38,8 @@ Prereqs: `firebase` CLI + a JRE (both already present here), and the bot's `npm 
 | `ROUNDS` | `10` | turns emitted per game |
 | `TURN_INTERVAL_MS` | `1000` | delay between rounds |
 | `SCALING_MODE` | `singleton` | `singleton` \| `leader` \| `shard` |
-| `BRIDGE_LATENCY_MS` | `0` | simulated per-send bridge latency |
+| `BRIDGE_LATENCY_MS` | `0` | simulated per-send bridge service time |
+| `BRIDGE_CONCURRENCY` | ∞ | max in-flight sends at the bridge (a single-VM model). Ceiling ≈ `CONCURRENCY*1000/LATENCY` sends/sec — a *global* limit shared by all replicas, so sharding the bot can't raise it |
 | `SLO_MS` | `5000` | p95 emit→send latency ceiling for PASS |
 | `MEM_CEILING_MB` | `450` | peak-RSS ceiling for PASS (~Cloud Run 512Mi) |
 

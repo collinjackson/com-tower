@@ -24,6 +24,7 @@ const cfg = {
   scalingMode: process.env.SCALING_MODE || 'singleton',
   replicas: Number(process.env.REPLICAS || '1'),
   bridgeLatencyMs: Number(process.env.BRIDGE_LATENCY_MS || '0'),
+  bridgeConcurrency: process.env.BRIDGE_CONCURRENCY || '', // '' => unlimited (mocks default Infinity)
   sloMs: Number(process.env.SLO_MS || '5000'),
   memCeilingMb: Number(process.env.MEM_CEILING_MB || '450'), // per-pod ~ the Cloud Run 512Mi budget
   projectId: process.env.LOADTEST_PROJECT || 'demo-comtower',
@@ -277,6 +278,7 @@ const mockProc = spawn('node', [path.join(HERE, 'mock-server.mjs')], {
     AWBW_PORT: String(cfg.ports.awbw), RENDER_PORT: String(cfg.ports.render),
     BRIDGE_PORT: String(cfg.ports.bridge), CONTROL_PORT: String(cfg.ports.control),
     BRIDGE_LATENCY_MS: String(cfg.bridgeLatencyMs),
+    ...(cfg.bridgeConcurrency ? { BRIDGE_CONCURRENCY: String(cfg.bridgeConcurrency) } : {}),
   },
   stdio: ['ignore', mockLog, mockLog],
 });

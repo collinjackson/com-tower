@@ -66,8 +66,24 @@ export function startRenderStub({ port }) {
 }
 
 // --- Signal bridge stub ------------------------------------------------------------------------
-export function startBridgeStub({ port, latencyMs = 0 }) {
+// Models the real Signal bridge: a SINGLE VM (signal-cli). `latencyMs` is per-send service time;
+// `maxConcurrency` caps in-flight sends (excess queue, adding backpressure the bot feels as slow
+// responses). Throughput ceiling ≈ maxConcurrency * 1000 / latencyMs sends/sec — a GLOBAL limit
+// shared by every replica, so it cannot be raised by sharding the bot.
+export function startBridgeStub({ port, latencyMs = 0, maxConcurrency = Infinity }) {
   const sends = []; // { t, recipient, gameId }
+  let active = 0;
+  const queue = [];
+  const complete = (parsed, res) => {
+    const gid = /games_id=(\d+)/.exec(parsed.message || '')?.[1];
+    sends.push({ t: Date.now(), recipient: (parsed.recipients || [])[0], gameId: gid });
+    res.writeHead(201, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ timestamp: Date.now() }));
+    active--;
+    pump();
+  };
+  const service = (job) => { active++; latencyMs > 0 ? setTimeout(() => complete(job.parsed, job.res), latencyMs) : complete(job.parsed, job.res); };
+  const pump = () => { while (active < maxConcurrency && queue.length) service(queue.shift()); };
   const server = http.createServer((req, res) => {
     if (req.method === 'POST' && (req.url || '').startsWith('/v2/send')) {
       let body = '';
@@ -75,21 +91,14 @@ export function startBridgeStub({ port, latencyMs = 0 }) {
       req.on('end', () => {
         let parsed = {};
         try { parsed = JSON.parse(body); } catch {}
-        const deliver = () => {
-          // The bot appends the game link to the message; recover gameId from games_id=NNN.
-          const gid = /games_id=(\d+)/.exec(parsed.message || '')?.[1];
-          sends.push({ t: Date.now(), recipient: (parsed.recipients || [])[0], gameId: gid });
-          res.writeHead(201, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ timestamp: Date.now() }));
-        };
-        latencyMs > 0 ? setTimeout(deliver, latencyMs) : deliver();
+        queue.push({ parsed, res });
+        pump();
       });
     } else {
-      // /v1/groups and friends — return an empty list so any lookups succeed harmlessly.
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end('[]');
     }
   });
   server.listen(port);
-  return { sends, count: () => sends.length, close: () => new Promise((r) => server.close(r)) };
+  return { sends, count: () => sends.length, queueDepth: () => queue.length, close: () => new Promise((r) => server.close(r)) };
 }
