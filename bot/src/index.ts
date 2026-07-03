@@ -766,8 +766,9 @@ const SIGNAL_RECEIVE_POLL_MS = 5000; // Poll for incoming Signal messages every 
 // array, or json-rpc mode where receiving is a WebSocket. We support both and expose
 // what we've seen via the /debug/receive endpoint so receive can be verified without
 // Cloud Run log access.
-type ReceiverMode = 'unknown' | 'poll' | 'ws';
+type ReceiverMode = 'unknown' | 'poll' | 'ws' | 'off';
 let receiverMode: ReceiverMode = 'unknown';
+let receiverActive = false; // is this replica currently running the Signal receiver?
 let receiverWs: WebSocket | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let wsFailCount = 0;
@@ -1994,6 +1995,28 @@ async function startSignalReceiver(): Promise<void> {
   }
 }
 
+/** Stop the Signal receiver on this replica (used when it loses the receiver role). */
+function stopSignalReceiver(): void {
+  receiverMode = 'off'; // makes the ws-close/poll handlers stop reconnecting
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  if (receiverWs) { try { receiverWs.close(); } catch { /* ignore */ } receiverWs = null; }
+}
+
+/** Start/stop the receiver so exactly the replica that currently holds the receiver role runs it.
+ *  Called at startup and whenever ownership changes (leader handover / shard receiver failover). */
+function syncReceiver(): void {
+  const shouldRun = ownership.isReceiver();
+  if (shouldRun && !receiverActive) {
+    receiverActive = true;
+    console.log('[bot] becoming Signal receiver');
+    startSignalReceiver().catch((err) => { receiverActive = false; console.error('[bot] receiver start failed:', err); });
+  } else if (!shouldRun && receiverActive) {
+    receiverActive = false;
+    console.log('[bot] relinquishing Signal receiver');
+    stopSignalReceiver();
+  }
+}
+
 // ── End slash-command bot ────────────────────────────────────────────────────
 
 // ── Group-game turn-notification driver ──────────────────────────────────────
@@ -2366,23 +2389,23 @@ async function runTurnPoll() {
 // A transaction grants/renews the lease only if it's unheld, expired, or already ours — so at most
 // one replica is leader at a time. (The k8s-native swap-in later is a coordination.k8s.io/Lease.)
 function firestoreLeaseStore(db: Firestore): LeaseStore {
-  const ref = db.collection('_locks').doc('leader');
+  const ref = (key: string) => db.collection('_locks').doc(key);
   return {
-    async tryAcquire(holderId: string, ttlMs: number): Promise<string | null> {
+    async tryAcquire(key: string, holderId: string, ttlMs: number): Promise<string | null> {
       return db.runTransaction(async (tx) => {
-        const snap = await tx.get(ref);
+        const snap = await tx.get(ref(key));
         const data = snap.data() as { holder?: string; expiresAt?: number } | undefined;
         const now = Date.now();
         const held = data?.holder && (data.expiresAt ?? 0) > now && data.holder !== holderId;
         if (held) return data!.holder!; // someone else holds a live lease
-        tx.set(ref, { holder: holderId, expiresAt: now + ttlMs });
+        tx.set(ref(key), { holder: holderId, expiresAt: now + ttlMs });
         return holderId;
       });
     },
-    async release(holderId: string): Promise<void> {
+    async release(key: string, holderId: string): Promise<void> {
       await db.runTransaction(async (tx) => {
-        const snap = await tx.get(ref);
-        if ((snap.data() as any)?.holder === holderId) tx.set(ref, { holder: null, expiresAt: 0 });
+        const snap = await tx.get(ref(key));
+        if ((snap.data() as any)?.holder === holderId) tx.set(ref(key), { holder: null, expiresAt: 0 });
       });
     },
   };
@@ -2396,19 +2419,18 @@ async function main() {
   ownership = createOwnership({ leaseStore: firestoreLeaseStore(db) });
   await ownership.start();
   ownership.onChange(() => {
+    // Ownership moved (leader handover / shard receiver failover): re-evaluate which games we watch
+    // and whether we should be running the singleton Signal receiver.
     reevaluateOwnership().catch((err) => console.error('[gg] ownership re-eval failed', err));
+    syncReceiver();
   });
   console.log(
     `Worker starting. SCALING_MODE=${ownership.mode}, receiver=${ownership.isReceiver()}. Watching groupGames...`
   );
 
-  // Signal slash-command receiver (poll or websocket) — only on the receiver replica, so incoming
-  // commands aren't processed N times when running multiple instances.
-  if (ownership.isReceiver()) {
-    startSignalReceiver().catch((err) => console.error('[bot] receiver start failed:', err));
-  } else {
-    console.log('[bot] receiver disabled on this replica (not the elected/shard-0 receiver)');
-  }
+  // Run the Signal receiver only on the replica that currently holds the receiver role, so incoming
+  // commands aren't processed N times. syncReceiver() also handles start/stop on role changes.
+  syncReceiver();
 
   // Hourly page poll: if current player ≠ last notified, we missed a turn — post now.
   setInterval(() => {
