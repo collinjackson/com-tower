@@ -2,7 +2,8 @@
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-<img width="1195" height="751" alt="Screenshot 2026-02-22 at 2 16 07 PM" src="https://github.com/user-attachments/assets/a53506d7-636f-4015-830f-663c2a8d94cc" />
+<img height="250" alt="Preview" src="https://github.com/user-attachments/assets/3e17d888-b04d-4fb3-a762-1171fbb8b9a7" align="right" />
+
 
 **Turn notifications for [Advance Wars By Web](https://awbw.amarriner.com)** — get Signal alerts when it’s your turn.
 
@@ -12,11 +13,9 @@
 
 ## What it does
 
-- **Patch a game** — Sign in with Google, paste an AWBW game link, and add your game. Com Tower watches the game and notifies you when it’s your turn.
-- **Choose how you’re notified** — Signal DM or group, “all turns” or “only my turn,” once per turn or hourly reminders.
-- **Invite others** — Share an invite link so friends can subscribe without signing in (they pick their number and settings on the invite page).
-- **Fun mode** — Optional flavor: each turn ping comes as an in-character radio call from one of the player’s real units, with a Star Wars–style holographic unit sprite in the army’s color. On by default for new games.
-- **Activity feed** — See sent notifications, CAPTCHA issues, and subscriber changes. Solve Signal CAPTCHAs from the game page when needed.
+- **Invite others** — Create a Signal group and invite the bot along with the other players.
+- **Patch a game** — Use slash commands to add your game. Com Tower watches the game and notifies the channel when it’s your turn.
+- **Fun mode** — Optional flavor: each turn ping comes as an in-character radio call from one of the player’s real units, with a holographic unit or CO sprite in the army’s color. On by default for new games.
 
 ---
 
