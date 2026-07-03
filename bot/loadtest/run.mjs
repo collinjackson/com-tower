@@ -6,13 +6,12 @@
 // A G "passes" if drops==0, p95<=SLO_MS, and peak RSS<=MEM_CEILING_MB. Reports the max passing G.
 //
 // Zero cloud: emulator + local mock servers + local bot process(es). See README.md.
-import { spawn, execSync } from 'child_process';
+import { spawn, exec } from 'child_process';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import fs from 'fs';
 import { initializeApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
-import { startAwbwMock, startRenderStub, startBridgeStub } from './mocks.mjs';
 import { shardKeyFor } from '../dist/ownership.js'; // same hash the bot uses, so seeded shardKey matches owns()
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -32,8 +31,17 @@ const cfg = {
   failover: process.env.FAILOVER === '1',
   leaderTtlMs: Number(process.env.LEADER_TTL_MS || '6000'),
   leaderRenewMs: Number(process.env.LEADER_RENEW_MS || '2000'),
-  ports: { awbw: 9101, render: 9102, bridge: 9103, botHealth: 9190 },
+  ports: { awbw: 9101, render: 9102, bridge: 9103, control: 9200, botHealth: 9190 },
 };
+
+// Control-API client for the out-of-process mock server.
+const ctlBase = `http://127.0.0.1:${9200}`;
+async function ctl(path, body) {
+  const res = await fetch(`${ctlBase}${path}`, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {});
+  return res.json();
+}
+const ctlConnected = async () => (await ctl('/control/connected')).connected;
+const ctlStats = () => ctl('/control/stats');
 
 if (!fs.existsSync(BOT_ENTRY)) {
   console.error(`Bot build not found at ${BOT_ENTRY}. Run \`npm run build\` in bot/ first.`);
@@ -49,13 +57,13 @@ const db = getFirestore();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Wait until sends stop arriving (3s of no new sends), bounded by maxMs — so a slow latency tail
-// is measured as latency, not miscounted as a drop when we close the mock.
-async function drainQuiesce(bridge, maxMs) {
+// is measured as latency, not miscounted as a drop. Polls the mock server's send count.
+async function drainQuiesce(maxMs) {
   const end = Date.now() + maxMs;
   let last = -1, stable = 0;
   while (Date.now() < end) {
     await sleep(1000);
-    const n = bridge.count();
+    const n = (await ctlStats()).sends.length;
     if (n === last) { if (++stable >= 3) break; } else { stable = 0; last = n; }
   }
 }
@@ -130,13 +138,23 @@ async function currentLeaderId() {
   }
 }
 
-function sampleRssMb(pid) {
-  try {
-    const kb = Number(execSync(`ps -o rss= -p ${pid}`).toString().trim());
-    return kb / 1024;
-  } catch {
-    return 0;
-  }
+// Sample RSS for all live bots in ONE async ps call, so we never block the event loop that also
+// serves the render/bridge stubs (a blocking sampler manufactured latency/drops under load).
+function sampleRssInto(bots, peakPerPod) {
+  const live = bots.filter((b) => b && !b.killed);
+  if (!live.length) return;
+  exec(`ps -o pid=,rss= -p ${live.map((b) => b.pid).join(',')}`, (err, stdout) => {
+    if (err) return;
+    const byPid = {};
+    for (const line of stdout.trim().split('\n')) {
+      const [pid, rss] = line.trim().split(/\s+/);
+      if (pid) byPid[Number(pid)] = Number(rss) / 1024;
+    }
+    for (let i = 0; i < bots.length; i++) {
+      const mb = bots[i] && byPid[bots[i].pid];
+      if (mb !== undefined) peakPerPod[i] = Math.max(peakPerPod[i], mb);
+    }
+  });
 }
 
 function pct(sorted, p) {
@@ -175,11 +193,7 @@ function computeMetrics(emits, sends) {
   };
 }
 
-const emitRound = (awbw, g, day, emits) => {
-  for (let i = 0; i < g; i++) {
-    if (awbw.emitTurn(gameIdFor(i), day)) emits.push({ gameId: gameIdFor(i), t: Date.now() });
-  }
-};
+const emitRound = (g, day) => ctl('/control/emit-round', { g, day });
 
 async function runOne(g) {
   const R = cfg.replicas;
@@ -187,30 +201,24 @@ async function runOne(g) {
   console.log(`\n=== G=${g} games | mode=${tag} | ${cfg.rounds} rounds @ ${cfg.turnIntervalMs}ms ===`);
   await clearGroupGames();
   await seedGames(g);
-
-  const awbw = startAwbwMock({ port: cfg.ports.awbw });
-  const render = startRenderStub({ port: cfg.ports.render });
-  const bridge = startBridgeStub({ port: cfg.ports.bridge, latencyMs: cfg.bridgeLatencyMs });
+  await ctl('/control/reset', {});
 
   const bots = [];
   for (let i = 0; i < R; i++) bots.push(spawnBot(i, R, path.join(HERE, `bot-${tag}-g${g}-r${i}.log`)));
   const peakPerPod = new Array(R).fill(0);
-  const rssTimer = setInterval(() => {
-    for (let i = 0; i < R; i++) if (bots[i] && !bots[i].killed) peakPerPod[i] = Math.max(peakPerPod[i], sampleRssMb(bots[i].pid));
-  }, 500);
+  const rssTimer = setInterval(() => sampleRssInto(bots, peakPerPod), 500);
 
   // Wait until a socket is open for every game (bounded). Across replicas each game has one owner.
   const deadline = Date.now() + 60000;
-  while (awbw.gamesConnected() < g && Date.now() < deadline) await sleep(250);
-  const connected = awbw.gamesConnected();
+  while ((await ctlConnected()) < g && Date.now() < deadline) await sleep(250);
+  const connected = await ctlConnected();
   if (connected < g) console.warn(`  ! only ${connected}/${g} sockets connected before driving load`);
 
-  const emits = [];
   let failover = null;
   if (cfg.failover && cfg.scalingMode === 'leader') {
     const preKill = Math.max(2, Math.floor(cfg.rounds / 3));
     let day = 0;
-    for (; day < preKill; day++) { emitRound(awbw, g, day + 1, emits); await sleep(cfg.turnIntervalMs); }
+    for (; day < preKill; day++) { await emitRound(g, day + 1); await sleep(cfg.turnIntervalMs); }
     const leaderId = await currentLeaderId();
     const victim = bots.find((b) => `replica-${b._replicaIndex}` === leaderId);
     const killAt = Date.now();
@@ -221,12 +229,13 @@ async function runOne(g) {
     const maxT = Date.now() + Math.max(cfg.leaderTtlMs * 4, 20000);
     let extraAfterRecovery = 0;
     while (Date.now() < maxT) {
-      emitRound(awbw, g, ++day, emits);
+      await emitRound(g, ++day);
       await sleep(cfg.turnIntervalMs);
-      if (bridge.sends.some((s) => s.t > killAt)) { if (++extraAfterRecovery >= 3) break; }
+      if ((await ctlStats()).sends.some((s) => s.t > killAt)) { if (++extraAfterRecovery >= 3) break; }
     }
-    await drainQuiesce(bridge, Math.max(15000, g * 20));
-    const firstAfter = bridge.sends.filter((s) => s.t > killAt).sort((a, b) => a.t - b.t)[0];
+    await drainQuiesce(Math.max(15000, g * 20));
+    const sends = (await ctlStats()).sends;
+    const firstAfter = sends.filter((s) => s.t > killAt).sort((a, b) => a.t - b.t)[0];
     const newLeader = await currentLeaderId();
     failover = {
       killedLeader: leaderId,
@@ -235,17 +244,17 @@ async function runOne(g) {
       recoveryMs: firstAfter ? firstAfter.t - killAt : null,
     };
   } else {
-    for (let round = 1; round <= cfg.rounds; round++) { emitRound(awbw, g, round, emits); await sleep(cfg.turnIntervalMs); }
-    await drainQuiesce(bridge, Math.max(15000, g * 20, cfg.bridgeLatencyMs * 4));
+    for (let round = 1; round <= cfg.rounds; round++) { await emitRound(g, round); await sleep(cfg.turnIntervalMs); }
+    await drainQuiesce(Math.max(15000, g * 20, cfg.bridgeLatencyMs * 4));
   }
 
   clearInterval(rssTimer);
   for (const b of bots) { try { b.kill('SIGTERM'); } catch {} }
   await sleep(500);
   for (const b of bots) { try { b.kill('SIGKILL'); } catch {} }
-  await Promise.all([awbw.close(), render.close(), bridge.close()]);
 
-  const m = computeMetrics(emits, bridge.sends);
+  const stats = await ctlStats();
+  const m = computeMetrics(stats.emits, stats.sends);
   const maxPodRss = Math.max(...peakPerPod);
   // In failover we EXPECT a handover gap (drops), so don't fail on drops there; dupes must stay 0.
   const pass = cfg.failover
@@ -260,8 +269,24 @@ async function runOne(g) {
   return { g, connected, ...m, maxPodRssMb: Math.round(maxPodRss), perPodRss: peakPerPod.map((x) => Math.round(x)), failover, pass };
 }
 
+// Mock server in its OWN process so its event loop isn't shared with the driver/metrics here.
+const mockLog = fs.openSync(path.join(HERE, `mock-server-${cfg.scalingMode}.log`), 'w');
+const mockProc = spawn('node', [path.join(HERE, 'mock-server.mjs')], {
+  env: {
+    ...process.env,
+    AWBW_PORT: String(cfg.ports.awbw), RENDER_PORT: String(cfg.ports.render),
+    BRIDGE_PORT: String(cfg.ports.bridge), CONTROL_PORT: String(cfg.ports.control),
+    BRIDGE_LATENCY_MS: String(cfg.bridgeLatencyMs),
+  },
+  stdio: ['ignore', mockLog, mockLog],
+});
+// Wait for the control API to answer.
+for (let i = 0; i < 40; i++) { try { await ctlConnected(); break; } catch { await sleep(250); } }
+
 const results = [];
 for (const g of cfg.games) results.push(await runOne(g));
+
+try { mockProc.kill('SIGKILL'); } catch {}
 
 const passing = results.filter((r) => r.pass).map((r) => r.g);
 const maxPass = passing.length ? Math.max(...passing) : 0;
