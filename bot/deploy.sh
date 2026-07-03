@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Use the com-tower gcloud profile (collin.jackson@gmail.com) without changing your global default.
+export CLOUDSDK_ACTIVE_CONFIG_NAME="${CLOUDSDK_ACTIVE_CONFIG_NAME:-com-tower}"
+
 # Cloud Run deploy helper for the worker.
 # Supports reading secrets from Secret Manager. If SECRET_* are set, they win.
 # Otherwise falls back to plain env values.
