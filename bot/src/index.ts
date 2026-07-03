@@ -4,6 +4,7 @@ import WebSocket from 'ws';
 import { GoogleAuth, IdTokenClient } from 'google-auth-library';
 import http from 'http';
 import { FieldValue } from 'firebase-admin/firestore';
+import { createOwnership, type Ownership } from './ownership.js';
 
 /** once = first notification only; hourly = at most once per hour; undefined = every turn */
 export type NotifyFrequency = 'once' | 'hourly';
@@ -52,8 +53,16 @@ type RenderPayload = {
 };
 
 const auth = new GoogleAuth();
-const idTokenClients = new Map<string, IdTokenClient>();
+// Minimal request surface the bridge callers actually use ({ data, status }). Both a Google
+// IdTokenClient and the plain-fetch fallback below satisfy it.
+interface HttpRequester {
+  request(opts: any): Promise<{ data: any; status: number; statusText?: string }>;
+  getRequestHeaders(url?: string): Promise<any>;
+}
+const idTokenClients = new Map<string, HttpRequester>();
 const renderUrl = process.env.NOTIFY_RENDER_URL;
+// Which games this replica is responsible for (SCALING_MODE: singleton|leader|shard). Set in main().
+let ownership: Ownership;
 const playersCache = new Map<string, { players: string[]; countries: string[] }>();
 const gameNameCache = new Map<string, string>();
 const MAX_INLINE_IMAGE_BYTES = 1_500_000; // 1.5 MB guard
@@ -127,9 +136,47 @@ function readJsonBody<T>(req: http.IncomingMessage): Promise<T> {
   });
 }
 
-async function getIdTokenClient(url: string): Promise<IdTokenClient> {
+// Plain-HTTP requester for a bridge reached over a trusted private network (the VM-hosted
+// bridge) or a local stub (load tests) — no Google OIDC. Shapes responses/errors like the
+// google-auth-library client the callers expect.
+function makePlainRequester(): HttpRequester {
+  return {
+    async request(opts: any) {
+      const method = (opts.method || 'GET').toUpperCase();
+      const headers: Record<string, string> = { ...(opts.headers || {}) };
+      let body: string | undefined;
+      if (opts.data !== undefined) {
+        body = typeof opts.data === 'string' ? opts.data : JSON.stringify(opts.data);
+        if (!headers['Content-Type'] && !headers['content-type']) headers['Content-Type'] = 'application/json';
+      }
+      const res = await fetch(opts.url, {
+        method,
+        headers,
+        body,
+        signal: opts.timeout ? AbortSignal.timeout(opts.timeout) : undefined,
+      });
+      const text = await res.text();
+      let data: any = text;
+      try { data = text ? JSON.parse(text) : undefined; } catch { /* non-JSON, keep text */ }
+      if (!res.ok) {
+        const err: any = new Error(`Request failed ${res.status} ${res.statusText}`);
+        err.response = { status: res.status, data };
+        throw err;
+      }
+      return { data, status: res.status, statusText: res.statusText };
+    },
+    // Plain/local bridge needs no auth header.
+    async getRequestHeaders() {
+      return {};
+    },
+  };
+}
+
+async function getIdTokenClient(url: string): Promise<HttpRequester> {
   if (idTokenClients.has(url)) return idTokenClients.get(url)!;
-  const client = await auth.getIdTokenClient(url);
+  // Bypass OIDC for plain-HTTP/local bridges; opt in for a private-network https bridge too.
+  const noAuth = process.env.SIGNAL_CLI_NO_AUTH === '1' || /^http:\/\//i.test(url);
+  const client: HttpRequester = noAuth ? makePlainRequester() : await auth.getIdTokenClient(url);
   idTokenClients.set(url, client);
   return client;
 }
@@ -175,12 +222,23 @@ function ensureFirebase() {
     const projectId = process.env.FIREBASE_PROJECT_ID;
     const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
     const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
-    if (!projectId || !clientEmail || !privateKey) {
-      throw new Error('Missing Firebase admin env vars');
+    // Two credential paths:
+    //  - Explicit service-account key (current Cloud Run setup) -> cert(...).
+    //  - No key present -> Application Default Credentials. Covers GKE Workload Identity
+    //    (the k8s target) and the Firestore emulator (load tests: FIRESTORE_EMULATOR_HOST
+    //    short-circuits auth, so only a projectId is needed).
+    if (projectId && clientEmail && privateKey) {
+      initializeApp({ credential: cert({ projectId, clientEmail, privateKey }) });
+    } else {
+      const effectiveProject =
+        projectId || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT;
+      if (!effectiveProject && !process.env.FIRESTORE_EMULATOR_HOST) {
+        throw new Error(
+          'Missing Firebase config: set FIREBASE_* (cert), or ADC + GOOGLE_CLOUD_PROJECT, or FIRESTORE_EMULATOR_HOST'
+        );
+      }
+      initializeApp(effectiveProject ? { projectId: effectiveProject } : {});
     }
-    initializeApp({
-      credential: cert({ projectId, clientEmail, privateKey }),
-    });
   }
 }
 
@@ -189,8 +247,16 @@ function buildAwbwSocketUrl(gameId: string) {
   return `${base}/node/game/${gameId}`;
 }
 
+// Public, user-facing game URL — always the real AWBW host (goes into notification text).
 function gameLink(gameId: string) {
   return `https://awbw.amarriner.com/game.php?games_id=${gameId}`;
+}
+
+// Base host the bot SCRAPES for game state. Defaults to the real AWBW host, but is overridable
+// (e.g. a local stub in load tests) so the scrape traffic can be isolated. Prod is unchanged.
+const AWBW_HTTP_BASE = (process.env.AWBW_HTTP_BASE || 'https://awbw.amarriner.com').replace(/\/+$/, '');
+function gamePageUrl(gameId: string) {
+  return `${AWBW_HTTP_BASE}/game.php?games_id=${gameId}`;
 }
 
 async function loadGameName(gameId: string): Promise<string | undefined> {
@@ -231,7 +297,7 @@ async function loadPlayers(gameId: string): Promise<{ players: string[]; countri
   }
 
   try {
-    const res = await fetch(gameLink(gameId));
+    const res = await fetch(gamePageUrl(gameId));
     const html = await res.text();
     const matches = Array.from(html.matchAll(/profile\.php\?username=([A-Za-z0-9_]+)/g)).map(
       (m) => m[1]
@@ -261,7 +327,7 @@ async function loadPlayers(gameId: string): Promise<{ players: string[]; countri
 /** Check if the game has ended by scraping the AWBW game page. */
 async function isGameEnded(gameId: string): Promise<boolean> {
   try {
-    const res = await fetch(gameLink(gameId), { cache: 'no-store' as any });
+    const res = await fetch(gamePageUrl(gameId), { cache: 'no-store' as any });
     const html = await res.text();
     if (/game\s+over|game over/i.test(html)) return true;
     if (/winner\s*:|\bwinner\b.*(?:defeated|wins)/i.test(html)) return true;
@@ -278,7 +344,7 @@ async function isGameEnded(gameId: string): Promise<boolean> {
 // Best-effort scrape of the current player from the game page to validate the socket payload
 async function scrapeCurrentPlayerName(gameId: string): Promise<string | undefined> {
   try {
-    const res = await fetch(gameLink(gameId), { cache: 'no-store' as any });
+    const res = await fetch(gamePageUrl(gameId), { cache: 'no-store' as any });
     const html = await res.text();
     // Try multiple patterns we have seen on AWBW pages
     const patterns = [
@@ -422,7 +488,7 @@ async function resolveCurrentTurn(gameId: string): Promise<
   | undefined
 > {
   try {
-    const res = await fetch(gameLink(gameId), { cache: 'no-store' as any });
+    const res = await fetch(gamePageUrl(gameId), { cache: 'no-store' as any });
     const html = await res.text();
     const cur = html.match(/currentTurn\s*=\s*(\d+)/);
     if (!cur) return undefined;
@@ -446,7 +512,7 @@ async function resolveCurrentTurn(gameId: string): Promise<
     const coName = coWindow.match(/"co_name"\s*:\s*"([^"]+)"/)?.[1];
     const coPath = coWindow.match(/"co_image_path"\s*:\s*"([^"]+)"/)?.[1]; // JSON-escaped slashes
     const coImageUrl = coPath
-      ? `https://awbw.amarriner.com/${coPath.replace(/\\\//g, '/').replace(/^\//, '')}`
+      ? `${AWBW_HTTP_BASE}/${coPath.replace(/\\\//g, '/').replace(/^\//, '')}`
       : undefined;
     // CO power charge: is a CO Power / Super CO Power ready to fire?
     const numF = (re: RegExp): number => { const m = coWindow.match(re); return m ? Number(m[1]) : 0; };
@@ -2250,9 +2316,31 @@ function applyGroupGameWatch(groupId: string, gg: GroupGame, changeType: string)
     stopGGSocket(groupId, changeType === 'removed' ? 'doc removed' : `status ${gg.status}`);
     return;
   }
+  // Only watch games this replica owns (singleton owns all; shard owns its slice; leader owns
+  // all iff elected). Games we don't own are another replica's responsibility — drop any socket.
+  if (!ownership.owns(gg.gameId)) {
+    stopGGSocket(groupId, 'not owned by this replica');
+    return;
+  }
   const st = activeGGSockets.get(groupId);
   if (st && st.gameId === gg.gameId && st.shouldReopen) return;
   startGroupGameSocket(groupId, gg.gameId);
+}
+
+/** Re-evaluate every active group game against current ownership (start owned, drop unowned).
+ *  Fired when ownership changes (leadership won/lost). No-op churn for static strategies. */
+async function reevaluateOwnership() {
+  let snap;
+  try {
+    snap = await getFirestore().collection('groupGames').where('status', '==', 'active').get();
+  } catch (err) {
+    console.warn('[gg] ownership re-eval query failed', err);
+    return;
+  }
+  console.log(`[gg] re-evaluating ownership over ${snap.size} active games (receiver=${ownership.isReceiver()})`);
+  for (const doc of snap.docs) {
+    applyGroupGameWatch(doc.id, doc.data() as GroupGame, 'ownership-change');
+  }
 }
 
 const TURN_POLL_MS = 60 * 60 * 1000; // hourly — slow is fine; this exists so missed turns are eventually caught
@@ -2269,6 +2357,7 @@ async function runTurnPoll() {
   for (const doc of snap.docs) {
     const gg = { ...(doc.data() as GroupGame), groupId: doc.id };
     if (!gg.gameId) continue;
+    if (!ownership.owns(gg.gameId)) continue; // another replica's game
     await syncGroupGameIfTurnChanged(gg.groupId, gg.gameId, 'turn-poll');
   }
 }
@@ -2277,10 +2366,23 @@ async function main() {
   ensureFirebase();
   const db = getFirestore();
 
-  console.log('Worker starting. Watching groupGames for active games...');
+  // Decide which games this replica owns (SCALING_MODE). start() acquires any lease (leader).
+  ownership = createOwnership();
+  await ownership.start();
+  ownership.onChange(() => {
+    reevaluateOwnership().catch((err) => console.error('[gg] ownership re-eval failed', err));
+  });
+  console.log(
+    `Worker starting. SCALING_MODE=${ownership.mode}, receiver=${ownership.isReceiver()}. Watching groupGames...`
+  );
 
-  // Signal slash-command receiver (poll or websocket, auto-detected)
-  startSignalReceiver().catch((err) => console.error('[bot] receiver start failed:', err));
+  // Signal slash-command receiver (poll or websocket) — only on the receiver replica, so incoming
+  // commands aren't processed N times when running multiple instances.
+  if (ownership.isReceiver()) {
+    startSignalReceiver().catch((err) => console.error('[bot] receiver start failed:', err));
+  } else {
+    console.log('[bot] receiver disabled on this replica (not the elected/shard-0 receiver)');
+  }
 
   // Hourly page poll: if current player ≠ last notified, we missed a turn — post now.
   setInterval(() => {
