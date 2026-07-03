@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
+import { getAdminDb } from '@/lib/firebase-admin';
 
 // AWBW country code -> army name (for voice flavor). Unknown codes just omit the name.
 const ARMY_NAMES: Record<string, string> = {
@@ -149,6 +150,52 @@ const DEFAULT_COLOR: [number, number, number] = [130, 240, 255]; // teal fallbac
 // Used to put the hologram's lead room on the side it's looking.
 const FACE_LEFT = new Set(['bm', 'yc', 'bh', 'rf', 'ab', 'pc', 'tg', 'ar', 'ne', 'sc']);
 
+// Fetch recently used jokes for a patch to avoid repeats
+async function fetchUsedJokes(db: any, gameId: string, inviterUid: string): Promise<string[]> {
+  try {
+    if (!gameId || !inviterUid) return [];
+    const patchId = `${gameId}-${inviterUid}`;
+    const snap = await db
+      .collection('patches')
+      .doc(patchId)
+      .collection('usedJokes')
+      .orderBy('createdAt', 'desc')
+      .limit(20)
+      .get();
+    return snap.docs.map((doc: any) => doc.data().joke).filter(Boolean);
+  } catch (err) {
+    console.warn('Failed to fetch used jokes:', err);
+    return [];
+  }
+}
+
+// Store a used joke after selection
+async function storeUsedJoke(
+  db: any,
+  gameId: string,
+  inviterUid: string,
+  joke: string,
+  style: string,
+  day?: number
+): Promise<void> {
+  try {
+    if (!gameId || !inviterUid) return;
+    const patchId = `${gameId}-${inviterUid}`;
+    await db
+      .collection('patches')
+      .doc(patchId)
+      .collection('usedJokes')
+      .add({
+        joke,
+        style,
+        day: day ?? 0,
+        createdAt: db.FieldValue.serverTimestamp(),
+      });
+  } catch (err) {
+    console.warn('Failed to store used joke:', err);
+  }
+}
+
 // Brighten a faction color into a glow: scale so the brightest channel hits
 // ~235, preserving hue. Dark armies (Black Hole, Noir) become vivid/ghostly
 // glows instead of vanishing, so everyone stays holographic on black.
@@ -202,12 +249,13 @@ function holoGrain(w: number, h: number, [gr, gg, gb]: [number, number, number])
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { gameId, day, playerName, link, enableFun } = body as {
+    const { gameId, day, playerName, link, enableFun, inviterUid } = body as {
       gameId?: string;
       day?: number;
       playerName?: string;
       link?: string;
       enableFun?: boolean;
+      inviterUid?: string;
     };
     const army = (body.army || {}) as { code?: string };
     const unit = (body.unit || {}) as {
@@ -293,6 +341,24 @@ export async function POST(req: NextRequest) {
         const featuringCo = !unitFile && !!(coName || co.imageUrl);
         // Unit callsign: just the unit type — no number (less confusing).
         const callsign = unitName;
+
+        // Fetch used jokes in this game to avoid repeats
+        let usedJokesConstraint = '';
+        if (gameId && inviterUid) {
+          try {
+            const db = getAdminDb();
+            const usedJokes = await fetchUsedJokes(db, gameId, inviterUid);
+            if (usedJokes.length > 0) {
+              usedJokesConstraint =
+                `USED JOKES IN THIS GAME (do NOT repeat or vary these):\n` +
+                usedJokes.map((j) => `- ${j}`).join('\n') +
+                `\nThese exact jokes and variations on them are NOT allowed. Generate fresh material.\n\n`;
+            }
+          } catch (err) {
+            console.warn('Failed to fetch used jokes:', err);
+          }
+        }
+
         // Joke craft applies to both voices — a flagged failure mode (limp non-jokes).
         const jokeCraft =
           `If your format is a joke or pun, it MUST work as one — a real setup and a punchline that genuinely lands (the wordplay has to actually make sense); a flat non-sequitur is worse than a straight call.\n`;
@@ -323,6 +389,7 @@ export async function POST(req: NextRequest) {
               : '') +
             `Skip radio-net jargon — NO "come in", "say again", "five by five", or "over". You're the commander, not a grunt sharing a net.\n` +
             `Pick a FRESH angle; don't lean on one catchphrase.\n` +
+            usedJokesConstraint +
             jokeCraft +
             langLine +
             `Format for THIS transmission: ${style}. (If you can't pull it off well, a commanding one-liner is fine.)\n` +
@@ -341,6 +408,7 @@ export async function POST(req: NextRequest) {
             `With no action yet, you fill the dead air — that's WHY you've got a joke or a rhyme — but let the bit speak for itself; don't explain that you're passing time or itching for orders.\n` +
             `Only use what's stated here — don't invent battles, casualties, or damage.\n` +
             `Pick a FRESH angle — avoid the single most obvious cliché for your faction (the same prop, pun, or catchphrase every time); your character is broad, so mine a different part of it.\n` +
+            usedJokesConstraint +
             jokeCraft +
             langLine +
             `Format for THIS transmission: ${style}. (If you can't pull it off well, a sharp call is fine.)\n` +
@@ -397,6 +465,16 @@ export async function POST(req: NextRequest) {
           }
         }
         if (caption && caption.length > 240) caption = caption.slice(0, 240);
+
+        // Store the joke if it was selected and the style is "a genuine joke"
+        if (caption && style === 'a genuine joke — real setup + a punchline that actually lands (if a pun, the wordplay must truly work; no limp non-sequiturs)' && gameId && inviterUid) {
+          try {
+            const db = getAdminDb();
+            await storeUsedJoke(db, gameId, inviterUid, caption, style, day);
+          } catch (err) {
+            console.warn('Failed to store used joke:', err);
+          }
+        }
       } catch (err) {
         console.error('AI render failed', err);
         return NextResponse.json(
