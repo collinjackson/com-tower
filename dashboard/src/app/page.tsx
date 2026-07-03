@@ -58,7 +58,15 @@ export default function Home() {
               <span>Field Orders</span>
             </div>
             <h1 className="mt-2 text-xl sm:text-2xl font-bold tracking-tight text-[#2b2412]">
-              AWBW turn notifications, over Signal
+              <a
+                href="https://awbw.amarriner.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[#8a3a12] no-underline hover:text-[#a8481a] transition-colors"
+              >
+                AWBW
+              </a>{' '}
+              turn notifications, over Signal
             </h1>
             <p className="mt-1 text-xs text-[#5c4d30]">
               RE: get @-mentioned in your game&rsquo;s group chat when it&rsquo;s your turn.
