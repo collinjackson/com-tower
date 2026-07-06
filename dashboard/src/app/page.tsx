@@ -4,7 +4,7 @@
 
 import { DashRule } from './components/DashRule';
 
-const BOT_NUMBER = '+1 (904) 878-1337';
+const BOT_NUMBER = '+1 904-878-1337';
 
 // Short roster only — /help points to the rest.
 const COMMANDS: Array<[string, string]> = [
