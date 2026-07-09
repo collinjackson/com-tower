@@ -2499,7 +2499,13 @@ async function runReminderCheck() {
     const threshold = reminderThresholdMs(gg);
     if (threshold === null) continue; // reminders disabled for this group
     const current = gg.lastTurn?.awbwUsername;
-    if (!gg.turnStartedAt || !current) continue; // no turn baseline (or player unknown) yet
+    if (!current) continue; // player unknown (generic-notice turn) — can't target a nudge
+    if (!gg.turnStartedAt) {
+      // No baseline yet (e.g. a game already in progress before this feature shipped) — start the
+      // clock now so a stuck turn gets nudged ~a threshold from here rather than never.
+      await ggRef(gg.groupId).update({ turnStartedAt: now }).catch(() => {});
+      continue;
+    }
     const sinceLast = now - (gg.lastReminderAt || gg.turnStartedAt);
     if (sinceLast < threshold) continue; // not due yet
     // Confirm they still haven't moved — catches a websocket-missed turn change (then no nudge).
