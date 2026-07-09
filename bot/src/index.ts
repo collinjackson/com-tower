@@ -742,17 +742,22 @@ async function buildMessage(
     } catch (err) {
       console.error('Render fetch failed', err);
       const errMsg = err instanceof Error ? err.message : 'Render fetch failed';
-      return {
-        text: `Next turn is up. ${meta.day ? `Day ${meta.day}. ` : ''}${
-          meta.playerName ? `${meta.playerName}, you're up. ` : ''
-        }${gameName ? `${gameName} ` : ''}${link} [render error: ${errMsg}]`,
-      };
+      const errParts = [
+        meta.day ? `Day ${meta.day}.` : '',
+        meta.playerName ? `${meta.playerName}, you're up.` : 'New turn.',
+        gameName && gameName !== `Game ${gameId}` ? gameName : '',
+        link,
+        `[render error: ${errMsg}]`,
+      ].filter(Boolean);
+      return { text: errParts.join(' ') };
     }
   }
-  const parts = [`Next turn is up.`];
-  if (meta.day) parts.push(`Day ${meta.day}.`);
-  if (meta.playerName) parts.push(`${meta.playerName}, you're up.`);
-  parts.push(gameName, link);
+  const parts = [
+    meta.day ? `Day ${meta.day}.` : '',
+    meta.playerName ? `${meta.playerName}, you're up.` : 'New turn.',
+    gameName && gameName !== `Game ${gameId}` ? gameName : '',
+    link,
+  ].filter(Boolean);
   return { text: parts.join(' ') };
 }
 
@@ -1440,6 +1445,7 @@ const HELP_TEXT =
   '/addmod @x           — make someone a mod (mod)\n' +
   '/removemod @x        — remove a mod (mod)\n' +
   '/fun [on|off]        — flavor text (mod)\n' +
+  '/remind <dur|off>    — nudge the current player if they sit on their turn (mod)\n' +
   '/language <lang>     — your turn pings in another language (e.g. Klingon, Esperanto)\n' +
   '/status              — current state\n' +
   '/sync                — check AWBW now and post if we missed a turn\n' +
@@ -1466,6 +1472,10 @@ type GroupGame = {
   scope?: 'mine' | 'all';
   lastTurn?: { day?: number | null; awbwUsername?: string };
   lastUnitHp?: Record<string, number>; // units_id -> hp at last sighting, for HP-change detection
+  // Turn reminders: nudge the current player if they sit on their turn.
+  turnStartedAt?: number;     // ms epoch when the current player's turn began (from our POV)
+  reminderMs?: number | null; // override threshold; null = reminders off; undefined = default
+  lastReminderAt?: number;    // ms epoch of the most recent reminder sent this turn (repeat cadence)
 };
 type CmdCtx = {
   groupId: string;
@@ -1479,6 +1489,48 @@ type CmdCtx = {
 
 function ggRef(groupId: string) {
   return getFirestore().collection('groupGames').doc(groupId);
+}
+
+// Append-only audit log of binding lifecycle changes (bound / rebound / stopped / ended /
+// reminder_config). The bot never deletes or overwrites-away a binding without leaving a trace
+// here, so a disappeared/changed binding is always traceable. Fire-and-forget.
+function logBindingEvent(groupId: string, event: string, data: Record<string, unknown> = {}): void {
+  getFirestore()
+    .collection('bindingEvents')
+    .add({ groupId, event, at: FieldValue.serverTimestamp(), ...data })
+    .catch((e) => console.error('[audit] bindingEvent write failed', e));
+}
+
+// Turn-reminder helpers.
+const DEFAULT_REMINDER_MS = 24 * 60 * 60 * 1000; // 1 day — AWBW's default per-turn increment
+/** Parse a duration like "12h", "2d", "90m", "1d12h" → ms, or null if invalid. */
+function parseDurationMs(s: string): number | null {
+  let ms = 0;
+  let matched = false;
+  const re = /(\d+)\s*(d|h|m)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(s.toLowerCase()))) {
+    matched = true;
+    const n = Number(m[1]);
+    ms += m[2] === 'd' ? n * 86400000 : m[2] === 'h' ? n * 3600000 : n * 60000;
+  }
+  return matched && ms > 0 ? ms : null;
+}
+function formatDurationMs(ms: number): string {
+  const d = Math.floor(ms / 86400000);
+  const h = Math.floor((ms % 86400000) / 3600000);
+  const mn = Math.floor((ms % 3600000) / 60000);
+  const parts: string[] = [];
+  if (d) parts.push(`${d}d`);
+  if (h) parts.push(`${h}h`);
+  if (mn && !d) parts.push(`${mn}m`);
+  return parts.join(' ') || '0m';
+}
+/** Reminder threshold for a group: null = disabled, a number override, else the default. */
+function reminderThresholdMs(gg: GroupGame): number | null {
+  if (gg.reminderMs === null) return null;
+  if (typeof gg.reminderMs === 'number' && gg.reminderMs > 0) return gg.reminderMs;
+  return DEFAULT_REMINDER_MS;
 }
 /** Permissive mod check: if no mods recorded yet, anyone may act (friendly games). */
 function isGgMod(gg: GroupGame | undefined, aci?: string): boolean {
@@ -1533,6 +1585,11 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
       },
       { merge: true }
     );
+    logBindingEvent(groupId, gg?.gameId && gg.gameId !== gameId ? 'rebound' : 'bound', {
+      gameId,
+      prevGameId: gg?.gameId || null,
+      actor: { aci: senderAci || null, name: senderName || null },
+    });
     const roster = info.players || [];
     const mapped = new Set(Object.keys(existingPlayers).map((s) => s.toLowerCase()));
     const switching = !!gg?.gameId && gg.gameId !== gameId;
@@ -1723,6 +1780,36 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
     return;
   }
 
+  if (cmd === '/remind') {
+    if (!isGgMod(gg, senderAci)) {
+      await reply('Only a mod can change turn reminders.');
+      return;
+    }
+    const actor = { aci: senderAci || null, name: senderName || null };
+    const arg = (args[0] || '').toLowerCase();
+    if (arg === 'off' || arg === 'disable' || arg === 'none') {
+      await ggRef(groupId).update({ reminderMs: null, updatedAt: FieldValue.serverTimestamp() });
+      logBindingEvent(groupId, 'reminder_config', { gameId: gg.gameId, reminderMs: null, actor });
+      await reply('Turn reminders: off.');
+      return;
+    }
+    if (arg === '' || arg === 'default' || arg === 'reset') {
+      await ggRef(groupId).update({ reminderMs: FieldValue.delete(), updatedAt: FieldValue.serverTimestamp() });
+      logBindingEvent(groupId, 'reminder_config', { gameId: gg.gameId, reminderMs: 'default', actor });
+      await reply(`Turn reminders: default (every ${formatDurationMs(DEFAULT_REMINDER_MS)}).`);
+      return;
+    }
+    const ms = parseDurationMs(args.join(' '));
+    if (!ms) {
+      await reply('Usage: /remind <duration like 12h, 2d, 1d12h | off | default>');
+      return;
+    }
+    await ggRef(groupId).update({ reminderMs: ms, updatedAt: FieldValue.serverTimestamp() });
+    logBindingEvent(groupId, 'reminder_config', { gameId: gg.gameId, reminderMs: ms, actor });
+    await reply(`Turn reminders: every ${formatDurationMs(ms)} until the player moves. (/remind off to disable)`);
+    return;
+  }
+
   if (cmd === '/status') {
     const n = Object.keys(gg.players || {}).length;
     const modCount = (gg.mods || []).length;
@@ -1740,6 +1827,8 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
     else msg += `\nLast turn seen: never — run /sync to catch up`;
     if (st?.lastNextTurnAt)
       msg += `\nLast ws NextTurn: ${new Date(st.lastNextTurnAt).toISOString()}`;
+    const rt = reminderThresholdMs(gg);
+    msg += `\nReminders: ${rt === null ? 'off' : `every ${formatDurationMs(rt)}${typeof gg.reminderMs === 'number' ? '' : ' (default)'}`}`;
     await reply(msg);
     return;
   }
@@ -1766,6 +1855,7 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
       return;
     }
     await ggRef(groupId).update({ status: 'stopped', updatedAt: FieldValue.serverTimestamp() });
+    logBindingEvent(groupId, 'stopped', { gameId: gg.gameId, actor: { aci: senderAci || null, name: senderName || null } });
     await reply(`Stopped watching game ${gg.gameId}. Run /game <link> to resume.`);
     return;
   }
@@ -2074,6 +2164,7 @@ function startGroupGameSocket(groupId: string, gameId: string) {
       .then((ended) => {
         if (ended) {
           ggRef(groupId).update({ status: 'ended', updatedAt: FieldValue.serverTimestamp() }).catch(() => {});
+          logBindingEvent(groupId, 'ended', { gameId });
           sendGroupReply(groupId, `🏁 Game ${gameId} has ended. Run /game <link> to watch another.`).catch(() => {});
           stopGGSocket(groupId, 'game ended (page check)');
         }
@@ -2109,6 +2200,7 @@ function startGroupGameSocket(groupId: string, gameId: string) {
         console.log(`[gg] ws ${gameId}: ${msgType}`);
         if (parsed?.GameOver || parsed?.GameEnd || msgType === 'GameOver' || msgType === 'GameEnd') {
           ggRef(groupId).update({ status: 'ended', updatedAt: FieldValue.serverTimestamp() }).catch(() => {});
+          logBindingEvent(groupId, 'ended', { gameId });
           stopGGSocket(groupId, 'game over (ws)');
         }
         return;
@@ -2214,10 +2306,10 @@ async function onGroupGameNextTurn(
     console.log('[gg] turn changed but current player unresolved; sending generic notice');
     await sendGroupRaw(
       groupId,
-      `⏭️ Next turn is up${meta.day ? ` (day ${meta.day})` : ''}.\n${gameLink(gameId)}`
+      `⏭️${meta.day ? ` Day ${meta.day}.` : ''} New turn.\n${gameLink(gameId)}`
     ).catch((e) => console.error('[gg] generic notice failed', e));
     await ggRef(groupId)
-      .update({ lastTurn: { day: meta.day ?? null, awbwUsername: null }, updatedAt: FieldValue.serverTimestamp() })
+      .update({ lastTurn: { day: meta.day ?? null, awbwUsername: null }, turnStartedAt: Date.now(), lastReminderAt: null, updatedAt: FieldValue.serverTimestamp() })
       .catch(() => {});
     return;
   }
@@ -2301,6 +2393,8 @@ async function onGroupGameNextTurn(
       .update({
         lastTurn: { day: meta.day ?? null, awbwUsername: currentPlayer },
         lastUnitHp: newUnitHp,
+        turnStartedAt: Date.now(), // reminder clock: this player's turn started now (from our POV)
+        lastReminderAt: null,      // re-arm reminders for the new turn
         updatedAt: FieldValue.serverTimestamp(),
       })
       .catch(() => {});
@@ -2386,6 +2480,59 @@ async function runTurnPoll() {
   }
 }
 
+const REMINDER_CHECK_MS = 15 * 60 * 1000; // check every 15 min; thresholds are coarse (~hours/days)
+/** Nudge the current player when they've sat on their turn past the threshold, and keep nudging
+ *  every threshold until they move (or a mod /stops the game). The @-ping targets only the current
+ *  player, so it doesn't burden the rest of the group. */
+async function runReminderCheck() {
+  let snap;
+  try {
+    snap = await getFirestore().collection('groupGames').where('status', '==', 'active').get();
+  } catch (err) {
+    console.warn('[remind] query failed', err);
+    return;
+  }
+  const now = Date.now();
+  for (const doc of snap.docs) {
+    const gg = { ...(doc.data() as GroupGame), groupId: doc.id };
+    if (!gg.gameId || !ownership.owns(gg.gameId)) continue;
+    const threshold = reminderThresholdMs(gg);
+    if (threshold === null) continue; // reminders disabled for this group
+    const current = gg.lastTurn?.awbwUsername;
+    if (!gg.turnStartedAt || !current) continue; // no turn baseline (or player unknown) yet
+    const sinceLast = now - (gg.lastReminderAt || gg.turnStartedAt);
+    if (sinceLast < threshold) continue; // not due yet
+    // Confirm they still haven't moved — catches a websocket-missed turn change (then no nudge).
+    const scraped = await resolveCurrentPlayerName(gg.gameId).catch(() => undefined);
+    if (scraped && scraped.toLowerCase() !== String(current).toLowerCase()) {
+      await syncGroupGameIfTurnChanged(gg.groupId, gg.gameId, 'reminder-detected-move').catch(() => {});
+      continue;
+    }
+    await sendTurnReminder(gg, now - gg.turnStartedAt).catch((e) => console.error('[remind] send failed', e));
+    await ggRef(gg.groupId).update({ lastReminderAt: now }).catch(() => {});
+  }
+}
+
+/** Send a single turn-reminder nudge: a normal-style group alert that @-pings only the current
+ *  player and shows how long they've been on the clock. */
+async function sendTurnReminder(gg: GroupGame, elapsedMs: number): Promise<void> {
+  const current = gg.lastTurn?.awbwUsername;
+  if (!gg.gameId || !current) return;
+  const players = gg.players || {};
+  const key = Object.keys(players).find((k) => k.toLowerCase() === String(current).toLowerCase());
+  const mapping = key ? players[key] : undefined;
+  let message = `⏰ Still your move, ${current} — ${formatDurationMs(elapsedMs)} on the clock.\n${gameLink(gg.gameId)}`;
+  const mentions: Array<{ author: string; start: number; length: number }> = [];
+  if (mapping?.aci) {
+    const spacer = message.endsWith(' ') || message.endsWith('\n') ? '' : ' ';
+    const start = (message + spacer).length;
+    message = `${message}${spacer}@`;
+    mentions.push({ author: mapping.aci, start, length: 1 });
+  }
+  await sendGroupRaw(gg.groupId, message, mentions.length ? mentions : undefined);
+  console.log(`[remind] nudged ${gg.groupId.substring(0, 16)} player=${current} elapsed=${formatDurationMs(elapsedMs)}`);
+}
+
 // Firestore-backed leader-election lease. A single doc `_locks/leader` holds { holder, expiresAt }.
 // A transaction grants/renews the lease only if it's unheld, expired, or already ours — so at most
 // one replica is leader at a time. (The k8s-native swap-in later is a coordination.k8s.io/Lease.)
@@ -2437,6 +2584,11 @@ async function main() {
   setInterval(() => {
     runTurnPoll().catch((err) => console.error('[gg] turn-poll error', err));
   }, TURN_POLL_MS);
+
+  // Turn reminders: nudge the current player if they sit on their turn past the threshold.
+  setInterval(() => {
+    runReminderCheck().catch((err) => console.error('[remind] check error', err));
+  }, REMINDER_CHECK_MS);
 
   // Drive one AWBW socket per active group game; notify the group on each turn change. In shard
   // mode the query is narrowed to this replica's shardKey slice, so listener memory + Firestore
