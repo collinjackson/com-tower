@@ -718,6 +718,11 @@ async function buildMessage(
           throw new Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error));
         }
         if (data?.text) {
+          if (enableFun && !data.imageData) {
+            console.warn(
+              `Render returned no image for game ${gameId}${data.imageSkipReason ? ` (reason: ${data.imageSkipReason})` : ''}`
+            );
+          }
           let text = data.text as string;
           // Only append a REAL game name — never the "Game <id>" fallback, which
           // is redundant with the game id already in the URL.
@@ -2259,6 +2264,9 @@ async function onGroupGameNextTurn(
     return;
   }
   const turn = await resolveCurrentTurn(gameId).catch(() => undefined);
+  if (!turn) {
+    console.warn(`[gg] resolveCurrentTurn failed for game ${gameId} — no unit/CO context, ping will have no image`);
+  }
   const currentPlayer =
     turn?.username ||
     (await scrapeCurrentPlayerName(gameId).catch(() => undefined)) ||
@@ -2383,8 +2391,17 @@ async function onGroupGameNextTurn(
       await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined, attachment);
     } catch (sendErr) {
       if (attachment) {
-        console.warn('[gg] send with attachment failed; retrying text-only', sendErr);
-        await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined);
+        // Attachment uploads are the slow window where a competing connection on the same
+        // Signal account kills the send (ConnectedElsewhereException) — a second attempt
+        // usually lands, so retry WITH the image before giving up on it.
+        console.warn('[gg] send with attachment failed; retrying with attachment', sendErr);
+        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined, attachment);
+        } catch (retryErr) {
+          console.warn('[gg] attachment retry failed; sending text-only', retryErr);
+          await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined);
+        }
       } else {
         throw sendErr;
       }
@@ -2399,7 +2416,7 @@ async function onGroupGameNextTurn(
       })
       .catch(() => {});
     console.log(
-      `[gg] notified group ${groupId.substring(0, 16)} turn=${currentPlayer} mentioned=${mentions.length > 0}`
+      `[gg] notified group ${groupId.substring(0, 16)} turn=${currentPlayer} mentioned=${mentions.length > 0} attachment=${attachment ? `${attachment.filename} (${Math.round(attachment.dataB64.length * 0.75 / 1024)}KB)` : 'none'}`
     );
   } catch (err) {
     console.error('[gg] send failed', err);
