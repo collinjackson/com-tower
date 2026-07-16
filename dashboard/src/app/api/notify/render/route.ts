@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
+import { FieldValue } from 'firebase-admin/firestore';
 import { getAdminDb } from '@/lib/firebase-admin';
 
 // AWBW country code -> army name (for voice flavor). Unknown codes just omit the name.
@@ -150,49 +151,49 @@ const DEFAULT_COLOR: [number, number, number] = [130, 240, 255]; // teal fallbac
 // Used to put the hologram's lead room on the side it's looking.
 const FACE_LEFT = new Set(['bm', 'yc', 'bh', 'rf', 'ab', 'pc', 'tg', 'ar', 'ne', 'sc']);
 
-// Fetch recently used jokes for a patch to avoid repeats
-async function fetchUsedJokes(db: any, gameId: string, inviterUid: string): Promise<string[]> {
+// Every fun-mode caption sent for a game, oldest first — the precise history the
+// generator avoids and the judge uses to eliminate duplicate candidates. Keyed by
+// gameId alone so it covers both the patch (DM) flow and the group flow (which has
+// no inviterUid).
+const SENT_CAPTIONS_LIMIT = 150;
+async function fetchSentCaptions(db: any, gameId: string): Promise<string[]> {
   try {
-    if (!gameId || !inviterUid) return [];
-    const patchId = `${gameId}-${inviterUid}`;
+    if (!gameId) return [];
     const snap = await db
-      .collection('patches')
-      .doc(patchId)
-      .collection('usedJokes')
+      .collection('games')
+      .doc(gameId)
+      .collection('sentCaptions')
       .orderBy('createdAt', 'desc')
-      .limit(20)
+      .limit(SENT_CAPTIONS_LIMIT)
       .get();
-    return snap.docs.map((doc: any) => doc.data().joke).filter(Boolean);
+    return snap.docs
+      .map((doc: any) => doc.data().text)
+      .filter(Boolean)
+      .reverse();
   } catch (err) {
-    console.warn('Failed to fetch used jokes:', err);
+    console.warn('Failed to fetch sent captions:', err);
     return [];
   }
 }
 
-// Store a used joke after selection
-async function storeUsedJoke(
+// Record the selected caption (every style, unit and CO voice alike).
+async function storeSentCaption(
   db: any,
   gameId: string,
-  inviterUid: string,
-  joke: string,
+  text: string,
   style: string,
   day?: number
 ): Promise<void> {
   try {
-    if (!gameId || !inviterUid) return;
-    const patchId = `${gameId}-${inviterUid}`;
-    await db
-      .collection('patches')
-      .doc(patchId)
-      .collection('usedJokes')
-      .add({
-        joke,
-        style,
-        day: day ?? 0,
-        createdAt: db.FieldValue.serverTimestamp(),
-      });
+    if (!gameId) return;
+    await db.collection('games').doc(gameId).collection('sentCaptions').add({
+      text,
+      style,
+      day: day ?? 0,
+      createdAt: FieldValue.serverTimestamp(),
+    });
   } catch (err) {
-    console.warn('Failed to store used joke:', err);
+    console.warn('Failed to store sent caption:', err);
   }
 }
 
@@ -249,13 +250,12 @@ function holoGrain(w: number, h: number, [gr, gg, gb]: [number, number, number])
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { gameId, day, playerName, link, enableFun, inviterUid } = body as {
+    const { gameId, day, playerName, link, enableFun } = body as {
       gameId?: string;
       day?: number;
       playerName?: string;
       link?: string;
       enableFun?: boolean;
-      inviterUid?: string;
     };
     const army = (body.army || {}) as { code?: string };
     const unit = (body.unit || {}) as {
@@ -342,22 +342,20 @@ export async function POST(req: NextRequest) {
         // Unit callsign: just the unit type — no number (less confusing).
         const callsign = unitName;
 
-        // Fetch used jokes in this game to avoid repeats
-        let usedJokesConstraint = '';
-        if (gameId && inviterUid) {
-          try {
-            const db = getAdminDb();
-            const usedJokes = await fetchUsedJokes(db, gameId, inviterUid);
-            if (usedJokes.length > 0) {
-              usedJokesConstraint =
-                `USED JOKES IN THIS GAME (do NOT repeat or vary these):\n` +
-                usedJokes.map((j) => `- ${j}`).join('\n') +
-                `\nThese exact jokes and variations on them are NOT allowed. Generate fresh material.\n\n`;
-            }
-          } catch (err) {
-            console.warn('Failed to fetch used jokes:', err);
-          }
+        // Every caption already sent in this game — the generator must not repeat
+        // or vary any of them, and the judge eliminates candidates that do.
+        let sentCaptions: string[] = [];
+        try {
+          const db = getAdminDb();
+          sentCaptions = await fetchSentCaptions(db, gameId);
+        } catch (err) {
+          console.warn('Failed to fetch sent captions:', err);
         }
+        const usedJokesConstraint = sentCaptions.length
+          ? `ALREADY SENT IN THIS GAME (do NOT repeat or vary ANY of these — no reusing their setup, punchline, or core gag):\n` +
+            sentCaptions.map((j) => `- ${j}`).join('\n') +
+            `\nGenerate fresh material.\n\n`
+          : '';
 
         // Joke craft applies to both voices — a flagged failure mode (limp non-jokes).
         const jokeCraft =
@@ -436,6 +434,10 @@ export async function POST(req: NextRequest) {
         } else if (candidates.length > 1) {
           try {
             const list = candidates.map((c, i) => `${i}. ${c}`).join('\n');
+            const sentBlock = sentCaptions.length
+              ? `ALREADY SENT in this game (every prior message):\n${sentCaptions.map((j) => `- ${j}`).join('\n')}\n` +
+                `HARD RULE, before any other criteria: ELIMINATE every candidate that duplicates or is a variation of ANY already-sent message — same setup, same punchline, or same core gag (e.g. another riff on the same joke premise counts as a duplicate). Pick the best of the remaining candidates. Only if EVERY candidate is a duplicate, pick the one least similar to the history.\n`
+              : '';
             const judgeRes = await client.chat.completions.create({
               model: judgeModel,
               temperature: 0.2,
@@ -446,6 +448,7 @@ export async function POST(req: NextRequest) {
                   role: 'user',
                   content:
                     `Pick the best radio call from ${featuringCo ? `the CO ${coName || 'commander'}` : `a ${armyName || ''} ${unitName || 'command'} grunt`} to commander ${who}. ` +
+                    sentBlock +
                     `Criteria, in priority order: best leans into the ${featuringCo ? "CO's" : "army's"} character and is genuinely funny; nails the intended format (${style}); ` +
                     `if the format is a joke/pun, DOWNRANK any whose punchline or wordplay doesn't actually land (a non-joke is bad); ` +
                     `the humor itself shows the idle restlessness — DOWNRANK any that explicitly say they're bored/restless/antsy/itching or that narrate having nothing to do; ` +
@@ -466,13 +469,13 @@ export async function POST(req: NextRequest) {
         }
         if (caption && caption.length > 240) caption = caption.slice(0, 240);
 
-        // Store the joke if it was selected and the style is "a genuine joke"
-        if (caption && style === 'a genuine joke — real setup + a punchline that actually lands (if a pun, the wordplay must truly work; no limp non-sequiturs)' && gameId && inviterUid) {
+        // Record every selected caption so future turns can't repeat it.
+        if (caption) {
           try {
             const db = getAdminDb();
-            await storeUsedJoke(db, gameId, inviterUid, caption, style, day);
+            await storeSentCaption(db, gameId, caption, style, day);
           } catch (err) {
-            console.warn('Failed to store used joke:', err);
+            console.warn('Failed to store sent caption:', err);
           }
         }
       } catch (err) {
@@ -486,7 +489,11 @@ export async function POST(req: NextRequest) {
 
     const parts = caption
       ? [caption, link]
-      : ['Next turn is up.', playerName ? `${playerName}, you’re up.` : '', link];
+      : [
+          day ? `Day ${day}.` : '',
+          playerName ? `${playerName}, you’re up.` : 'New turn.',
+          link,
+        ];
     const text = parts.filter(Boolean).join(' ').trim();
 
     // Attach the army's unit sprite as a Star Wars-style hologram: a cyan,
@@ -496,6 +503,12 @@ export async function POST(req: NextRequest) {
     let imageData: string | null = null;
     let imageContentType: string | null = null;
     let imageFilename: string | null = null;
+    // Why no image was attached, for the bot's logs (null once an image is built).
+    let imageSkipReason: string | null = enableFun
+      ? unitFile || co.imageUrl
+        ? null
+        : 'no-unit-and-no-co-portrait'
+      : 'fun-mode-off';
     if (enableFun && army.code && /^[a-z]{2,3}$/.test(army.code) && unitFile) {
       try {
         const sharp = (await import('sharp')).default;
@@ -543,12 +556,17 @@ export async function POST(req: NextRequest) {
           imageData = out.toString('base64');
           imageContentType = 'image/gif';
           imageFilename = `${army.code}${unitFile}.gif`;
+          imageSkipReason = null;
         } else {
+          imageSkipReason = `sprite-fetch-${sres.status}`;
           console.warn(`Sprite fetch failed ${sres.status} for ${spriteUrl}`);
         }
       } catch (err) {
+        imageSkipReason = 'sprite-transform-error';
         console.error('Sprite attach failed (continuing text-only)', err);
       }
+    } else if (enableFun && unitFile && !imageData) {
+      imageSkipReason = 'missing-or-invalid-army-code';
     }
 
     // No unit to feature — holographize the player's CO portrait instead. Same
@@ -582,12 +600,18 @@ export async function POST(req: NextRequest) {
           imageData = out.toString('base64');
           imageContentType = 'image/gif';
           imageFilename = `co-${(co.name || 'co').toLowerCase().replace(/[^a-z0-9]/g, '')}.gif`;
+          imageSkipReason = null;
         } else {
+          imageSkipReason = `co-fetch-${cres.status}`;
           console.warn(`CO portrait fetch failed ${cres.status} for ${co.imageUrl}`);
         }
       } catch (err) {
+        imageSkipReason = 'co-transform-error';
         console.error('CO portrait attach failed (continuing text-only)', err);
       }
+    }
+    if (enableFun && !imageData) {
+      console.warn(`Render for game ${gameId}: no image attached (${imageSkipReason || 'unknown'})`);
     }
 
     return NextResponse.json({
@@ -596,6 +620,7 @@ export async function POST(req: NextRequest) {
       imageData: imageData || undefined,
       imageContentType: imageContentType || undefined,
       imageFilename: imageFilename || undefined,
+      imageSkipReason: imageSkipReason || undefined,
     });
   } catch (err) {
     console.error('Render error', err);
