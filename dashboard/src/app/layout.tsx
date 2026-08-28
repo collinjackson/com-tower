@@ -41,6 +41,15 @@ export default function RootLayout({
           </a>
           <span aria-hidden className="text-zinc-600">·</span>
           <a
+            href="https://github.com/collinjackson/com-tower/blob/main/SELF_HOST.md"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hover:text-zinc-400 transition-colors"
+          >
+            Self-host
+          </a>
+          <span aria-hidden className="text-zinc-600">·</span>
+          <a
             href="https://awbw.amarriner.com"
             target="_blank"
             rel="noopener noreferrer"
