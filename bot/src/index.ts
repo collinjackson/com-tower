@@ -3,7 +3,7 @@ import { getFirestore, type Firestore } from 'firebase-admin/firestore';
 import WebSocket from 'ws';
 import { GoogleAuth, IdTokenClient } from 'google-auth-library';
 import http from 'http';
-import { FieldValue } from 'firebase-admin/firestore';
+import { FieldValue, FieldPath } from 'firebase-admin/firestore';
 import { createOwnership, type Ownership, type LeaseStore } from './ownership.js';
 
 /** once = first notification only; hourly = at most once per hour; undefined = every turn */
@@ -43,6 +43,7 @@ type NextTurnMeta = {
   funEnabled?: boolean;
   language?: string;
   inviterUid?: string;
+  reminderElapsed?: string; // set for turn reminders → caption becomes an impatient nudge
 };
 type RenderPayload = {
   text: string;
@@ -50,6 +51,9 @@ type RenderPayload = {
   imageData?: string;
   imageContentType?: string;
   imageFilename?: string;
+  /** sentCaptions doc id from the render endpoint — stamped with the Signal send
+   *  timestamp after the message goes out, so reactions can be matched back to it. */
+  captionId?: string;
 };
 
 const auth = new GoogleAuth();
@@ -324,21 +328,36 @@ async function loadPlayers(gameId: string): Promise<{ players: string[]; countri
   }
 }
 
-/** Check if the game has ended by scraping the AWBW game page. */
-async function isGameEnded(gameId: string): Promise<boolean> {
+/** Scrape the AWBW game page for end-of-game state. game.php always emits
+ *  `gameEndDate = "YYYY-MM-DD"` (empty string while live) and `endData = {...}` (null while
+ *  live, with a winners message once over) — visible-text sniffing ("game over", "winner")
+ *  matches template markup on LIVE pages too, so only these structurals are trustworthy. */
+async function fetchGameEndInfo(gameId: string): Promise<{ ended: boolean; message?: string }> {
   try {
     const res = await fetch(gamePageUrl(gameId), { cache: 'no-store' as any });
     const html = await res.text();
-    if (/game\s+over|game over/i.test(html)) return true;
-    if (/winner\s*:|\bwinner\b.*(?:defeated|wins)/i.test(html)) return true;
-    if (/has\s+ended|game\s+has\s+ended/i.test(html)) return true;
-    if (/games_status\s*[=:]\s*["']?(?:finished|ended|complete|over)/i.test(html)) return true;
-    if (/game_status\s*[=:]\s*["']?(?:finished|ended|complete|over)/i.test(html)) return true;
-    return false;
+    let message: string | undefined;
+    const dataMatch = html.match(/endData\s*=\s*(\{[\s\S]*?\});/);
+    if (dataMatch) {
+      try {
+        message =
+          String(JSON.parse(dataMatch[1])?.message || '').replace(/\s+/g, ' ').trim() || undefined;
+      } catch {
+        /* endData shape changed — fall through to gameEndDate */
+      }
+    }
+    const end = html.match(/gameEndDate\s*=\s*"([^"]*)"/);
+    if (end) return { ended: end[1].trim().length > 0, message };
+    return { ended: !!message, message };
   } catch (err) {
-    console.warn('isGameEnded check failed', gameId, err);
-    return false;
+    console.warn('game end check failed', gameId, err);
+    return { ended: false };
   }
+}
+
+/** Check if the game has ended by scraping the AWBW game page. */
+async function isGameEnded(gameId: string): Promise<boolean> {
+  return (await fetchGameEndInfo(gameId)).ended;
 }
 
 // Best-effort scrape of the current player from the game page to validate the socket payload
@@ -710,6 +729,7 @@ async function buildMessage(
           unit: enableFun && unit ? unit : undefined,
           co: enableFun && co ? co : undefined,
           language: enableFun && meta.language ? meta.language : undefined,
+          reminderElapsed: enableFun && meta.reminderElapsed ? meta.reminderElapsed : undefined,
         }),
       });
       if (res.ok) {
@@ -737,6 +757,7 @@ async function buildMessage(
             imageData: data.imageData || undefined,
             imageContentType: data.imageContentType || undefined,
             imageFilename: data.imageFilename || undefined,
+            captionId: data.captionId || undefined,
           };
         }
         throw new Error('Render returned no text');
@@ -1352,7 +1373,7 @@ async function sendGroupRaw(
   message: string,
   mentions?: Array<{ author: string; start: number; length: number }>,
   attachment?: { dataB64: string; contentType: string; filename: string }
-): Promise<void> {
+): Promise<number | undefined> {
   const bridgeUrl = process.env.SIGNAL_CLI_URL;
   const botNumber = process.env.SIGNAL_BOT_NUMBER;
   if (!bridgeUrl || !botNumber) throw new Error('Signal bridge not configured');
@@ -1369,13 +1390,16 @@ async function sendGroupRaw(
       `data:${attachment.contentType};filename=${attachment.filename};base64,${attachment.dataB64}`,
     ];
   }
-  await client.request({
+  const res = await client.request({
     url: `${bridgeUrl}/v2/send`,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     data,
     timeout: 45000,
   });
+  // signal-cli-rest-api answers { "timestamp": <ms> } (number or string depending on version).
+  const ts = Number((res?.data as any)?.timestamp);
+  return Number.isFinite(ts) && ts > 0 ? ts : undefined;
 }
 
 async function sendGroupReply(groupId: string, text: string): Promise<void> {
@@ -1450,6 +1474,7 @@ const HELP_TEXT =
   '/addmod @x           — make someone a mod (mod)\n' +
   '/removemod @x        — remove a mod (mod)\n' +
   '/fun [on|off]        — flavor text (mod)\n' +
+  '/showcase [on|off]   — let good posts appear (names blacked out) in the public gallery (mod)\n' +
   '/remind <dur|off>    — nudge the current player if they sit on their turn (mod)\n' +
   '/language <lang>     — your turn pings in another language (e.g. Klingon, Esperanto)\n' +
   '/status              — current state\n' +
@@ -1481,6 +1506,9 @@ type GroupGame = {
   turnStartedAt?: number;     // ms epoch when the current player's turn began (from our POV)
   reminderMs?: number | null; // override threshold; null = reminders off; undefined = default
   lastReminderAt?: number;    // ms epoch of the most recent reminder sent this turn (repeat cadence)
+  // Opt-in to the public gallery on the website. Off unless a mod runs /showcase on: a fun-mode
+  // caption can riff on group chatter, so publishing one is the group's call, not ours.
+  showcaseEnabled?: boolean;
 };
 type CmdCtx = {
   groupId: string;
@@ -1492,8 +1520,22 @@ type CmdCtx = {
   mentions: Array<{ uuid?: string; number?: string; name?: string }>;
 };
 
+// Signal group internal IDs are standard base64 (alphabet A–Z a–z 0–9 + / =), which can contain
+// '/'. Firestore treats '/' in a doc id as a PATH separator, so `.doc('a/b/c')` silently writes to
+// a nested subcollection instead of a top-level doc. Such a binding stays readable via ggRef (same
+// mangled path every time) but is INVISIBLE to `collection('groupGames')` queries/listeners — so
+// the watcher socket never starts and no turn pings fire. Map '/' -> '_' for the doc id only.
+// Standard base64 never emits '_', so this is collision-free and a no-op for slash-free ids (no
+// migration needed for those); '_' -> '/' recovers the raw group id from a doc id.
+function groupDocId(groupId: string): string {
+  return groupId.replace(/\//g, '_');
+}
+function groupIdFromDocId(docId: string): string {
+  return docId.replace(/_/g, '/');
+}
+
 function ggRef(groupId: string) {
-  return getFirestore().collection('groupGames').doc(groupId);
+  return getFirestore().collection('groupGames').doc(groupDocId(groupId));
 }
 
 // Append-only audit log of binding lifecycle changes (bound / rebound / stopped / ended /
@@ -1504,6 +1546,83 @@ function logBindingEvent(groupId: string, event: string, data: Record<string, un
     .collection('bindingEvents')
     .add({ groupId, event, at: FieldValue.serverTimestamp(), ...data })
     .catch((e) => console.error('[audit] bindingEvent write failed', e));
+}
+
+/** Stamp the Signal send timestamp — plus everything the public showcase needs to redact the
+ *  post later — onto the caption doc the render endpoint created. Without the timestamp a
+ *  reaction can never be matched back to the message it was aimed at. Fire-and-forget. */
+async function stampCaptionSend(
+  gameId: string,
+  captionId: string,
+  fields: {
+    sentTimestamp: number;
+    groupId: string;
+    turnPlayer?: string;
+    roster: string[];
+    gameName?: string;
+  }
+): Promise<void> {
+  try {
+    await getFirestore()
+      .collection('games')
+      .doc(gameId)
+      .collection('sentCaptions')
+      .doc(captionId)
+      .update({
+        sentTimestamp: fields.sentTimestamp,
+        groupId: fields.groupId,
+        turnPlayer: fields.turnPlayer ?? null,
+        // Snapshotted now so redaction is exact string replacement later, rather than
+        // guessing at names once the roster has moved on.
+        roster: fields.roster,
+        gameName: fields.gameName ?? null,
+        sentAt: FieldValue.serverTimestamp(),
+      });
+  } catch (e) {
+    console.warn('[gg] caption stamp failed', e);
+  }
+}
+
+/** Record an emoji reaction to one of our own posts. Signal delivers these as a dataMessage
+ *  with no body, so they fall straight through the command path unless we branch first.
+ *  Stored as reactions[reactorAci] = emoji — one per person, so a changed reaction replaces
+ *  and a removed one deletes, with no double-counting. */
+async function handleSignalReaction(env: any, reaction: any): Promise<void> {
+  const botNumber = process.env.SIGNAL_BOT_NUMBER;
+  const targetAuthor = reaction.targetAuthorNumber || reaction.targetAuthor;
+  // Only reactions to Com Tower's own messages — players reacting to each other is not ours.
+  if (!botNumber || !targetAuthor || targetAuthor !== botNumber) return;
+  const target = Number(reaction.targetSentTimestamp);
+  const reactor: string | undefined = env?.sourceUuid || env?.sourceNumber;
+  const groupId: string | undefined = env?.dataMessage?.groupInfo?.groupId;
+  if (!target || !reactor || !groupId) return;
+
+  const snap = await ggRef(groupId).get();
+  if (!snap.exists) return;
+  const gameId = (snap.data() as GroupGame).gameId;
+  if (!gameId) return;
+
+  // sentTimestamp is unique per post, so this needs only the automatic single-field index.
+  const found = await getFirestore()
+    .collection('games')
+    .doc(gameId)
+    .collection('sentCaptions')
+    .where('sentTimestamp', '==', target)
+    .limit(1)
+    .get();
+  if (found.empty) return;
+
+  const emoji = typeof reaction.emoji === 'string' ? reaction.emoji.trim() : '';
+  const remove = reaction.isRemove === true || !emoji;
+  await found.docs[0].ref.update(
+    new FieldPath('reactions', reactor),
+    remove ? FieldValue.delete() : emoji,
+    'reactionsUpdatedAt',
+    FieldValue.serverTimestamp()
+  );
+  console.log(
+    `[react] ${remove ? 'removed' : emoji} on game ${gameId} caption ${found.docs[0].id}`
+  );
 }
 
 // Turn-reminder helpers.
@@ -1576,6 +1695,16 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
       loadGameName(gameId),
     ]);
     const existingPlayers = gg?.players || {};
+    // Switching to a different game invalidates the old game's turn state. Clearing lastTurn
+    // also makes the bind-time sync below announce whose move it is in the new game. On a
+    // same-game re-bind, lastTurn is kept (no duplicate announcement) but the reminder clock
+    // still restarts — any prior clock predates this bind.
+    const gameChanged = !!gg?.gameId && gg.gameId !== gameId;
+    const staleTurnState = {
+      turnStartedAt: Date.now(),
+      lastReminderAt: null,
+      ...(gameChanged ? { lastTurn: FieldValue.delete(), lastUnitHp: FieldValue.delete() } : {}),
+    };
     await ggRef(groupId).set(
       {
         groupId,
@@ -1586,6 +1715,7 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
         mods: gg?.mods || (senderAci ? [senderAci] : []),
         players: existingPlayers,
         funEnabled: gg?.funEnabled ?? true, // fun mode is the default for new games; preserves an explicit /fun off
+        ...staleTurnState,
         updatedAt: FieldValue.serverTimestamp(),
       },
       { merge: true }
@@ -1785,6 +1915,22 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
     return;
   }
 
+  if (cmd === '/showcase') {
+    if (!isGgMod(gg, senderAci)) {
+      await reply('Only a mod can change showcase opt-in.');
+      return;
+    }
+    const explicit = (args[0] || '').toLowerCase();
+    const on = explicit === 'on' ? true : explicit === 'off' ? false : !gg.showcaseEnabled;
+    await ggRef(groupId).update({ showcaseEnabled: on, updatedAt: FieldValue.serverTimestamp() });
+    await reply(
+      on
+        ? 'Showcase on — this game\u2019s best posts can appear in the public gallery, with every player name blacked out. Note a fun-mode post may riff on group chatter, so only leave this on if that\u2019s fine with everyone here.'
+        : 'Showcase off — nothing from this game appears in the public gallery.'
+    );
+    return;
+  }
+
   if (cmd === '/remind') {
     if (!isGgMod(gg, senderAci)) {
       await reply('Only a mod can change turn reminders.');
@@ -1875,6 +2021,14 @@ async function handleSignalIncoming(item: any): Promise<void> {
   const env = item?.envelope;
   const dataMessage = env?.dataMessage;
   if (!dataMessage) return;
+  // Reactions arrive as a dataMessage with message: null — handle before the text checks below,
+  // which would otherwise drop them as "not a command".
+  if (dataMessage.reaction) {
+    await handleSignalReaction(env, dataMessage.reaction).catch((err) =>
+      console.error('[react] failed to record reaction:', err)
+    );
+    return;
+  }
   const text: string = (dataMessage.message || '').trim();
   // Onboarding: a Signal group invite link (works in a DM, before the bot is a member) -> join it.
   const linkMatch = text.match(/https:\/\/signal\.group\/#\S+/);
@@ -2145,6 +2299,30 @@ function stopGGSocket(groupId: string, reason: string) {
   console.log(`[gg] stopped watching for group ${groupId.substring(0, 16)} (${reason})`);
 }
 
+/** Announce the end of a watched game to the group, mark it ended, and stop watching.
+ *  Safe to call from both detection paths (page check + websocket) — the status guard
+ *  keeps a second detection from re-announcing. */
+async function announceGameEnded(
+  groupId: string,
+  gameId: string,
+  reason: string,
+  message?: string
+): Promise<void> {
+  const snap = await ggRef(groupId).get().catch(() => undefined);
+  const status = snap?.exists ? (snap.data() as GroupGame).status : undefined;
+  stopGGSocket(groupId, reason);
+  if (status === 'ended') return; // already announced (other detection path won the race)
+  await ggRef(groupId)
+    .update({ status: 'ended', updatedAt: FieldValue.serverTimestamp() })
+    .catch(() => {});
+  logBindingEvent(groupId, 'ended', { gameId });
+  const headline = message || `Game ${gameId} is over.`;
+  await sendGroupReply(
+    groupId,
+    `🏁 ${headline}\nI've stopped watching it — run /game <link> when the next one starts.`
+  ).catch((e) => console.error('[gg] end-of-game announce failed', e));
+}
+
 function startGroupGameSocket(groupId: string, gameId: string) {
   const existing = activeGGSockets.get(groupId);
   if (existing) {
@@ -2165,14 +2343,10 @@ function startGroupGameSocket(groupId: string, gameId: string) {
 
   state.checkInterval = setInterval(() => {
     if (!state.shouldReopen) return;
-    isGameEnded(gameId)
-      .then((ended) => {
-        if (ended) {
-          ggRef(groupId).update({ status: 'ended', updatedAt: FieldValue.serverTimestamp() }).catch(() => {});
-          logBindingEvent(groupId, 'ended', { gameId });
-          sendGroupReply(groupId, `🏁 Game ${gameId} has ended. Run /game <link> to watch another.`).catch(() => {});
-          stopGGSocket(groupId, 'game ended (page check)');
-        }
+    fetchGameEndInfo(gameId)
+      .then((info) => {
+        if (info.ended)
+          return announceGameEnded(groupId, gameId, 'game ended (page check)', info.message);
       })
       .catch(() => {});
   }, GAME_ENDED_CHECK_MS);
@@ -2204,9 +2378,10 @@ function startGroupGameSocket(groupId: string, gameId: string) {
       if (msgType !== 'NextTurn') {
         console.log(`[gg] ws ${gameId}: ${msgType}`);
         if (parsed?.GameOver || parsed?.GameEnd || msgType === 'GameOver' || msgType === 'GameEnd') {
-          ggRef(groupId).update({ status: 'ended', updatedAt: FieldValue.serverTimestamp() }).catch(() => {});
-          logBindingEvent(groupId, 'ended', { gameId });
-          stopGGSocket(groupId, 'game over (ws)');
+          // Best-effort winners message from the page; announce generically if it's not up yet.
+          void fetchGameEndInfo(gameId)
+            .then((info) => announceGameEnded(groupId, gameId, 'game over (ws)', info.message))
+            .catch(() => announceGameEnded(groupId, gameId, 'game over (ws)'));
         }
         return;
       }
@@ -2387,8 +2562,9 @@ async function onGroupGameNextTurn(
   for (const u of liveUnits) if (u.id) newUnitHp[u.id] = u.hp;
 
   try {
+    let sentTimestamp: number | undefined;
     try {
-      await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined, attachment);
+      sentTimestamp = await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined, attachment);
     } catch (sendErr) {
       if (attachment) {
         // Attachment uploads are the slow window where a competing connection on the same
@@ -2397,14 +2573,27 @@ async function onGroupGameNextTurn(
         console.warn('[gg] send with attachment failed; retrying with attachment', sendErr);
         await new Promise((r) => setTimeout(r, 2000));
         try {
-          await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined, attachment);
+          sentTimestamp = await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined, attachment);
         } catch (retryErr) {
           console.warn('[gg] attachment retry failed; sending text-only', retryErr);
-          await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined);
+          sentTimestamp = await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined);
         }
       } else {
         throw sendErr;
       }
+    }
+    // Bind the post we just sent to the caption row behind it, so reactions have something
+    // to land on and the showcase has the names it must redact.
+    if (payload.captionId && sentTimestamp) {
+      await stampCaptionSend(gameId, payload.captionId, {
+        sentTimestamp,
+        groupId,
+        turnPlayer: currentPlayer,
+        roster: Array.from(
+          new Set([...(info.players || []), ...Object.keys(gg.players || {}), currentPlayer || ''])
+        ).filter(Boolean),
+        gameName,
+      });
     }
     await ggRef(groupId)
       .update({
@@ -2474,7 +2663,7 @@ async function reevaluateOwnership() {
   }
   console.log(`[gg] re-evaluating ownership over ${snap.size} active games (receiver=${ownership.isReceiver()})`);
   for (const doc of snap.docs) {
-    applyGroupGameWatch(doc.id, doc.data() as GroupGame, 'ownership-change');
+    applyGroupGameWatch(groupIdFromDocId(doc.id), doc.data() as GroupGame, 'ownership-change');
   }
 }
 
@@ -2490,7 +2679,7 @@ async function runTurnPoll() {
     return;
   }
   for (const doc of snap.docs) {
-    const gg = { ...(doc.data() as GroupGame), groupId: doc.id };
+    const gg = { ...(doc.data() as GroupGame), groupId: groupIdFromDocId(doc.id) };
     if (!gg.gameId) continue;
     if (!ownership.owns(gg.gameId)) continue; // another replica's game
     await syncGroupGameIfTurnChanged(gg.groupId, gg.gameId, 'turn-poll');
@@ -2511,7 +2700,7 @@ async function runReminderCheck() {
   }
   const now = Date.now();
   for (const doc of snap.docs) {
-    const gg = { ...(doc.data() as GroupGame), groupId: doc.id };
+    const gg = { ...(doc.data() as GroupGame), groupId: groupIdFromDocId(doc.id) };
     if (!gg.gameId || !ownership.owns(gg.gameId)) continue;
     const threshold = reminderThresholdMs(gg);
     if (threshold === null) continue; // reminders disabled for this group
@@ -2525,6 +2714,13 @@ async function runReminderCheck() {
     }
     const sinceLast = now - (gg.lastReminderAt || gg.turnStartedAt);
     if (sinceLast < threshold) continue; // not due yet
+    // A reminder is due, so we're touching AWBW anyway — first make sure the game isn't over
+    // (catches an end the websocket missed; without this we'd nudge a finished game forever).
+    const endInfo = await fetchGameEndInfo(gg.gameId).catch(() => ({ ended: false as const }));
+    if (endInfo.ended) {
+      await announceGameEnded(gg.groupId, gg.gameId, 'game ended (reminder check)', (endInfo as { message?: string }).message).catch(() => {});
+      continue;
+    }
     // Confirm they still haven't moved — catches a websocket-missed turn change (then no nudge).
     const scraped = await resolveCurrentPlayerName(gg.gameId).catch(() => undefined);
     if (scraped && scraped.toLowerCase() !== String(current).toLowerCase()) {
@@ -2536,15 +2732,106 @@ async function runReminderCheck() {
   }
 }
 
-/** Send a single turn-reminder nudge: a normal-style group alert that @-pings only the current
- *  player and shows how long they've been on the clock. */
+/** Build a fun-mode reminder caption (+ hologram image) for the current player. Mirrors the
+ *  turn-ping context (a featured living unit, or the CO early / on a charged power) but the render
+ *  is framed as an impatient nudge via `reminderElapsed`. Returns undefined if fun context is
+ *  unavailable or the render degraded, so the caller falls back to the plain line. */
+async function buildFunReminder(
+  gg: GroupGame,
+  currentPlayer: string,
+  elapsed: string,
+  language?: string
+): Promise<{ text: string; attachment?: { dataB64: string; contentType: string; filename: string } } | undefined> {
+  const gameId = gg.gameId!;
+  const turn = await resolveCurrentTurn(gameId).catch(() => undefined);
+  const liveUnits = turn?.units || [];
+  // Feature the CO early (no units) or when a power is charged; else a random living unit. No
+  // HP-delta preference — a reminder is the same turn, so there's no "damaged this round" to lean on.
+  const featureCo = liveUnits.length === 0 || !!turn?.co?.power;
+  const chosenUnit =
+    !featureCo && liveUnits.length ? liveUnits[Math.floor(Math.random() * liveUnits.length)] : undefined;
+  const co = featureCo ? turn?.co : undefined;
+  const armyCode = chosenUnit?.code || turn?.countryCode;
+  const army = armyCode ? { code: armyCode } : undefined;
+  const bf = turn?.battlefield;
+  const hasPos = !!chosenUnit && typeof chosenUnit.x === 'number' && typeof chosenUnit.y === 'number';
+  const unitInfo = chosenUnit
+    ? {
+        name: chosenUnit.name,
+        hp: chosenUnit.hp,
+        lowFuel: chosenUnit.lowFuel,
+        lowAmmo: chosenUnit.lowAmmo,
+        terrainTile: chosenUnit.terrainTile,
+        terrainName: chosenUnit.terrainName,
+        surroundings: bf && hasPos ? describeSurroundings(bf, chosenUnit.x!, chosenUnit.y!, chosenUnit.code) : undefined,
+        map: bf && hasPos ? renderMapAscii(bf, chosenUnit.x!, chosenUnit.y!) : undefined,
+      }
+    : undefined;
+
+  const cutoff = Date.now() - 45 * 60 * 1000;
+  const recentChat = (recentChatByGroup.get(gg.groupId) || [])
+    .filter((c) => c.at >= cutoff)
+    .slice(-6)
+    .map((c) => ({ name: c.name, text: c.text }));
+
+  const info = await loadPlayers(gameId).catch(() => ({ players: [] as string[], countries: [] as string[] }));
+  const gameName = gg.gameName || (await loadGameName(gameId)) || undefined;
+
+  const payload = await buildMessage(
+    gameId,
+    {
+      playerName: currentPlayer,
+      players: info.players,
+      gameName,
+      funEnabled: true,
+      language,
+      reminderElapsed: elapsed,
+    },
+    recentChat.length ? recentChat : undefined,
+    army,
+    unitInfo,
+    co
+  );
+  // buildMessage degrades to a "[render error]" string rather than throwing — treat that (and empty)
+  // as failure so we send the clean plain nudge instead of an error-tagged "you're up".
+  if (!payload?.text || /\[render error/i.test(payload.text)) return undefined;
+  const attachment = payload.imageData
+    ? {
+        dataB64: payload.imageData,
+        contentType: payload.imageContentType || 'image/gif',
+        filename: payload.imageFilename || 'unit.gif',
+      }
+    : undefined;
+  return { text: payload.text, attachment };
+}
+
+/** Send a single turn-reminder nudge that @-pings only the current player. Plain "still your move"
+ *  line by default; when fun mode is on, an in-voice nudge (with the unit/CO hologram) via the
+ *  render endpoint, falling back to the plain line if that path fails. */
 async function sendTurnReminder(gg: GroupGame, elapsedMs: number): Promise<void> {
   const current = gg.lastTurn?.awbwUsername;
   if (!gg.gameId || !current) return;
   const players = gg.players || {};
   const key = Object.keys(players).find((k) => k.toLowerCase() === String(current).toLowerCase());
   const mapping = key ? players[key] : undefined;
-  let message = `⏰ Still your move, ${current} — ${formatDurationMs(elapsedMs)} on the clock.\n${gameLink(gg.gameId)}`;
+  const elapsed = formatDurationMs(elapsedMs);
+
+  // Plain nudge — the whole message when fun mode is off, and the fallback if the fun render fails.
+  let message = `⏰ Still your move, ${current} — ${elapsed} on the clock.\n${gameLink(gg.gameId)}`;
+  let attachment: { dataB64: string; contentType: string; filename: string } | undefined;
+
+  if (gg.funEnabled) {
+    try {
+      const built = await buildFunReminder(gg, current, elapsed, mapping?.language);
+      if (built?.text) {
+        message = built.text;
+        attachment = built.attachment;
+      }
+    } catch (e) {
+      console.warn('[remind] fun reminder build failed; sending plain nudge', e);
+    }
+  }
+
   const mentions: Array<{ author: string; start: number; length: number }> = [];
   if (mapping?.aci) {
     const spacer = message.endsWith(' ') || message.endsWith('\n') ? '' : ' ';
@@ -2552,8 +2839,27 @@ async function sendTurnReminder(gg: GroupGame, elapsedMs: number): Promise<void>
     message = `${message}${spacer}@`;
     mentions.push({ author: mapping.aci, start, length: 1 });
   }
-  await sendGroupRaw(gg.groupId, message, mentions.length ? mentions : undefined);
-  console.log(`[remind] nudged ${gg.groupId.substring(0, 16)} player=${current} elapsed=${formatDurationMs(elapsedMs)}`);
+
+  try {
+    await sendGroupRaw(gg.groupId, message, mentions.length ? mentions : undefined, attachment);
+  } catch (sendErr) {
+    if (attachment) {
+      // Same slow-attachment-upload race as the turn ping: retry with the image, then text-only.
+      console.warn('[remind] send with attachment failed; retrying, then text-only', sendErr);
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        await sendGroupRaw(gg.groupId, message, mentions.length ? mentions : undefined, attachment);
+      } catch (retryErr) {
+        console.warn('[remind] attachment retry failed; sending text-only', retryErr);
+        await sendGroupRaw(gg.groupId, message, mentions.length ? mentions : undefined);
+      }
+    } else {
+      throw sendErr;
+    }
+  }
+  console.log(
+    `[remind] nudged ${gg.groupId.substring(0, 16)} player=${current} elapsed=${elapsed} fun=${gg.funEnabled ? 'on' : 'off'} img=${attachment ? 'yes' : 'no'}`
+  );
 }
 
 // Firestore-backed leader-election lease. A single doc `_locks/leader` holds { holder, expiresAt }.
@@ -2622,11 +2928,11 @@ async function main() {
       ggSnapshotBootstrapped = true;
       snapshotReady = true; // readiness: we're now watching our games
       for (const doc of snap.docs) {
-        applyGroupGameWatch(doc.id, doc.data() as GroupGame, 'bootstrap');
+        applyGroupGameWatch(groupIdFromDocId(doc.id), doc.data() as GroupGame, 'bootstrap');
       }
     }
     snap.docChanges().forEach((change) => {
-      applyGroupGameWatch(change.doc.id, change.doc.data() as GroupGame, change.type);
+      applyGroupGameWatch(groupIdFromDocId(change.doc.id), change.doc.data() as GroupGame, change.type);
     });
   });
 
