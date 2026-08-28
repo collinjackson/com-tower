@@ -719,7 +719,15 @@ function parseTurnStats(html: string, currentPlayerId?: string): TurnStats | und
     // the whole recorder rather than logging anything, so it is worth being exact.
     const day = Number(html.match(/\bgameDay\s*=\s*(\d+)/)?.[1]);
     const playersRaw = html.match(/playersInfo\s*=\s*(\{[\s\S]*?\});\s*\n/)?.[1];
-    if (!playersRaw || !Number.isFinite(day)) return undefined;
+    if (!playersRaw || !Number.isFinite(day)) {
+      // Never fail quietly here: a sample missed is a sample that can only be recovered
+      // through the replay API, and a silent undefined is indistinguishable from the
+      // recorder simply not being deployed yet.
+      console.warn(
+        `[stats] cannot read game page (gameDay=${day}, playersInfo=${!!playersRaw}, len=${html.length}) — no sample recorded`
+      );
+      return undefined;
+    }
     const playersInfo = JSON.parse(playersRaw) as Record<string, any>;
 
     // Unit value per player. unitsInfo lists every unit on the board with its cost and HP.
@@ -2699,6 +2707,9 @@ async function onGroupGameNextTurn(
   }
   // Sample the game before anything else: this is the only chance to capture this turn
   // without going back through the replay API, and it must not depend on the send working.
+  if (turn && !turn.stats) {
+    console.warn(`[stats] no sample parsed for game ${gameId} — this turn will be missing from charts`);
+  }
   if (turn?.stats) {
     await recordTurnStats(gameId, turn.stats);
     console.log(
