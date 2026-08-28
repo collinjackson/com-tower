@@ -42,7 +42,11 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 export default function Home() {
   return (
-    <div className="min-h-screen flex items-center justify-center px-4 sm:px-8 py-16 text-[#43371f]">
+    // The dispatch pile occupies a ~334px column on the right at xl, so centring against the
+    // full viewport puts the memo visibly off-balance against it. Padding that column out
+    // centres the memo in the space actually free. Below xl the pile is hidden and the memo
+    // centres normally.
+    <div className="min-h-screen flex items-center justify-center px-4 sm:px-8 py-16 xl:pr-[336px] text-[#43371f]">
       {/* The memo — one typewriter size, uniform kerning; rules are whole runs of typed hyphens.
           Dismissible: filing it away clears the view down to the console gallery below. */}
       <FieldOrders>
