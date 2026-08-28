@@ -31,8 +31,11 @@ const PILE_DEPTH = 5;
  *  which is a truer press look than CSS filters could manage anyway. */
 export function FeaturedPost() {
   const [posts, setPosts] = useState<Post[]>([]);
-  // Post indices, front of the pile first. Rotated by one each time we page.
-  const [order, setOrder] = useState<number[]>([]);
+  // How many times we have paged. Depth is derived from this rather than reordering an array:
+  // rendering the cards in a shuffled order makes React move the DOM nodes, and a keyed node
+  // that React relocates loses its in-flight transition — which is why the card rose but
+  // never visibly came back down.
+  const [offset, setOffset] = useState(0);
   // 'lifting' = rising clear of the pile; 'settling' = descending into the back of it.
   const [phase, setPhase] = useState<'idle' | 'lifting' | 'settling'>('idle');
   // How far up to raise the front card. Measured, not assumed: cards differ in height with
@@ -49,7 +52,6 @@ export function FeaturedPost() {
         const list: Post[] = Array.isArray(d?.posts) ? d.posts : [];
         if (cancelled || list.length === 0) return;
         setPosts(list);
-        setOrder(list.map((_, i) => i));
       })
       .catch(() => {});
     return () => {
@@ -71,7 +73,7 @@ export function FeaturedPost() {
       // the card is clear of the pile by then, so nothing is seen popping behind.
       timers.push(
         window.setTimeout(() => {
-          setOrder((o) => [...o.slice(1), o[0]]);
+          setOffset((o) => o + 1);
           setPhase('settling');
         }, MOVE_MS)
       );
@@ -83,11 +85,11 @@ export function FeaturedPost() {
     };
   }, [posts.length]);
 
-  if (posts.length === 0 || order.length === 0) return null;
+  if (posts.length === 0) return null;
 
   return (
     <aside
-      className="fixed right-6 top-1/2 z-10 hidden w-[310px] -translate-y-1/2 xl:block"
+      className="ct-pile fixed top-1/2 z-10 hidden w-[310px] -translate-y-1/2 xl:block"
       aria-label="Field dispatches"
     >
       {/* The machine's aperture. Above every card, so a lifting dispatch tucks up under the
@@ -100,14 +102,18 @@ export function FeaturedPost() {
           240-character ceiling the caption generator enforces, so the longest possible
           dispatch still fits rather than spilling past the pile. */}
       <div className="relative mt-[-2px] h-[268px]">
-        {order.map((postIdx, depth) => {
-          if (depth >= PILE_DEPTH) return null;
-          const post = posts[postIdx];
+        {/* Rendered in a fixed DOM order, always. Only the styles change as the pile is paged,
+            so no node is ever moved and every transition runs to completion. */}
+        {posts.map((post, postIdx) => {
+          const depth = (postIdx - offset + posts.length * 1000) % posts.length;
+          // Cards deeper than the visible pile are kept mounted but hidden, so the one on its
+          // way to the back never disappears mid-descent.
+          const buried = depth >= PILE_DEPTH;
           const isFront = depth === 0;
           const lifted = isFront && phase === 'lifting';
           // The card that just went to the back is still descending; it keeps the front card's
           // full opacity until it lands, so it does not dim mid-air.
-          const descending = phase === 'settling' && depth === order.length - 1;
+          const descending = phase === 'settling' && depth === posts.length - 1;
           return (
             <article
               key={postIdx}
@@ -123,7 +129,7 @@ export function FeaturedPost() {
                 // Above everything while raised — including the machine's lip, so the card
                 // stays readable — then straight to the back of the pile as it descends.
                 zIndex: lifted ? 40 : 20 - depth,
-                opacity: isFront || descending ? 1 : Math.max(0, 0.55 - depth * 0.12),
+                opacity: buried && !descending ? 0 : isFront || descending ? 1 : Math.max(0, 0.55 - depth * 0.12),
                 filter: isFront || descending ? undefined : `brightness(${1 - depth * 0.06})`,
               }}
               aria-hidden={!isFront}
