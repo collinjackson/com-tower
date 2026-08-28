@@ -2,6 +2,21 @@
 
 import { useEffect, useRef } from 'react';
 
+/** A showcased post from /api/showcase — already redacted server-side; the block characters
+ *  are in the text itself, so there is no real name here to leak. */
+type ShowcasePost = { text: string; emojis: string[]; score: number; day: number | null };
+
+// Below this viewport width the console screens are too small to read a caption in, so they
+// keep their original decorative scrolling telemetry.
+const GALLERY_MIN_WIDTH = 760;
+
+// Courier ahead of the generic keyword on purpose: the platform default monospace (Menlo,
+// Consolas) reads modern, and these are meant to be CRTs in a 1940s signals room.
+const TERMINAL_FONT = '"Courier New", Courier, monospace';
+// Emoji have no monospace form — name the emoji faces after Courier so only they fall through.
+const TERMINAL_EMOJI_FONT =
+  '"Courier New", Courier, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", monospace';
+
 const rAF =
   typeof window !== 'undefined'
     ? window.requestAnimationFrame ||
@@ -69,6 +84,22 @@ type Tracer = { x: number; y: number; vx: number; vy: number; life: number; shoo
 
 export function BackgroundCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Read by the animation loop every frame; a ref rather than state so arriving posts never
+  // restart the canvas effect (which would reset the whole battle).
+  const showcaseRef = useRef<ShowcasePost[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/showcase')
+      .then((r) => (r.ok ? r.json() : { posts: [] }))
+      .then((d) => {
+        if (!cancelled) showcaseRef.current = Array.isArray(d?.posts) ? d.posts : [];
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -142,13 +173,43 @@ export function BackgroundCanvas() {
     function resetShootingStar(s: ShootingStar) {
       s.x = Math.random() * width;
       s.y = 0;
-      s.len = Math.random() * 120 + 40;
-      s.speed = Math.random() * 8 + 5;
+      s.len = Math.random() * 40 + 55;
+      // A 155 mm shell in plunging fire impacts at roughly the speed of sound — ~340 m/s —
+      // having left the muzzle at ~830 m/s. The scene runs about 2.6 px/m (a soldier is
+      // ~4.5 px for ~1.75 m), so at 60 fps that's ~14.6 px/frame along the flight path, or
+      // ~10.3 px/frame on each axis of the 45° descent. This spread covers ~290-390 m/s.
+      s.speed = 9 + Math.random() * 3;
       s.size = Math.random() * 2.5 + 1;
       s.waitTime = Date.now() + Math.random() * 3000 + 500;
       s.active = false;
     }
     shootingStars.forEach(resetShootingStar);
+
+    // Signal flares. A 26.5 mm Very pistol throws its star to roughly 120 m and it burns
+    // ~7 s coming down under a small parachute at ~2.5 m/s. At the scene's ~2.6 px/m and
+    // 60 fps that is a 2.2 px/frame launch, 0.007 px/frame² of gravity (a real 9.8 m/s²),
+    // apex around 330 px, then a slow lit drift — so these numbers are the real ones scaled.
+    type Flare = {
+      x: number;
+      y: number;
+      vx: number;
+      vy: number;
+      lit: boolean;      // false while climbing dark, true once the star ignites at apex
+      ignitedAt: number;
+      sparks: FlameParticle[];
+    };
+    const flares: Flare[] = [];
+    const FLARE_LAUNCH_VY = -2.17;   // ~50 m/s up
+    const FLARE_GRAVITY = 0.0071;    // ~9.8 m/s²
+    const FLARE_BURN_MS = 7000;      // burn time of the star
+    const FLARE_DESCENT_VY = 0.11;   // ~2.5 m/s under the parachute
+    const FLARE_LIGHT_RADIUS = 190;
+    let nextFlareAt = Date.now() + 6000 + Math.random() * 12000;
+    let flareGroupIndex = 0;
+
+    // One 60 Hz frame, rounded up a touch so a dropped frame can't swallow a shot entirely.
+    // The real flash is far shorter than this; a single frame is the floor the display allows.
+    const MUZZLE_FLASH_MS = 20;
 
     const infantryGroups: InfantryGroup[] = [];
     const power = Math.pow(2, Math.ceil(Math.log(Math.max(width, 1)) / Math.log(2)));
@@ -157,7 +218,7 @@ export function BackgroundCanvas() {
       infantryGroups.push({
         worldX: Math.floor((g / 12) * infantryWrap * 2.5) + Math.floor(Math.random() * 80),
         terrainLayer: 2,
-        count: 4 + Math.floor(Math.random() * 3),
+        count: 8 + Math.floor(Math.random() * 5), // a squad, not a fireteam
         stepPhase: Math.random() * Math.PI * 2,
         dir: g % 2 === 0 ? 1 : -1,
         team: g % 2,
@@ -187,12 +248,71 @@ export function BackgroundCanvas() {
 
     const terminalLines: string[][] = [[], [], [], [], []];
     const terminalLastAdd: number[] = [0, 0, 0, 0, 0];
+    // Console height, eased toward its target each frame (see CONSOLE_H below).
+    const BASE_CONSOLE_H = 100;
+    const GALLERY_CONSOLE_H = 190;
+    let consoleH = BASE_CONSOLE_H;
+
+    /** Greedy word wrap for canvas text. Long unbroken tokens are hard-split so one URL-ish
+     *  blob can't overflow the screen bezel. */
+    function wrapText(text: string, maxWidth: number, maxLines: number): string[] {
+      const lines: string[] = [];
+      let line = '';
+      for (const word of text.split(/\s+/)) {
+        const candidate = line ? `${line} ${word}` : word;
+        if (ctx.measureText(candidate).width <= maxWidth) {
+          line = candidate;
+          continue;
+        }
+        if (line) lines.push(line);
+        line = word;
+        while (ctx.measureText(line).width > maxWidth && line.length > 1) {
+          let cut = line.length - 1;
+          while (cut > 1 && ctx.measureText(line.slice(0, cut)).width > maxWidth) cut--;
+          lines.push(line.slice(0, cut));
+          line = line.slice(cut);
+        }
+        if (lines.length >= maxLines) break;
+      }
+      if (line && lines.length < maxLines) lines.push(line);
+      return lines.slice(0, maxLines);
+    }
     const TERMINAL_LINE_POOL: string[][] = [
-      ['> LINK  OK', '> RX 0.2k', '> TX 1.1k', '> SYNC', '> ---', '> PING 12ms'],
-      ['> SIGNAL ON', '> CARRIER', '> MODEM', '> ---', '> RSSI -45'],
-      ['> AWBW POLL', '> TURN 4', '> ---', '> GAME 1578803'],
-      ['> STATUS OK', '> MEM 42%', '> ---', '> UP 2d 4h'],
-      ['> TAPE RDY', '> BLK 012', '> ---', '> EOF'],
+      [
+        '> LINK   UP     RX 0.2k   TX 1.1k',
+        '> PING   12ms   LOSS 0.0%',
+        '> SYNC   OK     SEQ 04417',
+        '> ---------------------------',
+        '> ROUTE  TOWER-1 VIA RELAY 3',
+      ],
+      [
+        '> CARRIER LOCK   RSSI -45dBm',
+        '> MODEM  9600    8N1   CTS OK',
+        '> SQUELCH OPEN   AGC 0.62',
+        '> ---------------------------',
+        '> SIGNAL ON      CHAN 07',
+      ],
+      [
+        '> POLL   awbw    200 OK   412ms',
+        '> GAME   ██████  DAY 14',
+        '> TURN   ██████  PENDING',
+        '> ---------------------------',
+        '> WATCH  5 GAMES  0 STALLED',
+      ],
+      [
+        '> STATUS OK      MEM 42%  CPU 07%',
+        '> UPTIME 2d 04h 11m',
+        '> QUEUE  0        RETRY 0  ERR 0',
+        '> ---------------------------',
+        '> LEASE  HELD     TTL 27s',
+      ],
+      [
+        '> TAPE   RDY     BLK 012  EOF',
+        '> SPOOL  1       1200ft   REM 78%',
+        '> WRITE  000412 BYTES OK',
+        '> ---------------------------',
+        '> HEAD   ALIGNED  TRK 04',
+      ],
     ];
 
     const explosions: Explosion[] = [];
@@ -433,15 +553,43 @@ export function BackgroundCanvas() {
             ctx.fill();
           }
           ctx.restore();
-          const flashPhase = (nowInf * 0.0022 + gi * 97 + i * 31) % 600;
-          const occasionalFlash = !fighting && flashPhase < 220;
-          const combatFlash = fighting && (hasBazooka ? Math.sin(nowInf * 0.035 + i) > 0.0 : Math.sin(nowInf * 0.028 + i * 2) > 0.15);
-          const showFlash = occasionalFlash || combatFlash;
+          // Visible muzzle flash lasts 1-2 ms — about an eighth of a single 60 Hz frame — so a
+          // rifleman is dark essentially all the time and lights for one frame when the round
+          // goes off. What separates a firefight from an idle potshot is the CADENCE of those
+          // flashes, never how long each one stays lit. (The old phase advanced at 0.0022/ms,
+          // so `< 220` held the flash on for ~100 seconds at a stretch: a lantern, not a shot.)
+          const shotSeed = gi * 97 + i * 31;
+          const baseInterval = hasBazooka
+            ? (fighting ? 2600 : 9000) // a rocket is a rare, deliberate shot
+            : (fighting ? 320 : 2400); // ~3 rounds/sec under contact, occasional aimed shot otherwise
+          // Per-soldier jitter so a squad never fires as a metronome.
+          const shotInterval = baseInterval * (0.75 + ((shotSeed % 23) / 23) * 0.5);
+          const showFlash = (nowInf + shotSeed * 137) % shotInterval < MUZZLE_FLASH_MS;
+          const combatFlash = fighting && showFlash;
           const basePx = screenX + (inBack ? (i - frontCount) * 5 * dir : i * 4 * dir) + stagger;
           const ridgeTopAtBase = getTerrainY(frontTerrain.points, basePx, width) + craterOffsetAt(basePx);
+          // One soldier in the chosen squad puts up a flare — angled slightly downrange, the
+          // way a signal star is actually fired, rather than straight overhead.
+          // The chosen squad fires it — unless they have been off-screen so long the flare is
+          // overdue, in which case whoever is in view puts one up instead.
+          const flareOverdue = nowInf >= nextFlareAt + 8000;
+          if (nowInf >= nextFlareAt && i === 0 && (gi === flareGroupIndex || flareOverdue)) {
+            flares.push({
+              x: basePx,
+              y: ridgeTopAtBase - 2,
+              vx: dir * 0.28,
+              vy: FLARE_LAUNCH_VY,
+              lit: false,
+              ignitedAt: 0,
+              sparks: [],
+            });
+            nextFlareAt = nowInf + 14000 + Math.random() * 20000;
+            flareGroupIndex = Math.floor(Math.random() * infantryGroups.length);
+          }
           const flashWobble = Math.sin(nowInf * 0.0018 + gi * 0.9 + i * 0.5) * 0.35;
           if (showFlash) {
-            const intensity = combatFlash ? 0.58 : 0.45;
+            // Brighter than before: it is on for a single frame now, so it has to read.
+            const intensity = combatFlash ? 0.9 : 0.75;
             const size = combatFlash ? 0.6 : 0.45;
             const flashX = basePx + dir * (hasBazooka ? 6 : 5) + flashWobble;
             const ridgeTopY = ridgeTopAtBase;
@@ -461,7 +609,8 @@ export function BackgroundCanvas() {
             ctx.restore();
             ctx.fillStyle = fillCamouflage;
           }
-          if (fighting && combatFlash && hasBazooka && Math.sin(nowInf * 0.04 + i * 1.7) > 0.5) {
+          // Backblast, on the same frame as the launch rather than on its own slow cycle.
+          if (combatFlash && hasBazooka) {
             const flashX2 = basePx + dir * 5.5 + flashWobble * 0.8;
             const ridgeTopY2 = ridgeTopAtBase;
             const flashY2 = ridgeTopY2 + 2;
@@ -475,6 +624,112 @@ export function BackgroundCanvas() {
             ctx.fillStyle = fillCamouflage;
           }
         }
+      }
+
+      // ── Flares: climb dark, ignite at apex, then hang and burn ──────────────────────
+      for (let fl = flares.length - 1; fl >= 0; fl--) {
+        const flare = flares[fl];
+        if (!flare.lit) {
+          flare.vy += FLARE_GRAVITY;
+          flare.x += flare.vx;
+          flare.y += flare.vy;
+          if (flare.vy >= 0) {
+            // Apex — the star lights, and throws a burst of sparks as it does.
+            flare.lit = true;
+            flare.ignitedAt = nowInf;
+            flare.vy = FLARE_DESCENT_VY;
+            for (let sp = 0; sp < 22; sp++) {
+              const a = Math.random() * Math.PI * 2;
+              const spd = 0.4 + Math.random() * 1.6;
+              flare.sparks.push({
+                x: flare.x,
+                y: flare.y,
+                vx: Math.cos(a) * spd,
+                vy: Math.sin(a) * spd,
+                life: 0,
+                maxLife: 350 + Math.random() * 550,
+                size: 0.6 + Math.random() * 1.1,
+              });
+            }
+          }
+          // The unlit star is a dim ember trailing smoke — barely visible, as it should be.
+          ctx.fillStyle = 'rgba(255,180,110,0.5)';
+          ctx.beginPath();
+          ctx.arc(flare.x, flare.y, 1.1, 0, Math.PI * 2);
+          ctx.fill();
+          continue;
+        }
+
+        const burned = nowInf - flare.ignitedAt;
+        if (burned > FLARE_BURN_MS || flare.y > height) {
+          flares.splice(fl, 1);
+          continue;
+        }
+        flare.x += flare.vx * 0.35; // parachute drift
+        flare.y += flare.vy;
+
+        // Fade in fast, burn steady, gutter out at the end.
+        const fadeIn = Math.min(1, burned / 220);
+        const fadeOut = Math.min(1, (FLARE_BURN_MS - burned) / 1200);
+        const flicker = 0.86 + 0.14 * Math.sin(nowInf * 0.02 + flare.x);
+        const strength = fadeIn * fadeOut * flicker;
+
+        // The light it casts on the battlefield. Additive so it lifts the scene underneath
+        // rather than painting a grey disc over it.
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        const glow = ctx.createRadialGradient(
+          flare.x, flare.y, 0,
+          flare.x, flare.y, FLARE_LIGHT_RADIUS * (0.75 + 0.25 * flicker)
+        );
+        glow.addColorStop(0, `rgba(255,240,205,${0.5 * strength})`);
+        glow.addColorStop(0.25, `rgba(255,196,120,${0.19 * strength})`);
+        glow.addColorStop(0.6, `rgba(255,150,80,${0.06 * strength})`);
+        glow.addColorStop(1, 'rgba(255,140,70,0)');
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.arc(flare.x, flare.y, FLARE_LIGHT_RADIUS * (0.75 + 0.25 * flicker), 0, Math.PI * 2);
+        ctx.fill();
+
+        // The star itself.
+        ctx.fillStyle = `rgba(255,252,238,${0.95 * strength})`;
+        ctx.beginPath();
+        ctx.arc(flare.x, flare.y, 2.6 * flicker, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+
+        // Embers shedding off the burning star, plus the ignition burst.
+        if (burned < FLARE_BURN_MS - 900 && Math.random() < 0.35) {
+          flare.sparks.push({
+            x: flare.x,
+            y: flare.y,
+            vx: (Math.random() - 0.5) * 0.5,
+            vy: 0.2 + Math.random() * 0.5,
+            life: 0,
+            maxLife: 400 + Math.random() * 600,
+            size: 0.5 + Math.random() * 0.8,
+          });
+        }
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (let si = flare.sparks.length - 1; si >= 0; si--) {
+          const sp = flare.sparks[si];
+          sp.life += 16;
+          if (sp.life >= sp.maxLife) {
+            flare.sparks.splice(si, 1);
+            continue;
+          }
+          sp.x += sp.vx;
+          sp.y += sp.vy;
+          sp.vy += 0.012;
+          sp.vx *= 0.985;
+          const t = 1 - sp.life / sp.maxLife;
+          ctx.fillStyle = `rgba(255,${170 + Math.floor(60 * t)},${90 + Math.floor(60 * t)},${0.8 * t * strength})`;
+          ctx.beginPath();
+          ctx.arc(sp.x, sp.y, sp.size * t, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
       }
 
       for (let i = tracers.length - 1; i >= 0; i--) {
@@ -803,9 +1058,26 @@ export function BackgroundCanvas() {
           } else {
             s.x = nextX;
             s.y = nextY;
-            const radius = s.size + 1.5;
+            // Draw the shell as a streak down its flight path rather than a dot. At this
+            // speed the eye never resolves a projectile, and a bare dot with no motion blur
+            // is what made these read as drifting rocks instead of incoming rounds.
+            const AXIS = Math.SQRT1_2; // unit velocity is (-1, +1)/√2
+            const tailX = s.x + s.len * AXIS;
+            const tailY = s.y - s.len * AXIS;
+            const trail = ctx.createLinearGradient(s.x, s.y, tailX, tailY);
+            trail.addColorStop(0, 'rgba(255,244,214,0.85)');
+            trail.addColorStop(0.35, 'rgba(255,214,150,0.25)');
+            trail.addColorStop(1, 'rgba(255,190,120,0)');
+            ctx.strokeStyle = trail;
+            ctx.lineWidth = s.size;
+            ctx.lineCap = 'round';
             ctx.beginPath();
-            ctx.arc(s.x, s.y, radius, 0, Math.PI * 2);
+            ctx.moveTo(tailX, tailY);
+            ctx.lineTo(s.x, s.y);
+            ctx.stroke();
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, s.size * 0.7, 0, Math.PI * 2);
             ctx.fill();
           }
         } else if (now >= s.waitTime) {
@@ -845,7 +1117,13 @@ export function BackgroundCanvas() {
       explosions.length = 0;
       explosions.push(...stillActive);
 
-      const CONSOLE_H = 100;
+      // The console is the bottom band of the scene. It grows into a gallery when there are
+      // posts to show and the viewport is wide enough to read them, and eases between the two
+      // so the terrain above rides up rather than snapping.
+      const galleryPosts = showcaseRef.current;
+      const galleryOn = width >= GALLERY_MIN_WIDTH && galleryPosts.length > 0;
+      consoleH += ((galleryOn ? GALLERY_CONSOLE_H : BASE_CONSOLE_H) - consoleH) * 0.08;
+      const CONSOLE_H = consoleH;
       const FRAME_INSET_TOP = 28;
       const FRAME_INSET_BOT = 14;
       const FRAME_INSET_SIDE_TOP = 26;
@@ -1002,10 +1280,10 @@ export function BackgroundCanvas() {
       const numScreens = 5;
       const RED_HIGHLIGHT_INTERVAL_MS = 3200;
       const activeTerminalIndex = Math.floor(nowMs / RED_HIGHLIGHT_INTERVAL_MS) % numScreens;
-      const screenH = 38;
+      const screenH = galleryOn ? Math.max(38, CONSOLE_H - 50) : 38;
       const screenTop = cTopY + 12;
       const screenSlant = 3;
-      const TERMINAL_LINE_HEIGHT = 8;
+      const TERMINAL_LINE_HEIGHT = 9;
       const TERMINAL_ADD_MS = 380;
       for (let i = 0; i < numScreens; i++) {
         if (nowMs - terminalLastAdd[i] >= TERMINAL_ADD_MS) {
@@ -1016,9 +1294,13 @@ export function BackgroundCanvas() {
         }
       }
       for (let i = 0; i < numScreens; i++) {
-        const left = lerp(cLeftTop + 18, cRightTop - 18, (i + 0.1) / numScreens);
-        const right = lerp(cLeftTop + 18, cRightTop - 18, (i + 0.9) / numScreens);
-        const w = (right - left) * 0.92;
+        // Squarer in gallery mode: pull the slots in and narrow each screen, so a caption
+        // wraps over several lines instead of stretching into a letterbox.
+        const inset = galleryOn ? 0.2 : 0.1;
+        const fill = galleryOn ? 0.84 : 0.92;
+        const left = lerp(cLeftTop + 18, cRightTop - 18, (i + inset) / numScreens);
+        const right = lerp(cLeftTop + 18, cRightTop - 18, (i + 1 - inset) / numScreens);
+        const w = (right - left) * fill;
         const cx = (left + right) / 2;
         const sl = cx - w / 2;
         const sr = cx + w / 2;
@@ -1043,21 +1325,42 @@ export function BackgroundCanvas() {
         ctx.lineTo(sl - screenSlant + 2, sb - 2);
         ctx.closePath();
         ctx.clip();
-        const scrollY = (nowMs / 90) % TERMINAL_LINE_HEIGHT;
-        const lines = terminalLines[i];
-        ctx.font = '7px monospace';
-        ctx.textAlign = 'left';
-        for (let L = lines.length - 1; L >= 0; L--) {
-          const lineY = sb - 4 - scrollY - (lines.length - 1 - L) * TERMINAL_LINE_HEIGHT;
-          if (lineY < st + 2) continue;
-          const phosphor = 0.6 + 0.15 * Math.sin(nowMs * 0.003 + L);
-          ctx.fillStyle = `rgba(72,${Math.floor(95 * phosphor)},62,${0.45 + 0.1 * phosphor})`;
-          ctx.fillText(lines[L], sl + 4, lineY);
-        }
-        const cursorY = sb - 4 - scrollY;
-        if (cursorY >= st + 2 && cursorY <= sb - 2 && Math.floor(nowMs / 400) % 2 === 0) {
-          ctx.fillStyle = 'rgba(85,110,75,0.5)';
-          ctx.fillRect(sl + 4, cursorY - 5, 4, 6);
+        const post = galleryOn ? galleryPosts[i] : undefined;
+        if (post) {
+          // A real notification Com Tower sent, names already blacked out server-side.
+          const padX = 6;
+          const bodyW = w - padX * 2 - Math.abs(screenSlant);
+          const LINE_H = 11;
+          ctx.font = `9px ${TERMINAL_FONT}`;
+          ctx.textAlign = 'left';
+          const maxLines = Math.max(1, Math.floor((screenH - 26) / LINE_H));
+          const lines = wrapText(post.text, bodyW, maxLines);
+          const phosphor = 0.62 + 0.08 * Math.sin(nowMs * 0.002 + i);
+          lines.forEach((ln, L) => {
+            ctx.fillStyle = `rgba(96,${Math.floor(130 * phosphor)},84,${0.62 + 0.12 * phosphor})`;
+            ctx.fillText(ln, sl + padX, st + 14 + L * LINE_H);
+          });
+          if (post.emojis.length) {
+            ctx.font = `11px ${TERMINAL_EMOJI_FONT}`;
+            ctx.fillText(post.emojis.slice(0, 6).join(''), sl + padX, sb - 6);
+          }
+        } else {
+          const scrollY = (nowMs / 90) % TERMINAL_LINE_HEIGHT;
+          const lines = terminalLines[i];
+          ctx.font = `8px ${TERMINAL_FONT}`;
+          ctx.textAlign = 'left';
+          for (let L = lines.length - 1; L >= 0; L--) {
+            const lineY = sb - 4 - scrollY - (lines.length - 1 - L) * TERMINAL_LINE_HEIGHT;
+            if (lineY < st + 2) continue;
+            const phosphor = 0.6 + 0.15 * Math.sin(nowMs * 0.003 + L);
+            ctx.fillStyle = `rgba(72,${Math.floor(95 * phosphor)},62,${0.45 + 0.1 * phosphor})`;
+            ctx.fillText(lines[L], sl + 4, lineY);
+          }
+          const cursorY = sb - 4 - scrollY;
+          if (cursorY >= st + 2 && cursorY <= sb - 2 && Math.floor(nowMs / 400) % 2 === 0) {
+            ctx.fillStyle = 'rgba(85,110,75,0.5)';
+            ctx.fillRect(sl + 4, cursorY - 5, 4, 6);
+          }
         }
         ctx.restore();
         if (i === activeTerminalIndex) {
@@ -1090,10 +1393,15 @@ export function BackgroundCanvas() {
           ctx.lineTo(sr - 2, st + 1);
           ctx.stroke();
           ctx.fillStyle = 'rgba(180,195,210,0.7)';
-          ctx.font = '7px monospace';
+          ctx.font = `7px ${TERMINAL_FONT}`;
           ctx.textAlign = 'right';
           const labels = ['LINK', 'SYNC', 'ACT', 'RDY', 'ON'];
-          ctx.fillText(`● ${labels[i % labels.length]}`, sr - 4, sb - 5);
+          const post = galleryOn ? galleryPosts[i] : undefined;
+          ctx.fillText(
+            post ? `● ${screenLabels[i % screenLabels.length]}` : `● ${labels[i % labels.length]}`,
+            sr - 4,
+            sb - 5
+          );
         }
       }
       rafId = requestAnim(animate);
