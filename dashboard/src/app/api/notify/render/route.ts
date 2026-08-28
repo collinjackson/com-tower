@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import { FieldValue } from 'firebase-admin/firestore';
 import { getAdminDb } from '@/lib/firebase-admin';
+import { emojiList, JUDGE_EMOJI_LEGEND } from '@/lib/reactions';
 
 // AWBW country code -> army name (for voice flavor). Unknown codes just omit the name.
 const ARMY_NAMES: Record<string, string> = {
@@ -156,7 +157,9 @@ const FACE_LEFT = new Set(['bm', 'yc', 'bh', 'rf', 'ab', 'pc', 'tg', 'ar', 'ne',
 // gameId alone so it covers both the patch (DM) flow and the group flow (which has
 // no inviterUid).
 const SENT_CAPTIONS_LIMIT = 150;
-async function fetchSentCaptions(db: any, gameId: string): Promise<string[]> {
+/** A prior caption plus the group's own verdict on it (the emoji they reacted with). */
+type SentCaption = { text: string; emojis: string[] };
+async function fetchSentCaptions(db: any, gameId: string): Promise<SentCaption[]> {
   try {
     if (!gameId) return [];
     const snap = await db
@@ -167,8 +170,11 @@ async function fetchSentCaptions(db: any, gameId: string): Promise<string[]> {
       .limit(SENT_CAPTIONS_LIMIT)
       .get();
     return snap.docs
-      .map((doc: any) => doc.data().text)
-      .filter(Boolean)
+      .map((doc: any) => {
+        const d = doc.data() || {};
+        return { text: d.text as string, emojis: emojiList(d.reactions) };
+      })
+      .filter((c: SentCaption) => !!c.text)
       .reverse();
   } catch (err) {
     console.warn('Failed to fetch sent captions:', err);
@@ -182,18 +188,22 @@ async function storeSentCaption(
   gameId: string,
   text: string,
   style: string,
-  day?: number
-): Promise<void> {
+  day?: number,
+  judgeScore?: number | null
+): Promise<string | null> {
   try {
-    if (!gameId) return;
-    await db.collection('games').doc(gameId).collection('sentCaptions').add({
+    if (!gameId) return null;
+    const ref = await db.collection('games').doc(gameId).collection('sentCaptions').add({
       text,
       style,
       day: day ?? 0,
+      judgeScore: judgeScore ?? null,
       createdAt: FieldValue.serverTimestamp(),
     });
+    return ref.id;
   } catch (err) {
     console.warn('Failed to store sent caption:', err);
+    return null;
   }
 }
 
@@ -274,6 +284,11 @@ export async function POST(req: NextRequest) {
     const co = (body.co || {}) as { name?: string; imageUrl?: string; power?: 'SCOP' | 'COP' };
     // Optional per-player language/style for the caption (best effort; guarded below).
     const language = typeof body.language === 'string' ? body.language.trim().slice(0, 40) : '';
+    // Turn-reminder mode: how long the player has been sitting on their turn (e.g. "2d 4h"). When
+    // set (and fun is on), the caption becomes an impatient nudge to move rather than a fresh
+    // "you're up" call — same voices, image, anti-repeat, and language handling otherwise.
+    const reminderElapsed = typeof body.reminderElapsed === 'string' ? body.reminderElapsed.trim().slice(0, 20) : '';
+    const isReminder = !!reminderElapsed;
 
     if (!gameId || !link) {
       return NextResponse.json({ error: 'gameId and link required' }, { status: 400 });
@@ -299,6 +314,10 @@ export async function POST(req: NextRequest) {
     const lowAmmo = unit.lowAmmo === true;
 
     let caption: string | null = null;
+    // The judge's own quality score for the winning candidate, and the id of the doc we store
+    // it on — both ride back to the bot so a sent post can later be ranked and reacted to.
+    let judgeScore: number | null = null;
+    let captionId: string | null = null;
 
     if (useAi) {
       try {
@@ -322,11 +341,13 @@ export async function POST(req: NextRequest) {
 
         // Convey MORALE/MOOD from the real condition — never exact HP numbers.
         const mood =
-          hp !== undefined && hp <= 4
-            ? 'badly shot up — grim, defiant, gallows humor'
-            : hp !== undefined && hp < 10
-              ? 'a bit banged up — scrappy and weary, but game'
-              : 'fresh, sharp, and full of restless energy with no action yet';
+          isReminder
+            ? `stuck holding the line a long while now, waiting on ${who} to finally move — impatient and needling, but good-humored`
+            : hp !== undefined && hp <= 4
+              ? 'badly shot up — grim, defiant, gallows humor'
+              : hp !== undefined && hp < 10
+                ? 'a bit banged up — scrappy and weary, but game'
+                : 'fresh, sharp, and full of restless energy with no action yet';
         const supplies = [lowFuel ? 'almost out of fuel' : '', lowAmmo ? 'low on ammo' : '']
           .filter(Boolean)
           .join(' and ');
@@ -344,7 +365,7 @@ export async function POST(req: NextRequest) {
 
         // Every caption already sent in this game — the generator must not repeat
         // or vary any of them, and the judge eliminates candidates that do.
-        let sentCaptions: string[] = [];
+        let sentCaptions: SentCaption[] = [];
         try {
           const db = getAdminDb();
           sentCaptions = await fetchSentCaptions(db, gameId);
@@ -353,7 +374,7 @@ export async function POST(req: NextRequest) {
         }
         const usedJokesConstraint = sentCaptions.length
           ? `ALREADY SENT IN THIS GAME (do NOT repeat or vary ANY of these — no reusing their setup, punchline, or core gag):\n` +
-            sentCaptions.map((j) => `- ${j}`).join('\n') +
+            sentCaptions.map((j) => `- ${j.text}`).join('\n') +
             `\nGenerate fresh material.\n\n`
           : '';
 
@@ -382,6 +403,9 @@ export async function POST(req: NextRequest) {
         const genPrompt = featuringCo
           ? `You are ${coName || 'the commanding officer'}, the CO of ${armyName || 'this'} army.${coLore ? ` Your character: ${coLore}. Channel it hard — let it drive your tone, quirks, and attitude.` : ` This is an Advance Wars CO; channel their personality if you know it, otherwise play a vivid, distinct commander.`} ` +
             `It is ${who}'s turn to move. You COMMAND — you ISSUE the order to advance and rally the troops; you do NOT ask ${who} for orders or permission. Speak with authority.\n` +
+            (isReminder
+              ? `PROD: ${who} has sat on this turn far too long and STILL hasn't moved. Chivvy them into action — impatient, commanding, a touch exasperated, never cruel. Convey the long wait through tone; don't cite a number.\n`
+              : '') +
             (coPower
               ? `BIG MOMENT: your ${coPower === 'SCOP' ? 'Super CO Power' : 'CO Power'} is fully charged and ready to unleash — let that fuel the message (menace, hype, a flourish), but don't say game terms like "SCOP" or "charge meter" outright.\n`
               : '') +
@@ -403,7 +427,9 @@ export async function POST(req: NextRequest) {
             battleCtx +
             `Radio word "over" ONLY signals you're done talking: use it at most once, at the very END, and it's optional — never mid-message.\n` +
             `Convey your MOOD through HOW you talk — never state it outright (don't say "bored", "restless", "antsy", "nothing to do") and never give exact numbers: you're ${mood}.${supplies ? ` You're also ${supplies} — gripe about it.` : ''} ` +
-            `With no action yet, you fill the dead air — that's WHY you've got a joke or a rhyme — but let the bit speak for itself; don't explain that you're passing time or itching for orders.\n` +
+            (isReminder
+              ? `NAG: you already called for orders and ${who} STILL hasn't moved — you're stuck holding on the line. Chase them up: needle them to take their turn already, impatient but good-humored (never hostile). Convey the long wait through tone; don't cite a number.\n`
+              : `With no action yet, you fill the dead air — that's WHY you've got a joke or a rhyme — but let the bit speak for itself; don't explain that you're passing time or itching for orders.\n`) +
             `Only use what's stated here — don't invent battles, casualties, or damage.\n` +
             `Pick a FRESH angle — avoid the single most obvious cliché for your faction (the same prop, pun, or catchphrase every time); your character is broad, so mine a different part of it.\n` +
             usedJokesConstraint +
@@ -434,8 +460,17 @@ export async function POST(req: NextRequest) {
         } else if (candidates.length > 1) {
           try {
             const list = candidates.map((c, i) => `${i}. ${c}`).join('\n');
+            const reacted = sentCaptions.filter((j) => j.emojis.length > 0);
+            const reactionBlock = reacted.length
+              ? `The group reacted to some of those with emoji — their own verdict, where ${JUDGE_EMOJI_LEGEND}, and no emoji at all means it was ignored. ` +
+                `Favour the voice and format of what earned good reactions; steer away from what earned bad ones or silence. ` +
+                `A negative reaction is NEVER a sign a message worked.\n`
+              : '';
             const sentBlock = sentCaptions.length
-              ? `ALREADY SENT in this game (every prior message):\n${sentCaptions.map((j) => `- ${j}`).join('\n')}\n` +
+              ? `ALREADY SENT in this game (every prior message, with any emoji the group reacted with):\n${sentCaptions
+                  .map((j) => `- ${j.text}${j.emojis.length ? ` \u2192 ${j.emojis.join('')}` : ' \u2192 (no reaction)'}`)
+                  .join('\n')}\n` +
+                reactionBlock +
                 `HARD RULE, before any other criteria: ELIMINATE every candidate that duplicates or is a variation of ANY already-sent message — same setup, same punchline, or same core gag (e.g. another riff on the same joke premise counts as a duplicate). Pick the best of the remaining candidates. Only if EVERY candidate is a duplicate, pick the one least similar to the history.\n`
               : '';
             const judgeRes = await client.chat.completions.create({
@@ -455,13 +490,15 @@ export async function POST(req: NextRequest) {
                     `conveys mood/morale without stating HP numbers; clearly conveys it's ${who}'s turn (needs orders); ` +
                     `lands a callback to the chatter ONLY if there's a real hook; tight (ideally under ~160 chars); not cringe or mean.\n` +
                     `Candidates:\n${list}\n` +
-                    `Reply as JSON: {"best": <index>}`,
+                    `Reply as JSON: {"best": <index>, "score": <0-100, how good the winning candidate is on its own merits — judge the writing itself, NOT how earlier messages were reacted to>}`,
                 },
               ],
             });
             const pick = JSON.parse(judgeRes.choices[0]?.message?.content || '{}');
             const idx = Number(pick.best);
             caption = candidates[Number.isInteger(idx) && candidates[idx] ? idx : 0];
+            const rawScore = Number(pick.score);
+            judgeScore = Number.isFinite(rawScore) ? Math.max(0, Math.min(100, rawScore)) : null;
           } catch (judgeErr) {
             console.warn('Fun-mode judge failed; using first candidate', judgeErr);
             caption = candidates[0];
@@ -473,7 +510,7 @@ export async function POST(req: NextRequest) {
         if (caption) {
           try {
             const db = getAdminDb();
-            await storeSentCaption(db, gameId, caption, style, day);
+            captionId = await storeSentCaption(db, gameId, caption, style, day, judgeScore);
           } catch (err) {
             console.warn('Failed to store sent caption:', err);
           }
@@ -489,11 +526,13 @@ export async function POST(req: NextRequest) {
 
     const parts = caption
       ? [caption, link]
-      : [
-          day ? `Day ${day}.` : '',
-          playerName ? `${playerName}, you’re up.` : 'New turn.',
-          link,
-        ];
+      : isReminder
+        ? [`⏰ Still your move, ${who} — ${reminderElapsed} on the clock.`, link]
+        : [
+            day ? `Day ${day}.` : '',
+            playerName ? `${playerName}, you’re up.` : 'New turn.',
+            link,
+          ];
     const text = parts.filter(Boolean).join(' ').trim();
 
     // Attach the army's unit sprite as a Star Wars-style hologram: a cyan,
@@ -616,6 +655,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       text,
+      captionId: captionId || undefined,
       unit: unitName || undefined,
       imageData: imageData || undefined,
       imageContentType: imageContentType || undefined,
