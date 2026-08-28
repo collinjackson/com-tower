@@ -915,6 +915,25 @@ async function buildStatsChart(
 > {
   if (!renderUrl) return undefined;
   try {
+    // Nothing recorded yet — usually a game Com Tower started watching mid-way. Take a sample
+    // right now rather than answering with an empty chart: it makes /stats useful immediately
+    // (as a current standing) and doubles as the first point of the history.
+    const existing = await getFirestore()
+      .collection('games')
+      .doc(gameId)
+      .collection('turnStats')
+      .limit(1)
+      .get();
+    if (existing.empty) {
+      const turn = await resolveCurrentTurn(gameId).catch(() => undefined);
+      if (turn?.stats) {
+        await recordTurnStats(gameId, turn.stats);
+        console.log(`[stats] seeded game ${gameId} from a live read (day ${turn.stats.day})`);
+      } else {
+        return undefined;
+      }
+    }
+
     const url = new URL(`/api/chart/${gameId}`, renderUrl);
     url.searchParams.set('metric', metric);
     const bypass = process.env.RENDER_BYPASS_TOKEN;
@@ -928,17 +947,8 @@ async function buildStatsChart(
       return undefined;
     }
     const buf = Buffer.from(await res.arrayBuffer());
-    // The renderer answers with a "nothing recorded" placeholder rather than an error, so
-    // check the record itself before posting an empty chart.
-    const recorded = await getFirestore()
-      .collection('games')
-      .doc(gameId)
-      .collection('turnStats')
-      .limit(1)
-      .get();
-    if (recorded.empty) return undefined;
     return {
-      caption: `📈 ${metric === 'unitValue' ? 'Unit value' : metric} so far — ${gameLink(gameId)}`,
+      caption: `📈 ${metric === 'unitValue' ? 'Unit value' : metric} — ${gameLink(gameId)}`,
       attachment: {
         dataB64: buf.toString('base64'),
         contentType: 'image/png',
