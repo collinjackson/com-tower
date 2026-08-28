@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getAdminDb, adminAvailable } from '@/lib/firebase-admin';
-import { buildChartSvg, type Series } from '@/lib/chart';
+import { buildChartPng, type Series } from '@/lib/chart';
 
 // Charts are built from Com Tower's own per-turn recording, never the AWBW replay API — the
 // bot already samples the game page on every turn change, so this costs AWBW nothing.
@@ -19,7 +19,6 @@ export async function GET(req: Request, ctx: { params: Promise<{ gameId: string 
   const { gameId } = await ctx.params;
   const url = new URL(req.url);
   const metric = (url.searchParams.get('metric') || 'unitValue') as MetricKey;
-  const wantSvg = url.searchParams.get('format') === 'svg';
   if (!METRICS[metric]) {
     return NextResponse.json({ error: `unknown metric; try ${Object.keys(METRICS).join(', ')}` }, { status: 400 });
   }
@@ -72,7 +71,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ gameId: string 
     );
     const days = series.flatMap((s) => s.points.map((p) => p.day));
 
-    const svg = buildChartSvg({
+    const png = buildChartPng({
       series,
       title: `${METRICS[metric].label} — ${gameName || `Game ${gameId}`}`,
       subtitle: days.length
@@ -81,13 +80,6 @@ export async function GET(req: Request, ctx: { params: Promise<{ gameId: string 
       yLabel: METRICS[metric].axis,
     });
 
-    if (wantSvg) {
-      return new NextResponse(svg, {
-        headers: { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=60' },
-      });
-    }
-    const sharp = (await import('sharp')).default;
-    const png = await sharp(Buffer.from(svg), { density: 144 }).png().toBuffer();
     return new NextResponse(new Uint8Array(png), {
       headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=60' },
     });

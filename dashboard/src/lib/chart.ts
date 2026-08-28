@@ -1,9 +1,25 @@
+import { createCanvas, GlobalFonts, type SKRSContext2D } from '@napi-rs/canvas';
+import path from 'path';
 import { ARMY_COLORS, DEFAULT_ARMY_COLOR, SERIES_DASHES, fitToSurface } from './armies';
 
 export const SURFACE = '#12140f';
 const INK = '#d7dbc9';
 const INK_MUTED = '#8b9180';
 const GRID = '#2a2e24';
+
+// Register a font we ship rather than trusting the host to have one. The Vercel runtime has
+// no usable system font: an earlier build rasterised every label as tofu boxes, and nothing
+// about that is visible on a developer machine, where the system fonts resolve fine.
+const FONT = 'ComTowerChart';
+let fontReady = false;
+function ensureFont() {
+  if (fontReady) return;
+  GlobalFonts.registerFromPath(
+    path.join(process.cwd(), 'fonts', 'noto-sans-latin.ttf'),
+    FONT
+  );
+  fontReady = true;
+}
 
 export type Sample = { day: number; order: number; value: number };
 export type Series = {
@@ -13,9 +29,6 @@ export type Series = {
   eliminated?: boolean;
   points: Sample[];
 };
-
-const esc = (s: string) =>
-  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 /** Round to a readable axis step (1/2/5 x 10^n). */
 function niceStep(range: number, targetTicks: number) {
@@ -27,45 +40,55 @@ function niceStep(range: number, targetTicks: number) {
 
 const fmtK = (v: number) => (v >= 1000 ? `${Math.round(v / 100) / 10}k` : String(Math.round(v)));
 
+const DASH_PATTERNS: number[][] = SERIES_DASHES.map((d) =>
+  d ? d.split(' ').map(Number) : []
+);
+
 /**
  * A line chart of one measure over the course of a game, one line per player.
  *
- * Static by necessity: this is rasterised and posted into Signal as an image, so there is no
- * hover layer to lean on. Everything a tooltip would have carried is therefore on the face of
- * the chart — every line is directly labelled with its player and latest value, and the axes
- * are labelled rather than relying on a legend lookup.
+ * Static by necessity: this is posted into Signal as an image, so there is no hover layer to
+ * fall back on. Everything a tooltip would have carried is on the face of the chart — every
+ * line is directly labelled with its player and latest value.
  */
-export function buildChartSvg(opts: {
+export function buildChartPng(opts: {
   series: Series[];
   title: string;
   subtitle?: string;
   yLabel: string;
   width?: number;
   height?: number;
-}): string {
+}): Buffer {
+  ensureFont();
+  // 2x for a crisp image on phone screens, where these are actually read.
+  const SCALE = 2;
   const W = opts.width ?? 900;
   const H = opts.height ?? 470;
-  // The right margin has to be measured, not guessed: it holds the direct labels, and a fixed
-  // value clips the longest name the moment someone has a long username or a five-digit value.
-  // Monospace makes this exact — every glyph is ~0.6em, so 11px text is ~6.6px per character.
-  const longestLabel = Math.max(
-    12,
-    ...opts.series.map((s) => {
-      const last = s.points[s.points.length - 1];
-      return `${s.label}${s.eliminated ? ' ✕' : ''}  ${last ? fmtK(last.value) : ''}`.length;
-    })
-  );
-  const M = { top: 54, right: Math.ceil(longestLabel * 6.7) + 20, bottom: 44, left: 66 };
-  const plotW = W - M.left - M.right;
-  const plotH = H - M.top - M.bottom;
+  const canvas = createCanvas(W * SCALE, H * SCALE);
+  const ctx = canvas.getContext('2d') as SKRSContext2D;
+  ctx.scale(SCALE, SCALE);
+  ctx.fillStyle = SURFACE;
+  ctx.fillRect(0, 0, W, H);
 
   const all = opts.series.flatMap((s) => s.points);
   if (all.length === 0) {
-    return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
-  <rect width="${W}" height="${H}" fill="${SURFACE}"/>
-  <text x="${W / 2}" y="${H / 2}" fill="${INK_MUTED}" font-family="DejaVu Sans Mono, Menlo, monospace" font-size="14" text-anchor="middle">No turns recorded yet</text>
-</svg>`;
+    ctx.font = `14px ${FONT}`;
+    ctx.fillStyle = INK_MUTED;
+    ctx.textAlign = 'center';
+    ctx.fillText('No turns recorded yet', W / 2, H / 2);
+    return canvas.toBuffer('image/png');
   }
+
+  // Measured, not guessed: a fixed right margin clips the moment someone has a long username.
+  ctx.font = `11px ${FONT}`;
+  const labels = opts.series.map((s) => {
+    const last = s.points[s.points.length - 1];
+    return `${s.label}${s.eliminated ? ' (out)' : ''}  ${last ? fmtK(last.value) : ''}`;
+  });
+  const labelW = Math.max(80, ...labels.map((t) => ctx.measureText(t).width));
+  const M = { top: 54, right: Math.ceil(labelW) + 22, bottom: 44, left: 66 };
+  const plotW = W - M.left - M.right;
+  const plotH = H - M.top - M.bottom;
 
   const minDay = Math.min(...all.map((p) => p.day));
   const maxDay = Math.max(...all.map((p) => p.day));
@@ -79,80 +102,97 @@ export function buildChartSvg(opts: {
     M.left + ((p.day + p.order / 8 - minDay) / Math.max(0.5, maxDay + 1 - minDay)) * plotW;
   const y = (v: number) => M.top + plotH - (v / yTop) * plotH;
 
-  const parts: string[] = [];
-  parts.push(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace">`,
-    `<rect width="${W}" height="${H}" fill="${SURFACE}"/>`,
-    `<text x="${M.left}" y="26" fill="${INK}" font-size="15">${esc(opts.title)}</text>`
-  );
+  ctx.textAlign = 'left';
+  ctx.font = `15px ${FONT}`;
+  ctx.fillStyle = INK;
+  ctx.fillText(opts.title, M.left, 26);
   if (opts.subtitle) {
-    parts.push(`<text x="${M.left}" y="43" fill="${INK_MUTED}" font-size="11">${esc(opts.subtitle)}</text>`);
+    ctx.font = `11px ${FONT}`;
+    ctx.fillStyle = INK_MUTED;
+    ctx.fillText(opts.subtitle, M.left, 43);
   }
 
   // Recessive grid: horizontal only, so it never competes with the lines.
-  // 6 target ticks rather than 5: at 5 the ladder rounds a ~250k range up to a 100k step and
-  // the plot is left with two gridlines.
   const step = niceStep(yTop, 6);
+  ctx.lineWidth = 1;
+  ctx.font = `10px ${FONT}`;
   for (let v = 0; v <= yTop; v += step) {
     const gy = y(v);
-    parts.push(
-      `<line x1="${M.left}" y1="${gy.toFixed(1)}" x2="${M.left + plotW}" y2="${gy.toFixed(1)}" stroke="${GRID}" stroke-width="1"/>`,
-      `<text x="${M.left - 8}" y="${(gy + 3.5).toFixed(1)}" fill="${INK_MUTED}" font-size="10" text-anchor="end">${fmtK(v)}</text>`
-    );
+    ctx.strokeStyle = GRID;
+    ctx.beginPath();
+    ctx.moveTo(M.left, gy);
+    ctx.lineTo(M.left + plotW, gy);
+    ctx.stroke();
+    ctx.fillStyle = INK_MUTED;
+    ctx.textAlign = 'right';
+    ctx.fillText(fmtK(v), M.left - 8, gy + 3.5);
   }
-  parts.push(
-    `<text x="${M.left - 46}" y="${M.top + plotH / 2}" fill="${INK_MUTED}" font-size="10" text-anchor="middle" transform="rotate(-90 ${M.left - 46} ${M.top + plotH / 2})">${esc(opts.yLabel)}</text>`
-  );
+
+  ctx.save();
+  ctx.translate(M.left - 48, M.top + plotH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = INK_MUTED;
+  ctx.fillText(opts.yLabel, 0, 0);
+  ctx.restore();
 
   // X ticks on day boundaries, thinned so labels never collide.
-  const dayCount = maxDay - minDay + 1;
-  const dayStep = Math.max(1, Math.ceil(dayCount / 12));
+  const dayStep = Math.max(1, Math.ceil((maxDay - minDay + 1) / 12));
+  ctx.textAlign = 'center';
+  ctx.fillStyle = INK_MUTED;
   for (let d = minDay; d <= maxDay; d += dayStep) {
-    const tx = x({ day: d, order: 0, value: 0 });
-    parts.push(
-      `<text x="${tx.toFixed(1)}" y="${M.top + plotH + 18}" fill="${INK_MUTED}" font-size="10" text-anchor="middle">${d}</text>`
-    );
+    ctx.fillText(String(d), x({ day: d, order: 0, value: 0 }), M.top + plotH + 18);
   }
-  parts.push(
-    `<text x="${M.left + plotW / 2}" y="${H - 8}" fill="${INK_MUTED}" font-size="10" text-anchor="middle">Day</text>`,
-    `<line x1="${M.left}" y1="${M.top + plotH}" x2="${M.left + plotW}" y2="${M.top + plotH}" stroke="${GRID}" stroke-width="1.5"/>`
-  );
+  ctx.fillText('Day', M.left + plotW / 2, H - 8);
+  ctx.strokeStyle = GRID;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(M.left, M.top + plotH);
+  ctx.lineTo(M.left + plotW, M.top + plotH);
+  ctx.stroke();
 
   // Lines, then direct labels. Drawn in a stable order so colour follows the player, never
   // their current rank.
-  const labelSlots: Array<{ yWanted: number; text: string; color: string }> = [];
+  const slots: Array<{ yWanted: number; text: string; color: string }> = [];
   opts.series.forEach((s, i) => {
     const pts = [...s.points].sort((a, b) => a.day - b.day || a.order - b.order);
     if (pts.length === 0) return;
     const color = fitToSurface((s.army && ARMY_COLORS[s.army]) || DEFAULT_ARMY_COLOR, SURFACE);
-    const dash = SERIES_DASHES[i % SERIES_DASHES.length];
-    const d = pts.map((p, k) => `${k ? 'L' : 'M'}${x(p).toFixed(1)},${y(p.value).toFixed(1)}`).join(' ');
-    parts.push(
-      `<path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"${dash ? ` stroke-dasharray="${dash}"` : ''}${s.eliminated ? ' opacity="0.45"' : ''}/>`
-    );
-    const last = pts[pts.length - 1];
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.globalAlpha = s.eliminated ? 0.45 : 1;
+    ctx.setLineDash(DASH_PATTERNS[i % DASH_PATTERNS.length]);
+    ctx.beginPath();
+    pts.forEach((p, k) => (k ? ctx.lineTo(x(p), y(p.value)) : ctx.moveTo(x(p), y(p.value))));
+    ctx.stroke();
+    ctx.setLineDash([]);
+
     // A marker on the latest point only — a dot on every sample would be noise.
-    parts.push(
-      `<circle cx="${x(last).toFixed(1)}" cy="${y(last.value).toFixed(1)}" r="3.5" fill="${color}" stroke="${SURFACE}" stroke-width="2"/>`
-    );
-    labelSlots.push({
-      yWanted: y(last.value),
-      text: `${s.label}${s.eliminated ? ' ✕' : ''}  ${fmtK(last.value)}`,
-      color,
-    });
+    const last = pts[pts.length - 1];
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(x(last), y(last.value), 3.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = SURFACE;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    slots.push({ yWanted: y(last.value), text: labels[i], color });
   });
 
   // Nudge labels apart so two players at similar values do not overprint.
-  labelSlots.sort((a, b) => a.yWanted - b.yWanted);
+  slots.sort((a, b) => a.yWanted - b.yWanted);
+  ctx.textAlign = 'left';
+  ctx.font = `11px ${FONT}`;
   let prev = -Infinity;
-  for (const slot of labelSlots) {
+  for (const slot of slots) {
     const ly = Math.max(slot.yWanted, prev + 14);
     prev = ly;
-    parts.push(
-      `<text x="${M.left + plotW + 10}" y="${(ly + 3.5).toFixed(1)}" fill="${slot.color}" font-size="11">${esc(slot.text)}</text>`
-    );
+    ctx.fillStyle = slot.color;
+    ctx.fillText(slot.text, M.left + plotW + 10, ly + 3.5);
   }
 
-  parts.push('</svg>');
-  return parts.join('\n');
+  return canvas.toBuffer('image/png');
 }
