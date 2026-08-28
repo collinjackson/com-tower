@@ -162,6 +162,8 @@ body {
    behind it once the z-index has dropped. Nothing else animates, so the card reads as a
    physical thing being lifted rather than a panel cross-fading. */
 .ct-card {
+  /* 440ms must stay in step with MOVE_MS in FeaturedPost: the z-index flips on that timer,
+     and if it fires before the rise finishes the card is seen dropping behind the pile. */
   transition: transform 440ms cubic-bezier(0.33, 0.08, 0.2, 1), opacity 440ms ease,
     filter 440ms ease;
 }
@@ -180,16 +182,16 @@ body {
 }
 .ct-card-foot { margin-top: 5px; }
 
-/* The unit, run through the press: one ink, hard contrast, a dot screen over the top.
-   Filters rather than server-side processing so the sprite keeps animating. */
+/* The unit as printed. The ink, contrast and single frame are all applied server-side by
+   /api/sprite, so all that is left here is sitting it on the stock: multiply lets the paper
+   grain show through the ink the way it would on a real card. */
 .ct-print-img {
   width: 46px;
   height: 46px;
   object-fit: contain;
   image-rendering: pixelated;
-  filter: grayscale(1) contrast(1.75) brightness(1.06) sepia(0.28) saturate(0.55);
   mix-blend-mode: multiply;
-  opacity: 0.92;
+  opacity: 0.93;
 }
 
 .ct-stencil {

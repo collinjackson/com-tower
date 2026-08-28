@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 type Post = {
   text: string;
@@ -13,8 +13,12 @@ type Post = {
 };
 
 const HOLD_MS = 8000;
-// How long the front card spends lifted before it drops in behind the others.
-const LIFT_MS = 460;
+// Must match the transform transition in globals.css: the z-index only flips once the card
+// has finished rising, so these cannot drift apart.
+const MOVE_MS = 440;
+// Clearance above the top of the pile once raised. The lift itself is the card's own measured
+// height plus this, so the raised card is entirely above the pile before anything else moves.
+const LIFT_CLEARANCE = 18;
 // How deep the visible pile goes. Beyond this the cards are hidden — the illusion only needs
 // the few top edges.
 const PILE_DEPTH = 5;
@@ -22,14 +26,20 @@ const PILE_DEPTH = 5;
 /** Dispatches on a field desk, paged through one at a time: the front card lifts toward the
  *  machine's slot, then drops in at the back of the pile and the next one is showing.
  *
- *  DOM rather than painted into the background canvas because the unit sprite AWBW serves is
- *  an animated GIF, and drawImage() paints only its first frame. The monochrome treatment is
- *  a CSS filter for the same reason — sharp would flatten the animation to a still. */
+ *  The unit is a still: AWBW serves an animated GIF, and a looping sprite fights the paper —
+ *  a printed card does not move. /api/sprite pulls the first frame and prints it in one ink,
+ *  which is a truer press look than CSS filters could manage anyway. */
 export function FeaturedPost() {
   const [posts, setPosts] = useState<Post[]>([]);
   // Post indices, front of the pile first. Rotated by one each time we page.
   const [order, setOrder] = useState<number[]>([]);
-  const [lifting, setLifting] = useState(false);
+  // 'lifting' = rising clear of the pile; 'settling' = descending into the back of it.
+  const [phase, setPhase] = useState<'idle' | 'lifting' | 'settling'>('idle');
+  // How far up to raise the front card. Measured, not assumed: cards differ in height with
+  // the length of the dispatch, and a lift shorter than the card leaves it overlapping the
+  // pile when its z-index drops — which is exactly what makes the swap visible.
+  const [lift, setLift] = useState(280);
+  const frontRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -49,16 +59,28 @@ export function FeaturedPost() {
 
   useEffect(() => {
     if (posts.length < 2) return;
+    const timers: number[] = [];
     const timer = window.setInterval(() => {
-      setLifting(true);
-      // Rotate only once the card is clear of the pile: its z-index drops at the same moment,
-      // so it is above the others on the way up and behind them on the way down.
-      window.setTimeout(() => {
-        setOrder((o) => [...o.slice(1), o[0]]);
-        setLifting(false);
-      }, LIFT_MS);
+      // Measure the card actually on top right now, so the lift always clears it.
+      const h = frontRef.current?.offsetHeight;
+      if (h) setLift(h + LIFT_CLEARANCE);
+      setPhase('lifting');
+
+      // Only once it is fully raised — and therefore no longer overlapping anything — is it
+      // safe to send it to the back. The rotation drops its z-index in the same frame, but
+      // the card is clear of the pile by then, so nothing is seen popping behind.
+      timers.push(
+        window.setTimeout(() => {
+          setOrder((o) => [...o.slice(1), o[0]]);
+          setPhase('settling');
+        }, MOVE_MS)
+      );
+      timers.push(window.setTimeout(() => setPhase('idle'), MOVE_MS * 2));
     }, HOLD_MS);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      timers.forEach(clearTimeout);
+    };
   }, [posts.length]);
 
   if (posts.length === 0 || order.length === 0) return null;
@@ -82,22 +104,27 @@ export function FeaturedPost() {
           if (depth >= PILE_DEPTH) return null;
           const post = posts[postIdx];
           const isFront = depth === 0;
-          const lifted = isFront && lifting;
+          const lifted = isFront && phase === 'lifting';
+          // The card that just went to the back is still descending; it keeps the front card's
+          // full opacity until it lands, so it does not dim mid-air.
+          const descending = phase === 'settling' && depth === order.length - 1;
           return (
             <article
               key={postIdx}
+              ref={isFront ? (frontRef as React.Ref<HTMLElement>) : undefined}
               className="ct-card absolute inset-x-0 top-0"
               style={{
-                // Lifted: up toward the slot and a touch larger, as if picked up. Resting:
-                // each card further down the pile, with a small alternating tilt so it does
-                // not read as a stack of identical rectangles.
+                // Raised clear of the pile by its own height, so what is underneath is fully
+                // revealed before it goes anywhere. Resting: each card further down the pile,
+                // with a small alternating tilt so it does not read as identical rectangles.
                 transform: lifted
-                  ? 'translateY(-54px) scale(1.035)'
+                  ? `translateY(-${lift}px) scale(1.035)`
                   : `translateY(${depth * 7}px) rotate(${isFront ? 0 : (depth % 2 ? -0.5 : 0.6) * depth}deg)`,
-                // Under the slot's lip while lifted, but over the rest of the pile.
-                zIndex: lifted ? 25 : 20 - depth,
-                opacity: isFront ? 1 : Math.max(0, 0.55 - depth * 0.12),
-                filter: isFront ? undefined : `brightness(${1 - depth * 0.06})`,
+                // Above everything while raised — including the machine's lip, so the card
+                // stays readable — then straight to the back of the pile as it descends.
+                zIndex: lifted ? 40 : 20 - depth,
+                opacity: isFront || descending ? 1 : Math.max(0, 0.55 - depth * 0.12),
+                filter: isFront || descending ? undefined : `brightness(${1 - depth * 0.06})`,
               }}
               aria-hidden={!isFront}
             >
@@ -108,9 +135,13 @@ export function FeaturedPost() {
 
               <div className="mt-1.5 flex items-start gap-2.5">
                 {post.spriteUrl ? (
-                  // eslint-disable-next-line @next/next/no-img-element -- animated GIF; the
-                  // Image optimizer would flatten it to a still frame.
-                  <img src={post.spriteUrl} alt="" className="ct-print-img" />
+                  // eslint-disable-next-line @next/next/no-img-element -- already rasterised
+                  // and sized by /api/sprite; the Image optimizer would only re-encode it.
+                  <img
+                    src={`/api/sprite?u=${encodeURIComponent(post.spriteUrl)}`}
+                    alt=""
+                    className="ct-print-img"
+                  />
                 ) : null}
                 <div className="min-w-0">
                   <div className="ct-stencil">{(post.speaker || 'COMMS').toUpperCase()}</div>
