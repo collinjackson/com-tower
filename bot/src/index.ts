@@ -893,6 +893,56 @@ async function buildMessage(
   return { text: parts.join(' ') };
 }
 
+/** Ask the dashboard to render a chart of this game's recorded history. Built entirely from
+ *  Com Tower's own per-turn samples — no replay API call, so nothing here can rate-limit AWBW. */
+async function buildStatsChart(
+  gameId: string,
+  metric: string
+): Promise<
+  | {
+      caption: string;
+      attachment: { dataB64: string; contentType: string; filename: string };
+    }
+  | undefined
+> {
+  if (!renderUrl) return undefined;
+  try {
+    const url = new URL(`/api/chart/${gameId}`, renderUrl);
+    url.searchParams.set('metric', metric);
+    const bypass = process.env.RENDER_BYPASS_TOKEN;
+    const res = await fetch(url.toString(), {
+      headers: bypass
+        ? { 'x-vercel-protection-bypass': bypass, cookie: `x-vercel-protection-bypass=${bypass}` }
+        : {},
+    });
+    if (!res.ok) {
+      console.warn(`[stats] chart render failed ${res.status}`);
+      return undefined;
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    // The renderer answers with a "nothing recorded" placeholder rather than an error, so
+    // check the record itself before posting an empty chart.
+    const recorded = await getFirestore()
+      .collection('games')
+      .doc(gameId)
+      .collection('turnStats')
+      .limit(1)
+      .get();
+    if (recorded.empty) return undefined;
+    return {
+      caption: `📈 ${metric === 'unitValue' ? 'Unit value' : metric} so far — ${gameLink(gameId)}`,
+      attachment: {
+        dataB64: buf.toString('base64'),
+        contentType: 'image/png',
+        filename: `awbw-${gameId}-${metric}.png`,
+      },
+    };
+  } catch (err) {
+    console.warn('[stats] chart fetch failed', err);
+    return undefined;
+  }
+}
+
 // Track recent NextTurn events to prevent duplicate processing
 const recentNextTurns = new Map<string, number>(); // key: `${gameId}-${day}-${playerId}`, value: timestamp
 const NEXT_TURN_DEDUP_WINDOW_MS = 5000; // Ignore duplicate NextTurn events within 5 seconds
@@ -1591,6 +1641,7 @@ const HELP_TEXT =
   '/showcase [on|off]   — let good posts appear (names blacked out) in the public gallery (mod)\n' +
   '/remind <dur|off>    — nudge the current player if they sit on their turn (mod)\n' +
   '/language <lang>     — your turn pings in another language (e.g. Klingon, Esperanto)\n' +
+  '/stats [metric]      — chart the game so far (unitValue, funds, income, properties)\n' +
   '/status              — current state\n' +
   '/sync                — check AWBW now and post if we missed a turn\n' +
   '/stop                — stop watching (mod)\n' +
@@ -2026,6 +2077,24 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
     const newFun = explicit === 'on' ? true : explicit === 'off' ? false : !gg.funEnabled;
     await ggRef(groupId).update({ funEnabled: newFun, updatedAt: FieldValue.serverTimestamp() });
     await reply(`Fun mode ${newFun ? 'enabled ✨' : 'disabled'}.`);
+    return;
+  }
+
+  if (cmd === '/stats') {
+    if (!gg.gameId) {
+      await reply('No game bound yet. Run /game <link> first.');
+      return;
+    }
+    const metric = (args[0] || 'unitValue').replace(/[^a-zA-Z]/g, '');
+    const chart = await buildStatsChart(gg.gameId, metric);
+    if (!chart) {
+      await reply(
+        'No turns recorded yet. Com Tower charts from its own record of the game rather than ' +
+          'the replay API, so the history starts from the first turn after it began watching.'
+      );
+      return;
+    }
+    await sendGroupRaw(groupId, chart.caption, undefined, chart.attachment);
     return;
   }
 
