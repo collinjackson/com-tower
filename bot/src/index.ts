@@ -1399,7 +1399,15 @@ async function sendGroupRaw(
   });
   // signal-cli-rest-api answers { "timestamp": <ms> } (number or string depending on version).
   const ts = Number((res?.data as any)?.timestamp);
-  return Number.isFinite(ts) && ts > 0 ? ts : undefined;
+  if (!(Number.isFinite(ts) && ts > 0)) {
+    // Not fatal — the message went out — but without it no reaction can ever be matched back
+    // to this post and it can never reach the gallery. Loud, because it would be invisible.
+    console.warn(
+      `[gg] send returned no usable timestamp (reactions/showcase disabled for this post): ${JSON.stringify(res?.data)?.slice(0, 200)}`
+    );
+    return undefined;
+  }
+  return ts;
 }
 
 async function sendGroupReply(groupId: string, text: string): Promise<void> {
@@ -2741,7 +2749,14 @@ async function buildFunReminder(
   currentPlayer: string,
   elapsed: string,
   language?: string
-): Promise<{ text: string; attachment?: { dataB64: string; contentType: string; filename: string } } | undefined> {
+): Promise<
+  | {
+      text: string;
+      attachment?: { dataB64: string; contentType: string; filename: string };
+      captionId?: string;
+    }
+  | undefined
+> {
   const gameId = gg.gameId!;
   const turn = await resolveCurrentTurn(gameId).catch(() => undefined);
   const liveUnits = turn?.units || [];
@@ -2802,7 +2817,7 @@ async function buildFunReminder(
         filename: payload.imageFilename || 'unit.gif',
       }
     : undefined;
-  return { text: payload.text, attachment };
+  return { text: payload.text, attachment, captionId: payload.captionId };
 }
 
 /** Send a single turn-reminder nudge that @-pings only the current player. Plain "still your move"
@@ -2819,6 +2834,7 @@ async function sendTurnReminder(gg: GroupGame, elapsedMs: number): Promise<void>
   // Plain nudge — the whole message when fun mode is off, and the fallback if the fun render fails.
   let message = `⏰ Still your move, ${current} — ${elapsed} on the clock.\n${gameLink(gg.gameId)}`;
   let attachment: { dataB64: string; contentType: string; filename: string } | undefined;
+  let captionId: string | undefined;
 
   if (gg.funEnabled) {
     try {
@@ -2826,6 +2842,7 @@ async function sendTurnReminder(gg: GroupGame, elapsedMs: number): Promise<void>
       if (built?.text) {
         message = built.text;
         attachment = built.attachment;
+        captionId = built.captionId;
       }
     } catch (e) {
       console.warn('[remind] fun reminder build failed; sending plain nudge', e);
@@ -2840,22 +2857,37 @@ async function sendTurnReminder(gg: GroupGame, elapsedMs: number): Promise<void>
     mentions.push({ author: mapping.aci, start, length: 1 });
   }
 
+  let sentTimestamp: number | undefined;
   try {
-    await sendGroupRaw(gg.groupId, message, mentions.length ? mentions : undefined, attachment);
+    sentTimestamp = await sendGroupRaw(gg.groupId, message, mentions.length ? mentions : undefined, attachment);
   } catch (sendErr) {
     if (attachment) {
       // Same slow-attachment-upload race as the turn ping: retry with the image, then text-only.
       console.warn('[remind] send with attachment failed; retrying, then text-only', sendErr);
       await new Promise((r) => setTimeout(r, 2000));
       try {
-        await sendGroupRaw(gg.groupId, message, mentions.length ? mentions : undefined, attachment);
+        sentTimestamp = await sendGroupRaw(gg.groupId, message, mentions.length ? mentions : undefined, attachment);
       } catch (retryErr) {
         console.warn('[remind] attachment retry failed; sending text-only', retryErr);
-        await sendGroupRaw(gg.groupId, message, mentions.length ? mentions : undefined);
+        sentTimestamp = await sendGroupRaw(gg.groupId, message, mentions.length ? mentions : undefined);
       }
     } else {
       throw sendErr;
     }
+  }
+  // A reminder is a real post that people react to, so it earns its place in the gallery the
+  // same way a turn ping does.
+  if (captionId && sentTimestamp && gg.gameId) {
+    const info = await loadPlayers(gg.gameId).catch(() => ({ players: [] as string[], countries: [] as string[] }));
+    await stampCaptionSend(gg.gameId, captionId, {
+      sentTimestamp,
+      groupId: gg.groupId,
+      turnPlayer: current,
+      roster: Array.from(
+        new Set([...(info.players || []), ...Object.keys(gg.players || {}), current])
+      ).filter(Boolean),
+      gameName: gg.gameName,
+    });
   }
   console.log(
     `[remind] nudged ${gg.groupId.substring(0, 16)} player=${current} elapsed=${elapsed} fun=${gg.funEnabled ? 'on' : 'off'} img=${attachment ? 'yes' : 'no'}`
