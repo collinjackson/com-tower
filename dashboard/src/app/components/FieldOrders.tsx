@@ -144,6 +144,14 @@ export function FieldOrders({ children }: { children: React.ReactNode }) {
             pointerEvents: flight ? 'none' : undefined,
           }}
         >
+          {/* The envelope the orders arrived in, sitting behind and slightly askew so only its
+              edges show. Inside the animated wrapper, so it folds away with the memo rather
+              than being left behind on the desk. */}
+          <div
+            aria-hidden
+            className="ct-envelope pointer-events-none absolute -left-2.5 -right-4 -top-2 -bottom-6 -rotate-1 rounded-[3px]"
+          />
+
           <button
             type="button"
             onClick={dismiss}
