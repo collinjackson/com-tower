@@ -74,9 +74,12 @@ export async function GET(req: Request, ctx: { params: Promise<{ gameId: string 
     const png = buildChartPng({
       series,
       title: `${METRICS[metric].label} — ${gameName || `Game ${gameId}`}`,
-      subtitle: days.length
-        ? `Day ${Math.min(...days)}–${Math.max(...days)} · ${snap.size} turns recorded by Com Tower`
-        : 'No turns recorded yet',
+      subtitle:
+        snap.size === 1
+          ? `Day ${days[0]} · current standing — no history recorded yet`
+          : days.length
+            ? `Day ${Math.min(...days)}–${Math.max(...days)} · ${snap.size} turns recorded by Com Tower`
+            : 'No turns recorded yet',
       yLabel: METRICS[metric].axis,
     });
 

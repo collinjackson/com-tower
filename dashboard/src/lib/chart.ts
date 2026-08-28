@@ -60,6 +60,11 @@ export function buildChartPng(opts: {
   height?: number;
 }): Buffer {
   ensureFont();
+  // With a single sample there is no change over time to draw, and a line chart of one point
+  // per player is a scatter of dots pretending to be a trend. The job is then comparing
+  // magnitudes between players, which is a bar chart.
+  const samplesPerSeries = Math.max(0, ...opts.series.map((s) => s.points.length));
+  if (samplesPerSeries === 1) return buildSnapshotPng(opts);
   // 2x for a crisp image on phone screens, where these are actually read.
   const SCALE = 2;
   const W = opts.width ?? 900;
@@ -193,6 +198,86 @@ export function buildChartPng(opts: {
     ctx.fillStyle = slot.color;
     ctx.fillText(slot.text, M.left + plotW + 10, ly + 3.5);
   }
+
+  return canvas.toBuffer('image/png');
+}
+
+
+/** Current standing, one bar per player — used when only a single sample exists. */
+function buildSnapshotPng(opts: {
+  series: Series[];
+  title: string;
+  subtitle?: string;
+  yLabel: string;
+  width?: number;
+  height?: number;
+}): Buffer {
+  ensureFont();
+  const SCALE = 2;
+  const W = opts.width ?? 900;
+  const rows = opts.series.filter((s) => s.points.length > 0);
+  const ROW_H = 42;
+  const H = Math.max(200, 96 + rows.length * ROW_H);
+  const canvas = createCanvas(W * SCALE, H * SCALE);
+  const ctx = canvas.getContext('2d') as SKRSContext2D;
+  ctx.scale(SCALE, SCALE);
+  ctx.fillStyle = SURFACE;
+  ctx.fillRect(0, 0, W, H);
+
+  const M = { top: 72, left: 24, right: 24 };
+  ctx.textAlign = 'left';
+  ctx.font = `15px ${FONT}`;
+  ctx.fillStyle = INK;
+  ctx.fillText(opts.title, M.left, 30);
+  if (opts.subtitle) {
+    ctx.font = `11px ${FONT}`;
+    ctx.fillStyle = INK_MUTED;
+    ctx.fillText(opts.subtitle, M.left, 48);
+  }
+
+  // Sorted by magnitude because that is the comparison being made. Colour still follows the
+  // player's army, never their position in this ordering.
+  const sorted = [...rows].sort((a, b) => b.points[0].value - a.points[0].value);
+  const maxVal = Math.max(1, ...sorted.map((s) => s.points[0].value));
+
+  ctx.font = `12px ${FONT}`;
+  const nameW = Math.max(90, ...sorted.map((s) => ctx.measureText(s.label).width)) + 12;
+  const valueW = 66;
+  const barMax = W - M.left - M.right - nameW - valueW;
+
+  sorted.forEach((s, i) => {
+    const v = s.points[0].value;
+    const top = M.top + i * ROW_H;
+    const color = fitToSurface((s.army && ARMY_COLORS[s.army]) || DEFAULT_ARMY_COLOR, SURFACE);
+
+    ctx.font = `12px ${FONT}`;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = s.eliminated ? INK_MUTED : INK;
+    ctx.fillText(`${s.label}${s.eliminated ? ' (out)' : ''}`, M.left, top + 16);
+
+    const barX = M.left + nameW;
+    const barW = Math.max(2, (v / maxVal) * barMax);
+    const barY = top + 5;
+    const barH = 15;
+    // Rounded at the data end only — the other end is anchored to the baseline.
+    ctx.fillStyle = color;
+    ctx.globalAlpha = s.eliminated ? 0.45 : 1;
+    ctx.beginPath();
+    const r = Math.min(4, barW);
+    ctx.moveTo(barX, barY);
+    ctx.lineTo(barX + barW - r, barY);
+    ctx.quadraticCurveTo(barX + barW, barY, barX + barW, barY + r);
+    ctx.lineTo(barX + barW, barY + barH - r);
+    ctx.quadraticCurveTo(barX + barW, barY + barH, barX + barW - r, barY + barH);
+    ctx.lineTo(barX, barY + barH);
+    ctx.closePath();
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    ctx.textAlign = 'left';
+    ctx.fillStyle = INK_MUTED;
+    ctx.fillText(fmtK(v), barX + barW + 8, barY + 12);
+  });
 
   return canvas.toBuffer('image/png');
 }
