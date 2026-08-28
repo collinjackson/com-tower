@@ -11,6 +11,7 @@
     "deploy": "cd .. && npx vercel@43 --prod --yes"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^1.0.8",
     "firebase": "^11.0.1",
     "firebase-admin": "^13.0.1",
     "libphonenumber-js": "^1.12.34",
