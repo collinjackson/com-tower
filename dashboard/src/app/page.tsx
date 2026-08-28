@@ -3,8 +3,15 @@
 // static briefing pinned over it. No auth, no client state.
 
 import { DashRule } from './components/DashRule';
+import { FieldOrders } from './components/FieldOrders';
 
-const BOT_NUMBER = '+1 904-878-1337';
+const SELF_HOST_GUIDE =
+  'https://github.com/collinjackson/com-tower/blob/main/SELF_HOST.md';
+
+// Overridable per deployment (self-hosters run their own Signal number), but the shared
+// instance's number is public and printed on this page anyway — so it falls back rather than
+// rendering an empty "Com Tower ()" if the env var is missing.
+const BOT_NUMBER = process.env.NEXT_PUBLIC_BOT_NUMBER || '+1 904-878-1337';
 
 // Short roster only — /help points to the rest.
 const COMMANDS: Array<[string, string]> = [
@@ -35,7 +42,9 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 export default function Home() {
   return (
     <div className="min-h-screen flex items-center justify-center px-4 sm:px-8 py-16 text-[#43371f]">
-      {/* The memo — one typewriter size, uniform kerning; rules are whole runs of typed hyphens. */}
+      {/* The memo — one typewriter size, uniform kerning; rules are whole runs of typed hyphens.
+          Dismissible: filing it away clears the view down to the console gallery below. */}
+      <FieldOrders>
       <main className="ct-paper relative w-full max-w-xl rounded-[8px] overflow-hidden font-mono text-[13px] leading-[1.65]">
         <div className="px-6 sm:px-9 py-7">
           {/* letterhead + memo header block */}
@@ -79,8 +88,23 @@ export default function Home() {
               </div>
             ))}
           </div>
+          <DashRule />
+
+          <p className="text-[#5c4d30]">
+            Running many games?{' '}
+            <a
+              href={SELF_HOST_GUIDE}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[#8a3a12] font-bold no-underline hover:text-[#a8481a] transition-colors"
+            >
+              Host your own Com Tower
+            </a>{' '}
+            — fork the repo, set your env vars, and use your own Signal number.
+          </p>
         </div>
       </main>
+      </FieldOrders>
     </div>
   );
 }
