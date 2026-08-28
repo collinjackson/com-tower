@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { ARMY_COLORS, DEFAULT_ARMY_COLOR } from '@/lib/armies';
 
 type Post = {
   text: string;
@@ -13,26 +12,34 @@ type Post = {
   spriteUrl: string | null;
 };
 
-const CYCLE_MS = 8000;
-const FADE_MS = 450;
+const CYCLE_MS = 9000;
+// How deep the visible pile goes. Beyond this the cards are hidden rather than stacked
+// forever — the illusion only needs the few top edges.
+const PILE_DEPTH = 5;
 
-/** A heads-up display off to the side, carrying one real notification at a time.
+/** Dispatches coming off a teletype: each notification prints out of the slot and lands on
+ *  the pile, pushing the previous one down.
  *
- *  Deliberately DOM rather than a panel painted into the background canvas: the unit sprite
- *  AWBW serves is an animated GIF, and drawImage() only ever paints a GIF's first frame. In
- *  an <img> it animates for free. */
+ *  DOM rather than painted into the background canvas because the unit sprite AWBW serves is
+ *  an animated GIF, and drawImage() paints only its first frame. The monochrome treatment is
+ *  a CSS filter for the same reason — running it through sharp server-side would flatten the
+ *  animation to a still. */
 export function FeaturedPost() {
   const [posts, setPosts] = useState<Post[]>([]);
-  const [idx, setIdx] = useState(0);
-  const [shown, setShown] = useState(true);
-  const [spriteOk, setSpriteOk] = useState(true);
+  // Newest first. Grows as each one prints, so the pile deepens while you watch.
+  const [pile, setPile] = useState<{ post: Post; serial: number }[]>([]);
+  const [cursor, setCursor] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     fetch('/api/showcase')
       .then((r) => (r.ok ? r.json() : { posts: [] }))
       .then((d) => {
-        if (!cancelled) setPosts(Array.isArray(d?.posts) ? d.posts : []);
+        const list: Post[] = Array.isArray(d?.posts) ? d.posts : [];
+        if (cancelled || list.length === 0) return;
+        setPosts(list);
+        setPile([{ post: list[0], serial: 0 }]);
+        setCursor(1);
       })
       .catch(() => {});
     return () => {
@@ -41,68 +48,76 @@ export function FeaturedPost() {
   }, []);
 
   useEffect(() => {
-    if (posts.length < 2) return;
+    if (posts.length === 0) return;
     const timer = window.setInterval(() => {
-      // Fade out, swap, fade in — a HUD channel changing, not a hard cut.
-      setShown(false);
-      window.setTimeout(() => {
-        setIdx((i) => (i + 1) % posts.length);
-        setSpriteOk(true);
-        setShown(true);
-      }, FADE_MS);
+      setCursor((c) => {
+        setPile((p) => [{ post: posts[c % posts.length], serial: c }, ...p].slice(0, PILE_DEPTH));
+        return c + 1;
+      });
     }, CYCLE_MS);
     return () => clearInterval(timer);
-  }, [posts.length]);
+  }, [posts]);
 
-  if (posts.length === 0) return null;
-
-  const post = posts[idx];
-  const color = (post.army && ARMY_COLORS[post.army]) || DEFAULT_ARMY_COLOR;
-  const speaker = (post.speaker || 'COMMS').toUpperCase();
-  const army = (post.armyName || '').toUpperCase();
+  if (pile.length === 0) return null;
 
   return (
-    // xl only: below that the memo would collide with it, and a HUD that overlaps the
-    // briefing is worse than no HUD.
     <aside
-      className="ct-hud fixed right-5 top-1/2 z-10 hidden w-[292px] -translate-y-1/2 rounded-[3px] border bg-[#080c09]/85 p-3 font-mono text-[11px] leading-[1.5] shadow-[0_10px_30px_-12px_rgba(0,0,0,0.9)] xl:block"
-      style={{
-        borderColor: `${color}55`,
-        opacity: shown ? 1 : 0,
-        transition: `opacity ${FADE_MS}ms ease`,
-      }}
-      aria-label="Featured transmission"
+      className="fixed right-6 top-1/2 z-10 hidden w-[310px] -translate-y-1/2 xl:block"
+      aria-label="Field dispatches"
     >
-      <div className="flex items-baseline justify-between gap-2">
-        <span className="truncate uppercase tracking-wide" style={{ color }}>
-          ▸ {speaker}
-          {army ? ` · ${army}` : ''}
-        </span>
-        {post.day ? <span className="shrink-0 text-[#5d7a63]">DAY {post.day}</span> : null}
+      {/* The aperture. Sits above the cards so a printing dispatch appears to slide out
+          from behind the lip rather than fading in over it. */}
+      <div className="ct-slot relative z-30">
+        <span className="ct-slot-label">COM TOWER · FIELD DISPATCH</span>
       </div>
 
-      <div className="my-2 h-px w-full" style={{ backgroundColor: `${color}44` }} />
+      {/* Fixed height because the cards are absolutely positioned to overlap. Sized for the
+          240-character ceiling the caption generator enforces, so the longest possible
+          dispatch still fits rather than spilling past the pile. */}
+      <div className="relative mt-[-2px] h-[268px]">
+        {pile.map(({ post, serial }, i) => (
+          <article
+            key={serial}
+            className={`ct-card absolute inset-x-0 top-0${i === 0 ? ' ct-card-printing' : ''}`}
+            style={{
+              // Each older card sinks a little further down the pile and dims. The tiny
+              // alternating rotation stops it reading as a stack of identical rectangles.
+              transform: `translateY(${i * 7}px) rotate(${i === 0 ? 0 : (i % 2 ? -0.5 : 0.6) * i}deg)`,
+              zIndex: 20 - i,
+              opacity: i === 0 ? 1 : Math.max(0, 0.55 - i * 0.12),
+              filter: i === 0 ? undefined : `brightness(${1 - i * 0.06})`,
+            }}
+            aria-hidden={i !== 0}
+          >
+            <div className="ct-card-head">
+              <span>No. {String(serial + 1).padStart(3, '0')}</span>
+              {post.day ? <span>DAY {post.day}</span> : <span />}
+            </div>
 
-      <div className="flex items-start gap-3">
-        {post.spriteUrl && spriteOk ? (
-          // eslint-disable-next-line @next/next/no-img-element -- an animated GIF hotlinked
-          // from AWBW; the Image optimizer would flatten it to a still frame.
-          <img
-            src={post.spriteUrl}
-            alt=""
-            onError={() => setSpriteOk(false)}
-            className="mt-0.5 h-12 w-12 shrink-0 object-contain"
-            style={{ imageRendering: 'pixelated' }}
-          />
-        ) : null}
-        <p className="min-w-0 flex-1 text-[#9fd4a8]">{post.text}</p>
-      </div>
+            <div className="mt-1.5 flex items-start gap-2.5">
+              {post.spriteUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element -- animated GIF; the
+                // Image optimizer would flatten it to a still frame.
+                <img src={post.spriteUrl} alt="" className="ct-print-img" />
+              ) : null}
+              <div className="min-w-0">
+                <div className="ct-stencil">{(post.speaker || 'COMMS').toUpperCase()}</div>
+                {post.armyName ? (
+                  <div className="ct-stencil-sub">{post.armyName.toUpperCase()}</div>
+                ) : null}
+              </div>
+            </div>
 
-      <div className="mt-2 flex items-center justify-between gap-2">
-        <span className="text-[13px] leading-none">{post.emojis.slice(0, 8).join('')}</span>
-        <span className="text-[9px] uppercase tracking-wider text-[#4d6b53]">
-          intercepted · names redacted
-        </span>
+            <div className="ct-rule" />
+            <p className="ct-body">{post.text}</p>
+            <div className="ct-rule" />
+
+            <div className="ct-card-foot">
+              <span className="ct-emoji">{post.emojis.slice(0, 8).join('')}</span>
+              <span>NAMES REDACTED</span>
+            </div>
+          </article>
+        ))}
       </div>
     </aside>
   );
