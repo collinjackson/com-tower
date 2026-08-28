@@ -241,3 +241,19 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .ct-file-out, .ct-file-in { animation: none; }
 }
+
+/* ── Desk layout ─────────────────────────────────────────────────────────────────────────
+   Two columns on a wide screen: the memo and the dispatch pile. The gap between them is the
+   same as the margin outside each, so the pile is not jammed against the window edge. 886px
+   is the memo (max-w-xl, 576) plus the pile (310); a third of what is left over becomes the
+   gutter, used three times. Below xl the pile is hidden and the memo just centres. */
+@media (min-width: 1280px) {
+  .ct-layout {
+    justify-content: flex-start;
+    padding-left: calc((100vw - 886px) / 3);
+    padding-right: 0;
+  }
+  .ct-pile {
+    right: calc((100vw - 886px) / 3);
+  }
+}
