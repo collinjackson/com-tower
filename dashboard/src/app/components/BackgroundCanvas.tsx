@@ -566,8 +566,14 @@ export function BackgroundCanvas() {
           const shotInterval = baseInterval * (0.75 + ((shotSeed % 23) / 23) * 0.5);
           const showFlash = (nowInf + shotSeed * 137) % shotInterval < MUZZLE_FLASH_MS;
           const combatFlash = fighting && showFlash;
-          const basePx = screenX + (inBack ? (i - frontCount) * 5 * dir : i * 4 * dir) + stagger;
-          const ridgeTopAtBase = getTerrainY(frontTerrain.points, basePx, width) + craterOffsetAt(basePx);
+          // The muzzle, in world coordinates, taken straight from where the weapon was drawn
+          // in the soldier's own local frame (rifle tip ~4.6,2.65; bazooka ~5.3,2.1 — mirrored
+          // with dir). Anchoring to the body matters: py sits on a SMOOTHED terrain height,
+          // so re-sampling the raw terrain at a slightly different x — as this used to — could
+          // put the flash well off the ground on a ridge edge and read as infantry firing in
+          // mid-air.
+          const muzzleX = px + dir * (hasBazooka ? 5.3 : 4.6);
+          const muzzleY = py + (hasBazooka ? 2.1 : 2.65);
           // One soldier in the chosen squad puts up a flare — angled slightly downrange, the
           // way a signal star is actually fired, rather than straight overhead.
           // The chosen squad fires it — unless they have been off-screen so long the flare is
@@ -575,8 +581,8 @@ export function BackgroundCanvas() {
           const flareOverdue = nowInf >= nextFlareAt + 8000;
           if (nowInf >= nextFlareAt && i === 0 && (gi === flareGroupIndex || flareOverdue)) {
             flares.push({
-              x: basePx,
-              y: ridgeTopAtBase - 2,
+              x: muzzleX,
+              y: muzzleY,
               vx: dir * 0.28,
               vy: FLARE_LAUNCH_VY,
               lit: false,
@@ -591,13 +597,11 @@ export function BackgroundCanvas() {
             // Brighter than before: it is on for a single frame now, so it has to read.
             const intensity = combatFlash ? 0.9 : 0.75;
             const size = combatFlash ? 0.6 : 0.45;
-            const flashX = basePx + dir * (hasBazooka ? 6 : 5) + flashWobble;
-            const ridgeTopY = ridgeTopAtBase;
-            const flashY = ridgeTopY + 2.5;
+            const flashX = muzzleX + flashWobble;
+            const flashY = muzzleY;
+            // No clip: the old one existed to stop a mis-anchored flash painting into the
+            // sky. Anchored to the muzzle there is nothing to clip against.
             ctx.save();
-            ctx.beginPath();
-            ctx.rect(flashX - 12, ridgeTopY, 24, 28);
-            ctx.clip();
             ctx.fillStyle = `rgba(255,230,180,${intensity})`;
             if (hasBazooka) {
               ctx.fillRect(flashX - (0.6 + size / 2), flashY - 0.7, 1.2 + size, 1.4);
@@ -611,13 +615,10 @@ export function BackgroundCanvas() {
           }
           // Backblast, on the same frame as the launch rather than on its own slow cycle.
           if (combatFlash && hasBazooka) {
-            const flashX2 = basePx + dir * 5.5 + flashWobble * 0.8;
-            const ridgeTopY2 = ridgeTopAtBase;
-            const flashY2 = ridgeTopY2 + 2;
+            // Backblast vents from the rear of the tube, so it sits on the other side of him.
+            const flashX2 = px - dir * 2.2 + flashWobble * 0.8;
+            const flashY2 = py + 2.1;
             ctx.save();
-            ctx.beginPath();
-            ctx.rect(flashX2 - 8, ridgeTopY2, 16, 20);
-            ctx.clip();
             ctx.fillStyle = 'rgba(255,240,200,0.5)';
             ctx.fillRect(flashX2 - 0.5, flashY2 - 0.4, 1, 0.8);
             ctx.restore();
