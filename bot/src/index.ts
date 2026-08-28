@@ -1530,13 +1530,34 @@ async function sendGroupRaw(
   mentions?: Array<{ author: string; start: number; length: number }>,
   attachment?: { dataB64: string; contentType: string; filename: string }
 ): Promise<number | undefined> {
-  const bridgeUrl = process.env.SIGNAL_CLI_URL;
-  const botNumber = process.env.SIGNAL_BOT_NUMBER;
-  if (!bridgeUrl || !botNumber) throw new Error('Signal bridge not configured');
   // v2/send takes the group as "group.<base64(internalId)>" in recipients.
   const groupRecipient = groupId.startsWith('group.')
     ? groupId
     : `group.${Buffer.from(groupId, 'utf8').toString('base64')}`;
+  return sendToRecipient(groupRecipient, message, mentions, attachment);
+}
+
+/** Reply straight to one person. A DM recipient is their number (or, when Signal withholds
+ *  it, their ACI) rather than a group id — otherwise identical to a group send. */
+async function sendDirect(
+  recipient: string,
+  message: string,
+  attachment?: { dataB64: string; contentType: string; filename: string }
+): Promise<number | undefined> {
+  const normalized = /^\d+$/.test(recipient) ? `+${recipient}` : recipient;
+  return sendToRecipient(normalized, message, undefined, attachment);
+}
+
+async function sendToRecipient(
+  recipient: string,
+  message: string,
+  mentions?: Array<{ author: string; start: number; length: number }>,
+  attachment?: { dataB64: string; contentType: string; filename: string }
+): Promise<number | undefined> {
+  const bridgeUrl = process.env.SIGNAL_CLI_URL;
+  const botNumber = process.env.SIGNAL_BOT_NUMBER;
+  if (!bridgeUrl || !botNumber) throw new Error('Signal bridge not configured');
+  const groupRecipient = recipient;
   const client = await getIdTokenClient(bridgeUrl);
   const data: any = { number: botNumber, message, recipients: [groupRecipient] };
   if (mentions && mentions.length > 0) data.mentions = mentions;
@@ -2197,6 +2218,51 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
   await reply(HELP_TEXT);
 }
 
+const DM_HELP =
+  '📋 Com Tower — direct commands\n' +
+  'A DM has no bound game, so name one:\n' +
+  '/stats <awbw link or game id> [metric]\n' +
+  '     — chart the game (unitValue, funds, income, properties, unitCount)\n' +
+  '/ping — connectivity check\n' +
+  '\n' +
+  'Everything else lives in a group chat: add Com Tower there and run /game <link>.';
+
+/** Commands sent straight to the bot rather than in a group. Stateless by design — there is
+ *  no binding in a DM, so anything game-specific names its game inline. */
+async function handleDmCommand(env: any, text: string): Promise<void> {
+  const to: string | undefined = env?.sourceNumber || env?.sourceUuid;
+  if (!to) return;
+  const parts = text.trim().split(/\s+/);
+  const cmd = parts[0].toLowerCase();
+  const args = parts.slice(1);
+  const reply = (msg: string) => sendDirect(to, msg).catch(() => undefined);
+  console.log(`[dm] command "${cmd}" from ${env.sourceName || to}`);
+
+  if (cmd === '/ping') {
+    await reply('🛰️ Com Tower online.');
+    return;
+  }
+  if (cmd === '/stats') {
+    const gameId = extractGameIdFromArg(args[0]);
+    if (!gameId) {
+      await reply('Which game? /stats <awbw link or game id> [metric]');
+      return;
+    }
+    const metric = (args[1] || 'unitValue').replace(/[^a-zA-Z]/g, '');
+    const chart = await buildStatsChart(gameId, metric);
+    if (!chart) {
+      await reply(
+        `No turns recorded for game ${gameId} yet. Com Tower charts from its own record ` +
+          'rather than the replay API, so history starts once it is watching the game.'
+      );
+      return;
+    }
+    await sendDirect(to, chart.caption, chart.attachment);
+    return;
+  }
+  await reply(DM_HELP);
+}
+
 // Recent non-command group chat per groupId, for fun-mode context (most recent last).
 const recentChatByGroup = new Map<string, Array<{ name?: string; text: string; at: number }>>();
 
@@ -2229,7 +2295,13 @@ async function handleSignalIncoming(item: any): Promise<void> {
     recentChatByGroup.set(groupId, buf);
   }
   if (!text.startsWith('/')) return;
-  if (!groupId) return; // only handle group commands, not DMs
+  if (!groupId) {
+    // A DM has no bound game, so only the stateless queries make sense here — they take the
+    // game on the command line instead. Previously every DM command was silently dropped,
+    // which is worse than saying so.
+    await handleDmCommand(env, text).catch((err) => console.error('[dm] command failed:', err));
+    return;
+  }
   const parts = text.split(/\s+/);
   const cmd = parts[0].toLowerCase();
   const args = parts.slice(1);
