@@ -4,6 +4,7 @@
 
 import { DashRule } from './components/DashRule';
 import { FieldOrders } from './components/FieldOrders';
+import { FeaturedPost } from './components/FeaturedPost';
 
 const SELF_HOST_GUIDE =
   'https://github.com/collinjackson/com-tower/blob/main/SELF_HOST.md';
@@ -105,6 +106,7 @@ export default function Home() {
         </div>
       </main>
       </FieldOrders>
+      <FeaturedPost />
     </div>
   );
 }

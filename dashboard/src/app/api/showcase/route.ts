@@ -19,6 +19,12 @@ type ShowcasePost = {
   score: number;
   judgeScore: number | null;
   day: number | null;
+  // Who called it in, for the display's overlay. Names of units and COs are public game
+  // vocabulary, not player identities, so these are not redacted.
+  speaker: string | null;
+  army: string | null;
+  armyName: string | null;
+  spriteUrl: string | null;
 };
 
 /** Replace every roster name (and the game's name) with a solid bar.
@@ -89,6 +95,10 @@ export async function GET() {
         reactions?: Reactions;
         judgeScore?: number | null;
         day?: number | null;
+        speakerName?: string | null;
+        army?: string | null;
+        armyName?: string | null;
+        spriteUrl?: string | null;
       };
       if (!d.text || !d.groupId || !allowedGroups.has(d.groupId)) continue;
       const score = reactionScore(d.reactions);
@@ -101,6 +111,10 @@ export async function GET() {
         score,
         judgeScore: typeof d.judgeScore === 'number' ? d.judgeScore : null,
         day: typeof d.day === 'number' && d.day > 0 ? d.day : null,
+        speaker: d.speakerName || null,
+        army: d.army || null,
+        armyName: d.armyName || null,
+        spriteUrl: d.spriteUrl || null,
       });
     }
 
