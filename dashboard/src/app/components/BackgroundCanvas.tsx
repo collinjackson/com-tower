@@ -2,20 +2,9 @@
 
 import { useEffect, useRef } from 'react';
 
-/** A showcased post from /api/showcase — already redacted server-side; the block characters
- *  are in the text itself, so there is no real name here to leak. */
-type ShowcasePost = { text: string; emojis: string[]; score: number; day: number | null };
-
-// Below this viewport width the console screens are too small to read a caption in, so they
-// keep their original decorative scrolling telemetry.
-const GALLERY_MIN_WIDTH = 760;
-
 // Courier ahead of the generic keyword on purpose: the platform default monospace (Menlo,
 // Consolas) reads modern, and these are meant to be CRTs in a 1940s signals room.
 const TERMINAL_FONT = '"Courier New", Courier, monospace';
-// Emoji have no monospace form — name the emoji faces after Courier so only they fall through.
-const TERMINAL_EMOJI_FONT =
-  '"Courier New", Courier, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", monospace';
 
 const rAF =
   typeof window !== 'undefined'
@@ -84,22 +73,6 @@ type Tracer = { x: number; y: number; vx: number; vy: number; life: number; shoo
 
 export function BackgroundCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  // Read by the animation loop every frame; a ref rather than state so arriving posts never
-  // restart the canvas effect (which would reset the whole battle).
-  const showcaseRef = useRef<ShowcasePost[]>([]);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetch('/api/showcase')
-      .then((r) => (r.ok ? r.json() : { posts: [] }))
-      .then((d) => {
-        if (!cancelled) showcaseRef.current = Array.isArray(d?.posts) ? d.posts : [];
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -248,35 +221,7 @@ export function BackgroundCanvas() {
 
     const terminalLines: string[][] = [[], [], [], [], []];
     const terminalLastAdd: number[] = [0, 0, 0, 0, 0];
-    // Console height, eased toward its target each frame (see CONSOLE_H below).
-    const BASE_CONSOLE_H = 100;
-    const GALLERY_CONSOLE_H = 190;
-    let consoleH = BASE_CONSOLE_H;
 
-    /** Greedy word wrap for canvas text. Long unbroken tokens are hard-split so one URL-ish
-     *  blob can't overflow the screen bezel. */
-    function wrapText(text: string, maxWidth: number, maxLines: number): string[] {
-      const lines: string[] = [];
-      let line = '';
-      for (const word of text.split(/\s+/)) {
-        const candidate = line ? `${line} ${word}` : word;
-        if (ctx.measureText(candidate).width <= maxWidth) {
-          line = candidate;
-          continue;
-        }
-        if (line) lines.push(line);
-        line = word;
-        while (ctx.measureText(line).width > maxWidth && line.length > 1) {
-          let cut = line.length - 1;
-          while (cut > 1 && ctx.measureText(line.slice(0, cut)).width > maxWidth) cut--;
-          lines.push(line.slice(0, cut));
-          line = line.slice(cut);
-        }
-        if (lines.length >= maxLines) break;
-      }
-      if (line && lines.length < maxLines) lines.push(line);
-      return lines.slice(0, maxLines);
-    }
     const TERMINAL_LINE_POOL: string[][] = [
       [
         '> LINK   UP     RX 0.2k   TX 1.1k',
@@ -1118,13 +1063,7 @@ export function BackgroundCanvas() {
       explosions.length = 0;
       explosions.push(...stillActive);
 
-      // The console is the bottom band of the scene. It grows into a gallery when there are
-      // posts to show and the viewport is wide enough to read them, and eases between the two
-      // so the terrain above rides up rather than snapping.
-      const galleryPosts = showcaseRef.current;
-      const galleryOn = width >= GALLERY_MIN_WIDTH && galleryPosts.length > 0;
-      consoleH += ((galleryOn ? GALLERY_CONSOLE_H : BASE_CONSOLE_H) - consoleH) * 0.08;
-      const CONSOLE_H = consoleH;
+      const CONSOLE_H = 100;
       const FRAME_INSET_TOP = 28;
       const FRAME_INSET_BOT = 14;
       const FRAME_INSET_SIDE_TOP = 26;
@@ -1281,7 +1220,7 @@ export function BackgroundCanvas() {
       const numScreens = 5;
       const RED_HIGHLIGHT_INTERVAL_MS = 3200;
       const activeTerminalIndex = Math.floor(nowMs / RED_HIGHLIGHT_INTERVAL_MS) % numScreens;
-      const screenH = galleryOn ? Math.max(38, CONSOLE_H - 50) : 38;
+      const screenH = 38;
       const screenTop = cTopY + 12;
       const screenSlant = 3;
       const TERMINAL_LINE_HEIGHT = 9;
@@ -1295,13 +1234,9 @@ export function BackgroundCanvas() {
         }
       }
       for (let i = 0; i < numScreens; i++) {
-        // Squarer in gallery mode: pull the slots in and narrow each screen, so a caption
-        // wraps over several lines instead of stretching into a letterbox.
-        const inset = galleryOn ? 0.2 : 0.1;
-        const fill = galleryOn ? 0.84 : 0.92;
-        const left = lerp(cLeftTop + 18, cRightTop - 18, (i + inset) / numScreens);
-        const right = lerp(cLeftTop + 18, cRightTop - 18, (i + 1 - inset) / numScreens);
-        const w = (right - left) * fill;
+        const left = lerp(cLeftTop + 18, cRightTop - 18, (i + 0.1) / numScreens);
+        const right = lerp(cLeftTop + 18, cRightTop - 18, (i + 0.9) / numScreens);
+        const w = (right - left) * 0.92;
         const cx = (left + right) / 2;
         const sl = cx - w / 2;
         const sr = cx + w / 2;
@@ -1326,42 +1261,21 @@ export function BackgroundCanvas() {
         ctx.lineTo(sl - screenSlant + 2, sb - 2);
         ctx.closePath();
         ctx.clip();
-        const post = galleryOn ? galleryPosts[i] : undefined;
-        if (post) {
-          // A real notification Com Tower sent, names already blacked out server-side.
-          const padX = 6;
-          const bodyW = w - padX * 2 - Math.abs(screenSlant);
-          const LINE_H = 11;
-          ctx.font = `9px ${TERMINAL_FONT}`;
-          ctx.textAlign = 'left';
-          const maxLines = Math.max(1, Math.floor((screenH - 26) / LINE_H));
-          const lines = wrapText(post.text, bodyW, maxLines);
-          const phosphor = 0.62 + 0.08 * Math.sin(nowMs * 0.002 + i);
-          lines.forEach((ln, L) => {
-            ctx.fillStyle = `rgba(96,${Math.floor(130 * phosphor)},84,${0.62 + 0.12 * phosphor})`;
-            ctx.fillText(ln, sl + padX, st + 14 + L * LINE_H);
-          });
-          if (post.emojis.length) {
-            ctx.font = `11px ${TERMINAL_EMOJI_FONT}`;
-            ctx.fillText(post.emojis.slice(0, 6).join(''), sl + padX, sb - 6);
-          }
-        } else {
-          const scrollY = (nowMs / 90) % TERMINAL_LINE_HEIGHT;
-          const lines = terminalLines[i];
-          ctx.font = `8px ${TERMINAL_FONT}`;
-          ctx.textAlign = 'left';
-          for (let L = lines.length - 1; L >= 0; L--) {
-            const lineY = sb - 4 - scrollY - (lines.length - 1 - L) * TERMINAL_LINE_HEIGHT;
-            if (lineY < st + 2) continue;
-            const phosphor = 0.6 + 0.15 * Math.sin(nowMs * 0.003 + L);
-            ctx.fillStyle = `rgba(72,${Math.floor(95 * phosphor)},62,${0.45 + 0.1 * phosphor})`;
-            ctx.fillText(lines[L], sl + 4, lineY);
-          }
-          const cursorY = sb - 4 - scrollY;
-          if (cursorY >= st + 2 && cursorY <= sb - 2 && Math.floor(nowMs / 400) % 2 === 0) {
-            ctx.fillStyle = 'rgba(85,110,75,0.5)';
-            ctx.fillRect(sl + 4, cursorY - 5, 4, 6);
-          }
+        const scrollY = (nowMs / 90) % TERMINAL_LINE_HEIGHT;
+        const lines = terminalLines[i];
+        ctx.font = `8px ${TERMINAL_FONT}`;
+        ctx.textAlign = 'left';
+        for (let L = lines.length - 1; L >= 0; L--) {
+          const lineY = sb - 4 - scrollY - (lines.length - 1 - L) * TERMINAL_LINE_HEIGHT;
+          if (lineY < st + 2) continue;
+          const phosphor = 0.6 + 0.15 * Math.sin(nowMs * 0.003 + L);
+          ctx.fillStyle = `rgba(72,${Math.floor(95 * phosphor)},62,${0.45 + 0.1 * phosphor})`;
+          ctx.fillText(lines[L], sl + 4, lineY);
+        }
+        const cursorY = sb - 4 - scrollY;
+        if (cursorY >= st + 2 && cursorY <= sb - 2 && Math.floor(nowMs / 400) % 2 === 0) {
+          ctx.fillStyle = 'rgba(85,110,75,0.5)';
+          ctx.fillRect(sl + 4, cursorY - 5, 4, 6);
         }
         ctx.restore();
         if (i === activeTerminalIndex) {
@@ -1397,12 +1311,7 @@ export function BackgroundCanvas() {
           ctx.font = `7px ${TERMINAL_FONT}`;
           ctx.textAlign = 'right';
           const labels = ['LINK', 'SYNC', 'ACT', 'RDY', 'ON'];
-          const post = galleryOn ? galleryPosts[i] : undefined;
-          ctx.fillText(
-            post ? `● ${screenLabels[i % screenLabels.length]}` : `● ${labels[i % labels.length]}`,
-            sr - 4,
-            sb - 5
-          );
+          ctx.fillText(`● ${labels[i % labels.length]}`, sr - 4, sb - 5);
         }
       }
       rafId = requestAnim(animate);

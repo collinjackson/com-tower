@@ -189,7 +189,9 @@ async function storeSentCaption(
   text: string,
   style: string,
   day?: number,
-  judgeScore?: number | null
+  judgeScore?: number | null,
+  // Who is speaking, for the gallery's overlay: the unit (or CO) and their army.
+  speaker?: { name?: string; isCo?: boolean; army?: string; armyName?: string; spriteUrl?: string }
 ): Promise<string | null> {
   try {
     if (!gameId) return null;
@@ -198,6 +200,13 @@ async function storeSentCaption(
       style,
       day: day ?? 0,
       judgeScore: judgeScore ?? null,
+      speakerName: speaker?.name || null,
+      speakerIsCo: speaker?.isCo ?? false,
+      army: speaker?.army || null,
+      armyName: speaker?.armyName || null,
+      // The animated sprite AWBW serves for this unit in this army's colours. Stored rather
+      // than derived later so the gallery keeps working if the naming ever changes.
+      spriteUrl: speaker?.spriteUrl || null,
       createdAt: FieldValue.serverTimestamp(),
     });
     return ref.id;
@@ -510,7 +519,17 @@ export async function POST(req: NextRequest) {
         if (caption) {
           try {
             const db = getAdminDb();
-            captionId = await storeSentCaption(db, gameId, caption, style, day, judgeScore);
+            captionId = await storeSentCaption(db, gameId, caption, style, day, judgeScore, {
+              name: featuringCo ? coName : unitName,
+              isCo: featuringCo,
+              army: army.code,
+              armyName,
+              spriteUrl: featuringCo
+                ? co.imageUrl || undefined
+                : army.code && /^[a-z]{2,3}$/.test(army.code) && unitFile
+                  ? `https://awbw.amarriner.com/terrain/ani/${army.code}${unitFile}.gif`
+                  : undefined,
+            });
           } catch (err) {
             console.warn('Failed to store sent caption:', err);
           }
