@@ -289,3 +289,21 @@ body {
     right: calc((100vw - 948px) / 3);
   }
 }
+
+/* Where the printing block would have gone on an older dispatch. Same footprint as a plate,
+   so the card's layout does not shift between one with a unit and one without. */
+.ct-no-plate {
+  width: 58px;
+  height: 58px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed rgba(60, 54, 38, 0.4);
+  font-size: 8px;
+  line-height: 1.25;
+  letter-spacing: 0.12em;
+  text-align: center;
+  color: rgba(60, 54, 38, 0.5);
+}

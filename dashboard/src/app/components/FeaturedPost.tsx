@@ -150,7 +150,17 @@ export function FeaturedPost() {
                     alt=""
                     className="ct-print-img"
                   />
-                ) : null}
+                ) : (
+                  // Dispatches sent before the unit was recorded have no plate to print. The
+                  // sprite was chosen at send time and only ever existed in the Signal
+                  // attachment, so it cannot be recovered — better an empty block that reads
+                  // as archival than a ragged hole where the illustration should be.
+                  <div className="ct-no-plate" aria-hidden>
+                    NO
+                    <br />
+                    PLATE
+                  </div>
+                )}
                 <div className="min-w-0">
                   <div className="ct-stencil">{(post.speaker || 'COMMS').toUpperCase()}</div>
                   {post.armyName ? (
