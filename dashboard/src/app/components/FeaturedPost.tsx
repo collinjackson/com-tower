@@ -125,12 +125,14 @@ export function FeaturedPost() {
                 // with a small alternating tilt so it does not read as identical rectangles.
                 transform: lifted
                   ? `translateY(-${lift}px) scale(1.035)`
-                  : `translateY(${depth * 7}px) rotate(${isFront ? 0 : (depth % 2 ? -0.5 : 0.6) * depth}deg)`,
+                  : `translateY(${depth * 4}px) rotate(${isFront ? 0 : (depth % 2 ? -0.4 : 0.45) * depth}deg)`,
                 // Above everything while raised — including the machine's lip, so the card
                 // stays readable — then straight to the back of the pile as it descends.
                 zIndex: lifted ? 40 : 20 - depth,
-                opacity: buried && !descending ? 0 : isFront || descending ? 1 : Math.max(0, 0.55 - depth * 0.12),
-                filter: isFront || descending ? undefined : `brightness(${1 - depth * 0.06})`,
+                // Cards in the pile stay opaque — they are paper. Depth reads from the
+                // offset and from falling into shadow, not from fading out.
+                opacity: buried && !descending ? 0 : 1,
+                filter: isFront || descending ? undefined : `brightness(${1 - depth * 0.08})`,
               }}
               aria-hidden={!isFront}
             >
