@@ -46,17 +46,19 @@ export function FieldOrders({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  /** The transform that takes the memo from where it sits to the tab in the corner: fly,
-   *  shrink, and tip away on the X axis so the paper reads as folding rather than scaling.
-   *  perspective() must be the first function — the `perspective` CSS property applies to an
-   *  element's CHILDREN, and would leave this element's own rotateX a flat squash. */
+  /** The transform that takes the memo from where it sits down into the tab in the corner.
+   *
+   *  Deliberately 2D. An earlier version led with perspective(1100px), which meant the
+   *  translate that follows was interpreted in projected space and magnified — the memo swung
+   *  well outside the viewport on its way, which is also what briefly summoned a scrollbar.
+   *  The fold now comes from squashing the vertical axis as it shrinks, which needs no 3D. */
   const measureFlight = (el: HTMLElement) => {
     const r = el.getBoundingClientRect();
     const target = tabCenter();
     const dx = target.x - (r.left + r.width / 2);
     const dy = target.y - (r.top + r.height / 2);
-    const scale = Math.max(0.05, 116 / Math.max(r.width, 1));
-    return `perspective(1100px) translate(${dx}px, ${dy}px) scale(${scale}) rotateX(-72deg) rotate(-4deg)`;
+    const scale = Math.max(0.04, 116 / Math.max(r.width, 1));
+    return `translate(${dx}px, ${dy}px) scale(${scale}) scaleY(0.55) rotate(-3deg)`;
   };
 
   const reducedMotion = () =>
@@ -82,6 +84,17 @@ export function FieldOrders({ children }: { children: React.ReactNode }) {
     persist(false);
     setFlight('pre-in');
   };
+
+  // A flight moves the memo across the viewport, and any overshoot would extend the page and
+  // flash a scrollbar. Nothing on this page scrolls anyway, so clip for the duration.
+  useEffect(() => {
+    if (!flight) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, [flight]);
 
   // Measure once the memo is mounted but before the browser paints, then hand over to the
   // inbound animation now that the CSS variable it reads is set.
@@ -165,7 +178,7 @@ export function FieldOrders({ children }: { children: React.ReactNode }) {
         </div>
       )}
 
-      {dismissed && flight !== 'out' && (
+      {(flight === 'out' || (dismissed && flight !== 'in')) && (
         <button
           type="button"
           onClick={restore}
