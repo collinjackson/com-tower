@@ -141,10 +141,15 @@ body {
 /* The restore tab arriving as the memo lands in the corner — it should look like the sheet
    became the tab, so it fades up from slightly small rather than just appearing. */
 @keyframes ct-tab-in {
-  from { opacity: 0; transform: scale(0.82) translateY(-3px); }
+  from { opacity: 0; transform: scale(0); }
   to   { opacity: 1; transform: none; }
 }
-.ct-tab-in { animation: ct-tab-in 220ms cubic-bezier(0.2, 0.7, 0.3, 1) both; }
+/* Grows out of the corner the memo is shrinking into, and starts partway through the flight
+   so the two read as one object arriving rather than a swap. */
+.ct-tab-in {
+  transform-origin: top right;
+  animation: ct-tab-in 320ms cubic-bezier(0.2, 0.7, 0.3, 1) 150ms both;
+}
 @media (prefers-reduced-motion: reduce) {
   .ct-tab-in { animation: none; }
 }
@@ -260,12 +265,16 @@ body {
    Both directions are CSS animations reading one custom property, rather than transitions on
    inline styles: the transform is measured per flight, but nothing outside React mutates the
    element, so a second dismissal animates exactly like the first. */
+/* Opacity holds until the memo is nearly into the corner, so it reads as being put away
+   rather than dissolving on the way there. */
 @keyframes ct-file-out {
   from { transform: none; opacity: 1; }
+  72%  { opacity: 1; }
   to   { transform: var(--ct-flight); opacity: 0; }
 }
 @keyframes ct-file-in {
   from { transform: var(--ct-flight); opacity: 0; }
+  28%  { opacity: 1; }
   to   { transform: none; opacity: 1; }
 }
 .ct-file-out { animation: ct-file-out 460ms cubic-bezier(0.4, 0.02, 0.3, 1) both; }
