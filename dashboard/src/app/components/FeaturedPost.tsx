@@ -106,14 +106,15 @@ export function FeaturedPost() {
             so no node is ever moved and every transition runs to completion. */}
         {posts.map((post, postIdx) => {
           const depth = (postIdx - offset + posts.length * 1000) % posts.length;
-          // Cards deeper than the visible pile are kept mounted but hidden, so the one on its
-          // way to the back never disappears mid-descent.
-          const buried = depth >= PILE_DEPTH;
+          // Everything past the visible pile rests at the same place as the deepest card on
+          // show, so a card going to the back descends onto the stack and is occluded by it
+          // rather than travelling past the bottom and then blinking out.
+          const visualDepth = Math.min(depth, PILE_DEPTH - 1);
           const isFront = depth === 0;
           const lifted = isFront && phase === 'lifting';
           // The card that just went to the back is still descending; it keeps the front card's
           // full opacity until it lands, so it does not dim mid-air.
-          const descending = phase === 'settling' && depth === posts.length - 1;
+
           return (
             <article
               key={postIdx}
@@ -125,14 +126,18 @@ export function FeaturedPost() {
                 // with a small alternating tilt so it does not read as identical rectangles.
                 transform: lifted
                   ? `translateY(-${lift}px) scale(1.035)`
-                  : `translateY(${depth * 4}px) rotate(${isFront ? 0 : (depth % 2 ? -0.4 : 0.45) * depth}deg)`,
+                  : `translateY(${visualDepth * 4}px) rotate(${
+                      isFront ? 0 : (visualDepth % 2 ? -0.4 : 0.45) * visualDepth
+                    }deg)`,
                 // Above everything while raised — including the machine's lip, so the card
                 // stays readable — then straight to the back of the pile as it descends.
-                zIndex: lifted ? 40 : 20 - depth,
-                // Cards in the pile stay opaque — they are paper. Depth reads from the
-                // offset and from falling into shadow, not from fading out.
-                opacity: buried && !descending ? 0 : 1,
-                filter: isFront || descending ? undefined : `brightness(${1 - depth * 0.08})`,
+                // Buried cards sit one below the deepest visible one, so they can never
+                // paint over the card that is meant to be showing them.
+                zIndex: lifted ? 40 : 20 - Math.min(depth, PILE_DEPTH),
+                // Always opaque — they are paper, and being out of sight is occlusion, not
+                // transparency. Depth reads from the offset and from falling into shadow.
+                opacity: 1,
+                filter: isFront ? undefined : `brightness(${1 - visualDepth * 0.08})`,
               }}
               aria-hidden={!isFront}
             >
