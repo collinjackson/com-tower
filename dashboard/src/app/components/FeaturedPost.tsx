@@ -21,7 +21,7 @@ const MOVE_MS = 440;
 const LIFT_CLEARANCE = 18;
 // How deep the visible pile goes. Beyond this the cards are hidden — the illusion only needs
 // the few top edges.
-const PILE_DEPTH = 5;
+const PILE_DEPTH = 6;
 
 /** Dispatches on a field desk, paged through one at a time: the front card lifts toward the
  *  machine's slot, then drops in at the back of the pile and the next one is showing.
@@ -89,7 +89,7 @@ export function FeaturedPost() {
 
   return (
     <aside
-      className="ct-pile fixed top-1/2 z-10 hidden w-[310px] -translate-y-1/2 xl:block"
+      className="ct-pile fixed top-1/2 z-10 hidden w-[372px] -translate-y-1/2 xl:block"
       aria-label="Field dispatches"
     >
       {/* The machine's aperture. Above every card, so a lifting dispatch tucks up under the
@@ -101,7 +101,7 @@ export function FeaturedPost() {
       {/* Fixed height because the cards are absolutely positioned to overlap. Sized for the
           240-character ceiling the caption generator enforces, so the longest possible
           dispatch still fits rather than spilling past the pile. */}
-      <div className="relative mt-[-2px] h-[268px]">
+      <div className="relative mt-[-2px] h-[292px]">
         {/* Rendered in a fixed DOM order, always. Only the styles change as the pile is paged,
             so no node is ever moved and every transition runs to completion. */}
         {posts.map((post, postIdx) => {
