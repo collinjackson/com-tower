@@ -60,12 +60,36 @@ body {
    sits on top and overlaps it, so only the edges peek out. */
 .ct-envelope {
   position: relative;
+  /* The grain below is mix-blend-mode: multiply, which blends with whatever is behind the
+     element. Behind this is the night-battle canvas, so without a stacking context of its
+     own the envelope multiplied itself against near-black and came out black. */
+  isolation: isolate;
   background-color: #ddca97;
   background-image:
     radial-gradient(140% 120% at 50% 30%, transparent 62%, rgba(90, 70, 30, 0.18) 100%),
     linear-gradient(135deg, #e7d5a4 0%, #dac78f 55%, #ccb878 100%);
   border: 1px solid #b39d63;
-  box-shadow: 0 18px 40px -18px rgba(0, 0, 0, 0.6);
+  box-shadow:
+    /* cast onto the desk */
+    0 20px 44px -18px rgba(0, 0, 0, 0.72),
+    /* lit top edge, and the paper falling away into shade at the foot */
+    inset 0 1px 0 rgba(255, 255, 255, 0.3),
+    inset 0 -22px 30px -20px rgba(64, 46, 16, 0.55);
+}
+/* The letter sitting on the envelope casts onto it, which is what sells one being behind the
+   other rather than two flat shapes stacked. */
+.ct-envelope::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(
+    160deg,
+    rgba(40, 28, 8, 0.32) 0%,
+    rgba(40, 28, 8, 0.1) 22%,
+    transparent 46%
+  );
 }
 .ct-envelope::before {
   content: "";
@@ -145,7 +169,7 @@ body {
 
 /* One printed card. Warm stock, one ink, a fibrous tooth over the top. */
 .ct-card {
-  padding: 9px 11px 8px;
+  padding: 11px 14px 10px;
   border-radius: 1px;
   background-color: #ddd6c4;
   background-image:
@@ -176,7 +200,7 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  font-size: 8px;
+  font-size: 9px;
   letter-spacing: 0.1em;
   color: #6a6350;
 }
@@ -186,8 +210,8 @@ body {
    /api/sprite, so all that is left here is sitting it on the stock: multiply lets the paper
    grain show through the ink the way it would on a real card. */
 .ct-print-img {
-  width: 46px;
-  height: 46px;
+  width: 58px;
+  height: 58px;
   object-fit: contain;
   image-rendering: pixelated;
   mix-blend-mode: multiply;
@@ -195,13 +219,13 @@ body {
 }
 
 .ct-stencil {
-  font-size: 12px;
+  font-size: 13.5px;
   font-weight: 700;
   letter-spacing: 0.09em;
   line-height: 1.15;
 }
 .ct-stencil-sub {
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.13em;
   color: #5f5847;
 }
@@ -213,14 +237,14 @@ body {
 }
 
 .ct-body {
-  font-size: 11px;
-  line-height: 1.45;
+  font-size: 12.5px;
+  line-height: 1.5;
   color: #1f1d17;
 }
 
 /* Reactions print in the same single ink as everything else. */
 .ct-emoji {
-  font-size: 11px;
+  font-size: 12px;
   filter: grayscale(1) contrast(1.15) opacity(0.72);
 }
 
@@ -244,16 +268,16 @@ body {
 
 /* ── Desk layout ─────────────────────────────────────────────────────────────────────────
    Two columns on a wide screen: the memo and the dispatch pile. The gap between them is the
-   same as the margin outside each, so the pile is not jammed against the window edge. 886px
+   same as the margin outside each, so the pile is not jammed against the window edge. 948px
    is the memo (max-w-xl, 576) plus the pile (310); a third of what is left over becomes the
    gutter, used three times. Below xl the pile is hidden and the memo just centres. */
 @media (min-width: 1280px) {
   .ct-layout {
     justify-content: flex-start;
-    padding-left: calc((100vw - 886px) / 3);
+    padding-left: calc((100vw - 948px) / 3);
     padding-right: 0;
   }
   .ct-pile {
-    right: calc((100vw - 886px) / 3);
+    right: calc((100vw - 948px) / 3);
   }
 }

@@ -6,7 +6,7 @@ import { reactionScore, emojiList, type Reactions } from '@/lib/reactions';
 // name blacked out. Recomputed at most every 5 minutes — reactions trickle in far slower.
 export const revalidate = 300;
 
-const SHOWCASE_SIZE = 5;
+const SHOWCASE_SIZE = 12;
 // Six full blocks, fixed width. Not one block per character: bar length would leak name
 // length, and with a four-player roster that is often enough to identify someone.
 const BLOCK = '█'.repeat(6);
@@ -19,6 +19,8 @@ type ShowcasePost = {
   score: number;
   judgeScore: number | null;
   day: number | null;
+  /** Only for ordering; stripped before the response. */
+  at?: number;
   // Who called it in, for the display's overlay. Names of units and COs are public game
   // vocabulary, not player identities, so these are not redacted.
   speaker: string | null;
@@ -70,11 +72,12 @@ export async function GET() {
     const perGame = await Promise.all(
       gameRefs.map(async (ref) => {
         try {
-          // Only posts the bot confirmed it sent — those are the ones a reaction can name.
+          // Ordered by recency, not filtered on sentTimestamp: only posts sent since that
+          // field existed would qualify, which left almost the whole history invisible. What
+          // actually gates publication is the roster check below.
           const snap = await ref
             .collection('sentCaptions')
-            .where('sentTimestamp', '>', 0)
-            .orderBy('sentTimestamp', 'desc')
+            .orderBy('createdAt', 'desc')
             .limit(PER_GAME_LIMIT)
             .get();
           return snap.docs;
@@ -95,12 +98,17 @@ export async function GET() {
         reactions?: Reactions;
         judgeScore?: number | null;
         day?: number | null;
+        createdAt?: { toMillis?: () => number };
         speakerName?: string | null;
         army?: string | null;
         armyName?: string | null;
         spriteUrl?: string | null;
       };
+      // The roster is the safety gate, and it is not optional: without the names that were
+      // in this game there is nothing to redact against, so an unrostered caption can never
+      // be published no matter which group it came from.
       if (!d.text || !d.groupId || !allowedGroups.has(d.groupId)) continue;
+      if (!Array.isArray(d.roster) || d.roster.length === 0) continue;
       const score = reactionScore(d.reactions);
       // Never showcase something the group actively disliked.
       if (score < 0) continue;
@@ -111,6 +119,7 @@ export async function GET() {
         score,
         judgeScore: typeof d.judgeScore === 'number' ? d.judgeScore : null,
         day: typeof d.day === 'number' && d.day > 0 ? d.day : null,
+        at: d.createdAt?.toMillis?.() ?? 0,
         speaker: d.speakerName || null,
         army: d.army || null,
         armyName: d.armyName || null,
@@ -121,11 +130,18 @@ export async function GET() {
     // Reactions rank. The judge's score only breaks ties — it saw the reactions when it
     // picked, so leaning on it would count the same signal twice. Before any reactions
     // exist it is the whole ordering, which is what seeds the gallery on day one.
+    // Reactions rank; the judge's score breaks ties; recency breaks the rest, so a long
+    // unreacted history does not order itself arbitrarily.
     posts.sort(
-      (a, b) => b.score - a.score || (b.judgeScore ?? -1) - (a.judgeScore ?? -1)
+      (a, b) =>
+        b.score - a.score ||
+        (b.judgeScore ?? -1) - (a.judgeScore ?? -1) ||
+        (b.at ?? 0) - (a.at ?? 0)
     );
 
-    return NextResponse.json({ posts: posts.slice(0, SHOWCASE_SIZE) });
+    return NextResponse.json({
+      posts: posts.slice(0, SHOWCASE_SIZE).map(({ at: _at, ...post }) => post),
+    });
   } catch (err) {
     console.error('showcase failed', err);
     return NextResponse.json({ posts: [] });

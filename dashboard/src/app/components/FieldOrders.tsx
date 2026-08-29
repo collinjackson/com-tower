@@ -149,7 +149,7 @@ export function FieldOrders({ children }: { children: React.ReactNode }) {
               than being left behind on the desk. */}
           <div
             aria-hidden
-            className="ct-envelope pointer-events-none absolute -left-2.5 -right-4 -top-2 -bottom-6 -rotate-1 rounded-[3px]"
+            className="ct-envelope pointer-events-none absolute -left-3 -right-5 -top-2.5 -bottom-7 -rotate-1 rounded-[3px]"
           />
 
           <button
