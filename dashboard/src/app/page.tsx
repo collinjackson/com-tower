@@ -49,7 +49,7 @@ export default function Home() {
       {/* The memo — one typewriter size, uniform kerning; rules are whole runs of typed hyphens.
           Dismissible: filing it away clears the view down to the console gallery below. */}
       <FieldOrders>
-      <main className="ct-paper relative w-full max-w-xl rounded-[8px] overflow-hidden font-mono text-[13px] leading-[1.65]">
+      <main className="ct-paper relative w-full max-w-xl rounded-[2px] overflow-hidden font-mono text-[13px] leading-[1.65]">
         <div className="px-6 sm:px-9 py-7">
           {/* letterhead + memo header block */}
           <div className="uppercase text-[#6b5a35]">Com Tower — Field Orders</div>

@@ -59,7 +59,10 @@ body {
 /* Manila envelope: plain tan body, subtle edge, fiber grain. Roughly letter-sized — the memo
    sits on top and overlaps it, so only the edges peek out. */
 .ct-envelope {
-  position: relative;
+  /* Deliberately sets no `position`: this rule loses to nothing, but it OUTRANKS Tailwind's
+     utilities in v4's cascade order, so declaring position here silently overrode the
+     `absolute` on the element and collapsed the envelope to a 12px in-flow strip. Positioning
+     stays with the utility classes; ::before/::after inherit that as their containing block. */
   /* The grain below is mix-blend-mode: multiply, which blends with whatever is behind the
      element. Behind this is the night-battle canvas, so without a stacking context of its
      own the envelope multiplied itself against near-black and came out black. */
@@ -169,6 +172,8 @@ body {
 
 /* One printed card. Warm stock, one ink, a fibrous tooth over the top. */
 .ct-card {
+  /* A 3x5 index card is 1.667 wide to tall; at 372px across that is 223px. */
+  min-height: 223px;
   padding: 11px 14px 10px;
   border-radius: 1px;
   background-color: #ddd6c4;
@@ -240,6 +245,9 @@ body {
   font-size: 12.5px;
   line-height: 1.5;
   color: #1f1d17;
+  /* Captions can contain emoji, which arrive in full colour and break the one-ink conceit
+     more than anything else on the card. The press only has the one ink. */
+  filter: grayscale(1);
 }
 
 /* Reactions print in the same single ink as everything else. */
