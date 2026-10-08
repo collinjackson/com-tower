@@ -535,6 +535,8 @@ async function resolveCurrentTurn(gameId: string): Promise<
       units: AwbwUnit[];
       battlefield?: Battlefield;
       stats?: TurnStats;
+      day?: number;
+      dayLimit?: number; // last day of the game; undefined when the game has no day limit
     }
   | undefined
 > {
@@ -703,7 +705,11 @@ async function resolveCurrentTurn(gameId: string): Promise<
         console.warn('unitsInfo parse failed', e);
       }
     }
-    return { username, countryCode, countryName, co, units, battlefield, stats: parseTurnStats(html, curId) };
+    const day = Number(html.match(/\bgameDay\s*=\s*(\d+)/)?.[1]) || undefined;
+    // Only in the settings table: `<td class=small_text>Day Limit:</td><td class=small_text>30</td>`
+    // ("Off" when unset, which the \d+ skips).
+    const dayLimit = Number(html.match(/Day Limit:\s*<\/td>\s*<td[^>]*>\s*(\d+)/i)?.[1]) || undefined;
+    return { username, countryCode, countryName, co, units, battlefield, stats: parseTurnStats(html, curId), day, dayLimit };
   } catch (err) {
     console.error('resolveCurrentTurn failed', err);
     return undefined;
@@ -1713,6 +1719,7 @@ type GroupGame = {
   // Opt-in to the public gallery on the website. Off unless a mod runs /showcase on: a fun-mode
   // caption can riff on group chatter, so publishing one is the group's call, not ours.
   showcaseEnabled?: boolean;
+  dayLimitNoticeDay?: number; // game day the last day-limit countdown was posted for
 };
 type CmdCtx = {
   groupId: string;
@@ -1907,7 +1914,7 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
     const staleTurnState = {
       turnStartedAt: Date.now(),
       lastReminderAt: null,
-      ...(gameChanged ? { lastTurn: FieldValue.delete(), lastUnitHp: FieldValue.delete() } : {}),
+      ...(gameChanged ? { lastTurn: FieldValue.delete(), lastUnitHp: FieldValue.delete(), dayLimitNoticeDay: FieldValue.delete() } : {}),
     };
     await ggRef(groupId).set(
       {
@@ -2696,6 +2703,40 @@ function startGroupGameSocket(groupId: string, gameId: string) {
   });
 }
 
+/** The countdown posts at the start of each of the game's last this-many days (counting the final day). */
+const DAY_LIMIT_NOTICE_DAYS = 6;
+
+function dayLimitNotice(day: number, dayLimit: number): string | undefined {
+  const left = dayLimit - day + 1;
+  if (left < 1 || left > DAY_LIMIT_NOTICE_DAYS) return undefined;
+  if (left === 1) {
+    return `📯 Attention, warlords: this is the final day. The game ends after day ${dayLimit} for property assessment.`;
+  }
+  return `📯 Attention, warlords: ${left} days remain before property assessment. Day ${dayLimit} is the last.`;
+}
+
+/** Post the day-limit countdown once per game day, ahead of that day's first turn ping.
+ *  Claimed in a transaction so a socket event and the poll fallback can't both post it. */
+async function maybeAnnounceDayLimit(groupId: string, day?: number, dayLimit?: number): Promise<void> {
+  if (!day || !dayLimit) return;
+  const text = dayLimitNotice(day, dayLimit);
+  if (!text) return;
+  const claimed = await getFirestore()
+    .runTransaction(async (tx) => {
+      const snap = await tx.get(ggRef(groupId));
+      if ((snap.data() as GroupGame | undefined)?.dayLimitNoticeDay === day) return false;
+      tx.update(ggRef(groupId), { dayLimitNoticeDay: day });
+      return true;
+    })
+    .catch((e) => {
+      console.error('[gg] day-limit claim failed', e);
+      return false;
+    });
+  if (!claimed) return;
+  console.log(`[gg] day-limit notice group ${groupId.substring(0, 16)} day=${day}/${dayLimit}`);
+  await sendGroupRaw(groupId, text).catch((e) => console.error('[gg] day-limit notice failed', e));
+}
+
 async function onGroupGameNextTurn(
   groupId: string,
   gameId: string,
@@ -2729,6 +2770,7 @@ async function onGroupGameNextTurn(
           .join(' ')
     );
   }
+  await maybeAnnounceDayLimit(groupId, turn?.day ?? meta.day, turn?.dayLimit);
   const currentPlayer =
     turn?.username ||
     (await scrapeCurrentPlayerName(gameId).catch(() => undefined)) ||
