@@ -782,18 +782,20 @@ function parseTurnStats(html: string, currentPlayerId?: string): TurnStats | und
   }
 }
 
-/** Persist one sample. Keyed by day + whose turn it is, so a re-notify or a /sync overwrites
- *  the sample rather than duplicating it, and the history stays one row per turn. */
+/** Persist one sample. Keyed by day + whose turn it is, so the history stays one row per turn.
+ *  The first sighting of a turn wins: a later re-notify, /sync or /game re-bind lands partway
+ *  through that turn, and overwriting would replace the turn-start standing with a mid-turn one. */
 async function recordTurnStats(gameId: string, stats: TurnStats): Promise<void> {
+  const key = `d${String(stats.day).padStart(4, '0')}-p${stats.turnPlayerId || 'x'}`;
   try {
-    const key = `d${String(stats.day).padStart(4, '0')}-p${stats.turnPlayerId || 'x'}`;
     await getFirestore()
       .collection('games')
       .doc(gameId)
       .collection('turnStats')
       .doc(key)
-      .set({ ...stats, at: FieldValue.serverTimestamp() }, { merge: true });
+      .create({ ...stats, at: FieldValue.serverTimestamp() });
   } catch (err) {
+    if ((err as { code?: number })?.code === 6) return; // ALREADY_EXISTS: this turn is already sampled
     console.warn('[stats] recordTurnStats failed', err);
   }
 }

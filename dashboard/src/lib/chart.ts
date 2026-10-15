@@ -21,7 +21,8 @@ function ensureFont() {
   fontReady = true;
 }
 
-export type Sample = { day: number; order: number; value: number };
+/** `turn` is how far into the day the sample was taken, in [0, 1): 0 is the first player's turn. */
+export type Sample = { day: number; turn: number; value: number };
 export type Series = {
   key: string;
   label: string;
@@ -104,7 +105,7 @@ export function buildChartPng(opts: {
   // Fractional day so several samples within one day (one per player's turn) stay in order
   // instead of stacking on the same x.
   const x = (p: Sample) =>
-    M.left + ((p.day + p.order / 8 - minDay) / Math.max(0.5, maxDay + 1 - minDay)) * plotW;
+    M.left + ((p.day + p.turn - minDay) / Math.max(0.5, maxDay + 1 - minDay)) * plotW;
   const y = (v: number) => M.top + plotH - (v / yTop) * plotH;
 
   ctx.textAlign = 'left';
@@ -146,7 +147,7 @@ export function buildChartPng(opts: {
   ctx.textAlign = 'center';
   ctx.fillStyle = INK_MUTED;
   for (let d = minDay; d <= maxDay; d += dayStep) {
-    ctx.fillText(String(d), x({ day: d, order: 0, value: 0 }), M.top + plotH + 18);
+    ctx.fillText(String(d), x({ day: d, turn: 0, value: 0 }), M.top + plotH + 18);
   }
   ctx.fillText('Day', M.left + plotW / 2, H - 8);
   ctx.strokeStyle = GRID;
@@ -160,7 +161,7 @@ export function buildChartPng(opts: {
   // their current rank.
   const slots: Array<{ yWanted: number; text: string; color: string }> = [];
   opts.series.forEach((s, i) => {
-    const pts = [...s.points].sort((a, b) => a.day - b.day || a.order - b.order);
+    const pts = [...s.points].sort((a, b) => a.day - b.day || a.turn - b.turn);
     if (pts.length === 0) return;
     const color = fitToSurface((s.army && ARMY_COLORS[s.army]) || DEFAULT_ARMY_COLOR, SURFACE);
     ctx.strokeStyle = color;
