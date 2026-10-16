@@ -3,6 +3,17 @@ import OpenAI from 'openai';
 import { FieldValue } from 'firebase-admin/firestore';
 import { getAdminDb } from '@/lib/firebase-admin';
 import { emojiList, JUDGE_EMOJI_LEGEND } from '@/lib/reactions';
+import {
+  JUDGE_REPLY_FORMAT,
+  TOPIC_RULE,
+  backfillTopics,
+  claimTopic,
+  eligibleInOrder,
+  loadUsedTopics,
+  parseJudgeVerdict,
+  type UsedTopic,
+} from '@/lib/caption-topics';
+import { DEFAULT_JUDGE_MODEL, completionParams } from '@/lib/llm-params';
 
 // AWBW country code -> army name (for voice flavor). Unknown codes just omit the name.
 const ARMY_NAMES: Record<string, string> = {
@@ -190,6 +201,7 @@ async function storeSentCaption(
   style: string,
   day?: number,
   judgeScore?: number | null,
+  topic?: string | null,
   // Who is speaking, for the gallery's overlay: the unit (or CO) and their army.
   speaker?: { name?: string; isCo?: boolean; army?: string; armyName?: string; spriteUrl?: string }
 ): Promise<string | null> {
@@ -200,6 +212,7 @@ async function storeSentCaption(
       style,
       day: day ?? 0,
       judgeScore: judgeScore ?? null,
+      topic: topic || null,
       speakerName: speaker?.name || null,
       speakerIsCo: speaker?.isCo ?? false,
       army: speaker?.army || null,
@@ -327,12 +340,13 @@ export async function POST(req: NextRequest) {
     // it on — both ride back to the bot so a sent post can later be ranked and reacted to.
     let judgeScore: number | null = null;
     let captionId: string | null = null;
+    let captionTopic: string | null = null;
 
     if (useAi) {
       try {
         const client = new OpenAI({ apiKey: openaiKey });
         const model = process.env.FUN_MODE_MODEL_TEXT || 'gpt-4o-mini';
-        const judgeModel = process.env.FUN_MODE_JUDGE_MODEL || model;
+        const judgeModel = process.env.FUN_MODE_JUDGE_MODEL || DEFAULT_JUDGE_MODEL;
         const candidateCount = Math.max(1, Math.min(20, Number(process.env.FUN_MODE_CANDIDATES) || 10));
 
         const recentChat = Array.isArray(body.recentChat)
@@ -381,10 +395,41 @@ export async function POST(req: NextRequest) {
         } catch (err) {
           console.warn('Failed to fetch sent captions:', err);
         }
-        const usedJokesConstraint = sentCaptions.length
-          ? `ALREADY SENT IN THIS GAME (do NOT repeat or vary ANY of these — no reusing their setup, punchline, or core gag):\n` +
-            sentCaptions.map((j) => `- ${j.text}`).join('\n') +
-            `\nGenerate fresh material.\n\n`
+        // Topics this game has already used. A game from before topics existed gets its
+        // history labelled once, so jokes already told count straight away.
+        let usedTopics: UsedTopic[] = [];
+        try {
+          const db = getAdminDb();
+          usedTopics = await loadUsedTopics(db, gameId);
+          if (usedTopics.length === 0 && sentCaptions.length > 0) {
+            usedTopics = await backfillTopics(db, gameId, sentCaptions.map((c) => c.text), async (texts) => {
+              const res = await client.chat.completions.create({
+                model: judgeModel,
+                ...completionParams(judgeModel, { temperature: 0, maxTokens: 400 }),
+                response_format: { type: 'json_object' },
+                messages: [
+                  {
+                    role: 'user',
+                    content:
+                      `Label the topic of each radio message below. ${TOPIC_RULE}\n` +
+                      texts.map((t, i) => `${i}. ${t}`).join('\n') +
+                      `\nReply as JSON: {"topics": [<one topic string per message, in order>]}`,
+                  },
+                ],
+              });
+              const parsed = JSON.parse(res.choices[0]?.message?.content || '{}');
+              return Array.isArray(parsed.topics) ? parsed.topics.map(String) : [];
+            });
+          }
+        } catch (err) {
+          console.warn('Failed to load caption topics:', err);
+        }
+        // Topics, not the captions themselves: a list of past captions reads to the model as
+        // examples to imitate, and it copied them (openers, joke templates, the ladder joke).
+        const usedJokesConstraint = usedTopics.length
+          ? `TOPICS ALREADY USED IN THIS GAME — don't build the bit on any of these (no same prop, premise, or punchline): ` +
+            Array.from(new Set(usedTopics.map((t) => t.topic))).join('; ') +
+            `.\n\n`
           : '';
 
         // Joke craft applies to both voices — a flagged failure mode (limp non-jokes).
@@ -479,13 +524,11 @@ export async function POST(req: NextRequest) {
               ? `ALREADY SENT in this game (every prior message, with any emoji the group reacted with):\n${sentCaptions
                   .map((j) => `- ${j.text}${j.emojis.length ? ` \u2192 ${j.emojis.join('')}` : ' \u2192 (no reaction)'}`)
                   .join('\n')}\n` +
-                reactionBlock +
-                `HARD RULE, before any other criteria: ELIMINATE every candidate that duplicates or is a variation of ANY already-sent message — same setup, same punchline, or same core gag (e.g. another riff on the same joke premise counts as a duplicate). Pick the best of the remaining candidates. Only if EVERY candidate is a duplicate, pick the one least similar to the history.\n`
+                reactionBlock
               : '';
             const judgeRes = await client.chat.completions.create({
               model: judgeModel,
-              temperature: 0.2,
-              max_tokens: 60,
+              ...completionParams(judgeModel, { temperature: 0.2, maxTokens: 400 }),
               response_format: { type: 'json_object' },
               messages: [
                 {
@@ -499,15 +542,31 @@ export async function POST(req: NextRequest) {
                     `conveys mood/morale without stating HP numbers; clearly conveys it's ${who}'s turn (needs orders); ` +
                     `lands a callback to the chatter ONLY if there's a real hook; tight (ideally under ~160 chars); not cringe or mean.\n` +
                     `Candidates:\n${list}\n` +
-                    `Reply as JSON: {"best": <index>, "score": <0-100, how good the winning candidate is on its own merits — judge the writing itself, NOT how earlier messages were reacted to>}`,
+                    `Rank EVERY candidate, best first, and label each one's topic. ${TOPIC_RULE}\n` +
+                    JUDGE_REPLY_FORMAT,
                 },
               ],
             });
-            const pick = JSON.parse(judgeRes.choices[0]?.message?.content || '{}');
-            const idx = Number(pick.best);
-            caption = candidates[Number.isInteger(idx) && candidates[idx] ? idx : 0];
-            const rawScore = Number(pick.score);
-            judgeScore = Number.isFinite(rawScore) ? Math.max(0, Math.min(100, rawScore)) : null;
+            const verdict = parseJudgeVerdict(
+              JSON.parse(judgeRes.choices[0]?.message?.content || '{}'),
+              candidates.length
+            );
+            judgeScore = verdict.score;
+            // Best candidate whose topic is fresh AND still unclaimed — another group captioning
+            // this same turn may have just taken it. If every topic is spent, send the judge's
+            // top pick anyway: a repeat beats a silent turn ping.
+            const db = getAdminDb();
+            let chosen = -1;
+            for (const i of eligibleInOrder(verdict, usedTopics)) {
+              if (await claimTopic(db, gameId, verdict.topics[i] || '', candidates[i])) {
+                chosen = i;
+                break;
+              }
+            }
+            const winner = chosen >= 0 ? chosen : verdict.ranking[0];
+            caption = candidates[winner];
+            captionTopic = verdict.topics[winner] || null;
+            if (chosen < 0) console.warn(`Fun-mode: every candidate repeats a used topic in game ${gameId}`);
           } catch (judgeErr) {
             console.warn('Fun-mode judge failed; using first candidate', judgeErr);
             caption = candidates[0];
@@ -519,7 +578,7 @@ export async function POST(req: NextRequest) {
         if (caption) {
           try {
             const db = getAdminDb();
-            captionId = await storeSentCaption(db, gameId, caption, style, day, judgeScore, {
+            captionId = await storeSentCaption(db, gameId, caption, style, day, judgeScore, captionTopic, {
               name: featuringCo ? coName : unitName,
               isCo: featuringCo,
               army: army.code,
