@@ -66,6 +66,12 @@ export function buildChartPng(opts: {
   // magnitudes between players, which is a bar chart.
   const samplesPerSeries = Math.max(0, ...opts.series.map((s) => s.points.length));
   if (samplesPerSeries === 1) return buildSnapshotPng(opts);
+  // Time order once, up front: within a day, samples arrive in player-id order, and anything
+  // that reads "the last point" (the end label, the marker) must mean the latest one.
+  const series = opts.series.map((s) => ({
+    ...s,
+    points: [...s.points].sort((a, b) => a.day - b.day || a.turn - b.turn),
+  }));
   // 2x for a crisp image on phone screens, where these are actually read.
   const SCALE = 2;
   const W = opts.width ?? 900;
@@ -76,7 +82,7 @@ export function buildChartPng(opts: {
   ctx.fillStyle = SURFACE;
   ctx.fillRect(0, 0, W, H);
 
-  const all = opts.series.flatMap((s) => s.points);
+  const all = series.flatMap((s) => s.points);
   if (all.length === 0) {
     ctx.font = `14px ${FONT}`;
     ctx.fillStyle = INK_MUTED;
@@ -87,7 +93,7 @@ export function buildChartPng(opts: {
 
   // Measured, not guessed: a fixed right margin clips the moment someone has a long username.
   ctx.font = `11px ${FONT}`;
-  const labels = opts.series.map((s) => {
+  const labels = series.map((s) => {
     const last = s.points[s.points.length - 1];
     return `${s.label}${s.eliminated ? ' (out)' : ''}  ${last ? fmtK(last.value) : ''}`;
   });
@@ -98,6 +104,7 @@ export function buildChartPng(opts: {
 
   const minDay = Math.min(...all.map((p) => p.day));
   const maxDay = Math.max(...all.map((p) => p.day));
+  const maxX = Math.max(...all.map((p) => p.day + p.turn));
   const maxVal = Math.max(...all.map((p) => p.value));
   // Baseline at zero: this is a magnitude, and a truncated axis would overstate every swing.
   const yTop = Math.max(1, maxVal * 1.08);
@@ -105,7 +112,7 @@ export function buildChartPng(opts: {
   // Fractional day so several samples within one day (one per player's turn) stay in order
   // instead of stacking on the same x.
   const x = (p: Sample) =>
-    M.left + ((p.day + p.turn - minDay) / Math.max(0.5, maxDay + 1 - minDay)) * plotW;
+    M.left + ((p.day + p.turn - minDay) / Math.max(0.5, maxX + 0.05 - minDay)) * plotW;
   const y = (v: number) => M.top + plotH - (v / yTop) * plotH;
 
   ctx.textAlign = 'left';
@@ -160,8 +167,8 @@ export function buildChartPng(opts: {
   // Lines, then direct labels. Drawn in a stable order so colour follows the player, never
   // their current rank.
   const slots: Array<{ yWanted: number; text: string; color: string }> = [];
-  opts.series.forEach((s, i) => {
-    const pts = [...s.points].sort((a, b) => a.day - b.day || a.turn - b.turn);
+  series.forEach((s, i) => {
+    const pts = s.points;
     if (pts.length === 0) return;
     const color = fitToSurface((s.army && ARMY_COLORS[s.army]) || DEFAULT_ARMY_COLOR, SURFACE);
     ctx.strokeStyle = color;
