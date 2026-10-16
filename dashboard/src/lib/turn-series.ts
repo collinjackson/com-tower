@@ -18,6 +18,15 @@ export type TurnSampleDoc = {
   players?: Record<string, Record<string, unknown>>;
 };
 
+/** One player's value for a metric in one sample. `armyValue` is derived: everything they
+ *  could field, units on the board (HP-weighted) plus cash in hand, so a build moves value
+ *  from funds to units instead of reading as a sudden gain. Anything not finite (funds a fog
+ *  game withholds, say) is no point at all rather than a misleading zero. */
+export function metricValue(player: Record<string, unknown>, metric: string): number {
+  if (metric === 'armyValue') return Number(player.unitValue) + Number(player.funds);
+  return Number(player[metric]);
+}
+
 /** Where in its day a sample sits: the turn-taker's rank in turn order over the player count.
  *  AWBW's players_order is a sort key, not a 1..n index (one game ran 3, 4, 9, 10), so it is
  *  ranked rather than used as an offset — as an offset it pushed late players into the next day. */
@@ -41,7 +50,7 @@ export function samplesToSeries(docs: TurnSampleDoc[], metric: string): Series[]
     if (typeof d.day !== 'number' || !d.players) continue;
     const turn = turnFraction(d);
     for (const [pid, p] of Object.entries(d.players)) {
-      const value = Number(p[metric]);
+      const value = metricValue(p, metric);
       if (!Number.isFinite(value)) continue;
       let series = byPlayer.get(pid);
       if (!series) {

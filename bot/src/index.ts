@@ -797,6 +797,17 @@ async function buildMessage(
 
 /** Ask the dashboard to render a chart of this game's recorded history. Built entirely from
  *  Com Tower's own per-turn samples — no replay API call, so nothing here can rate-limit AWBW. */
+/** How /stats names each chart metric in its caption. armyValue is the default: units plus
+ *  cash, so a player who banks funds does not look weak until they spend it. */
+const METRIC_LABELS: Record<string, string> = {
+  armyValue: 'Army value (units + funds)',
+  unitValue: 'Unit value',
+  funds: 'Funds',
+  income: 'Income',
+  properties: 'Properties',
+  unitCount: 'Unit count',
+};
+
 async function buildStatsChart(
   gameId: string,
   metric: string
@@ -842,7 +853,7 @@ async function buildStatsChart(
     }
     const buf = Buffer.from(await res.arrayBuffer());
     return {
-      caption: `📈 ${metric === 'unitValue' ? 'Unit value' : metric} — ${gameLink(gameId)}`,
+      caption: `📈 ${METRIC_LABELS[metric] || metric} — ${gameLink(gameId)}`,
       attachment: {
         dataB64: buf.toString('base64'),
         contentType: 'image/png',
@@ -1574,7 +1585,7 @@ const HELP_TEXT =
   '/showcase [on|off]   — let good posts appear (names blacked out) in the public gallery (mod)\n' +
   '/remind <dur|off>    — nudge the current player if they sit on their turn (mod)\n' +
   '/language <lang>     — your turn pings in another language (e.g. Klingon, Esperanto)\n' +
-  '/stats [metric]      — chart the game so far (unitValue, funds, income, properties)\n' +
+  '/stats [metric]      — chart the game so far (armyValue, unitValue, funds, income, properties)\n' +
   '/status              — current state\n' +
   '/sync                — check AWBW now and post if we missed a turn\n' +
   '/stop                — stop watching (mod)\n' +
@@ -2019,7 +2030,7 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
       await reply('No game bound yet. Run /game <link> first.');
       return;
     }
-    const metric = (args[0] || 'unitValue').replace(/[^a-zA-Z]/g, '');
+    const metric = (args[0] || 'armyValue').replace(/[^a-zA-Z]/g, '');
     const chart = await buildStatsChart(gg.gameId, metric);
     if (!chart) {
       await reply(
@@ -2135,7 +2146,7 @@ const DM_HELP =
   '📋 Com Tower — direct commands\n' +
   'A DM has no bound game, so name one:\n' +
   '/stats <awbw link or game id> [metric]\n' +
-  '     — chart the game (unitValue, funds, income, properties, unitCount)\n' +
+  '     — chart the game (armyValue, unitValue, funds, income, properties, unitCount)\n' +
   '/ping — connectivity check\n' +
   '\n' +
   'Everything else lives in a group chat: add Com Tower there and run /game <link>.';
@@ -2161,7 +2172,7 @@ async function handleDmCommand(env: any, text: string): Promise<void> {
       await reply('Which game? /stats <awbw link or game id> [metric]');
       return;
     }
-    const metric = (args[1] || 'unitValue').replace(/[^a-zA-Z]/g, '');
+    const metric = (args[1] || 'armyValue').replace(/[^a-zA-Z]/g, '');
     const chart = await buildStatsChart(gameId, metric);
     if (!chart) {
       await reply(

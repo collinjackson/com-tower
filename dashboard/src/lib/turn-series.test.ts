@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { inTimeOrder, samplesToSeries, turnFraction, xDomain, type TurnSampleDoc } from './turn-series.ts';
+import { inTimeOrder, metricValue, samplesToSeries, turnFraction, xDomain, type TurnSampleDoc } from './turn-series.ts';
 
 // Game 1744366's real player ids and turn order. players_order is 3, 4, 9, 10, not 1..4, and
 // id order (…363, …417, …554, …869) is not turn order — el_mero_mero sorts second, plays last.
@@ -112,4 +112,23 @@ test('the x axis ends just past the latest sample, not a day later', () => {
 test('a lone day still gets a readable width', () => {
   const { start, end } = xDomain([{ day: 1, turn: 0, value: 0 }]);
   assert.equal(end - start, 0.5);
+});
+
+test('army value is units plus cash, so a build is not a sudden gain', () => {
+  // alecnexus, day 12: he built a Neotank and an Anti-Air, 30k from funds into units.
+  const before = metricValue({ unitValue: 105900, funds: 34300 }, 'armyValue');
+  const after = metricValue({ unitValue: 135900, funds: 4300 }, 'armyValue');
+  assert.equal(before, 140200);
+  assert.equal(after, before);
+});
+
+test('army value is no point at all when funds are withheld', () => {
+  assert.ok(!Number.isFinite(metricValue({ unitValue: 105900 }, 'armyValue')));
+  const doc = sample(2, 'ridiculotron', v(1, 1, 1, 1), { ridiculotron: { funds: 500 } });
+  const series = samplesToSeries([doc], 'armyValue');
+  assert.deepEqual(series.map((s) => [s.label, s.points[0].value]), [['ridiculotron', 501]]);
+});
+
+test('stored metrics read straight through', () => {
+  assert.equal(metricValue({ income: 22000 }, 'income'), 22000);
 });

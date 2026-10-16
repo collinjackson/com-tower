@@ -8,6 +8,7 @@ import { samplesToSeries, type TurnSampleDoc } from '@/lib/turn-series';
 export const revalidate = 60;
 
 const METRICS = {
+  armyValue: { label: 'Army value', axis: 'Units (HP-weighted) + funds' },
   unitValue: { label: 'Unit value', axis: 'Unit value (HP-weighted)' },
   funds: { label: 'Funds', axis: 'Funds' },
   income: { label: 'Income', axis: 'Income per turn' },
@@ -19,7 +20,7 @@ type MetricKey = keyof typeof METRICS;
 export async function GET(req: Request, ctx: { params: Promise<{ gameId: string }> }) {
   const { gameId } = await ctx.params;
   const url = new URL(req.url);
-  const metric = (url.searchParams.get('metric') || 'unitValue') as MetricKey;
+  const metric = (url.searchParams.get('metric') || 'armyValue') as MetricKey;
   if (!METRICS[metric]) {
     return NextResponse.json({ error: `unknown metric; try ${Object.keys(METRICS).join(', ')}` }, { status: 400 });
   }
