@@ -21,15 +21,8 @@ function ensureFont() {
   fontReady = true;
 }
 
-/** `turn` is how far into the day the sample was taken, in [0, 1): 0 is the first player's turn. */
-export type Sample = { day: number; turn: number; value: number };
-export type Series = {
-  key: string;
-  label: string;
-  army?: string;
-  eliminated?: boolean;
-  points: Sample[];
-};
+import { inTimeOrder, xDomain, type Sample, type Series } from './turn-series';
+export type { Sample, Series };
 
 /** Round to a readable axis step (1/2/5 x 10^n). */
 function niceStep(range: number, targetTicks: number) {
@@ -66,12 +59,7 @@ export function buildChartPng(opts: {
   // magnitudes between players, which is a bar chart.
   const samplesPerSeries = Math.max(0, ...opts.series.map((s) => s.points.length));
   if (samplesPerSeries === 1) return buildSnapshotPng(opts);
-  // Time order once, up front: within a day, samples arrive in player-id order, and anything
-  // that reads "the last point" (the end label, the marker) must mean the latest one.
-  const series = opts.series.map((s) => ({
-    ...s,
-    points: [...s.points].sort((a, b) => a.day - b.day || a.turn - b.turn),
-  }));
+  const series = opts.series.map((s) => ({ ...s, points: inTimeOrder(s.points) }));
   // 2x for a crisp image on phone screens, where these are actually read.
   const SCALE = 2;
   const W = opts.width ?? 900;
@@ -104,7 +92,7 @@ export function buildChartPng(opts: {
 
   const minDay = Math.min(...all.map((p) => p.day));
   const maxDay = Math.max(...all.map((p) => p.day));
-  const maxX = Math.max(...all.map((p) => p.day + p.turn));
+  const domain = xDomain(all);
   const maxVal = Math.max(...all.map((p) => p.value));
   // Baseline at zero: this is a magnitude, and a truncated axis would overstate every swing.
   const yTop = Math.max(1, maxVal * 1.08);
@@ -112,7 +100,7 @@ export function buildChartPng(opts: {
   // Fractional day so several samples within one day (one per player's turn) stay in order
   // instead of stacking on the same x.
   const x = (p: Sample) =>
-    M.left + ((p.day + p.turn - minDay) / Math.max(0.5, maxX + 0.05 - minDay)) * plotW;
+    M.left + ((p.day + p.turn - domain.start) / (domain.end - domain.start)) * plotW;
   const y = (v: number) => M.top + plotH - (v / yTop) * plotH;
 
   ctx.textAlign = 'left';
