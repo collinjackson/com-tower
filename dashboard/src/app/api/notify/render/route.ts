@@ -7,8 +7,7 @@ import {
   JUDGE_REPLY_FORMAT,
   TOPIC_RULE,
   backfillTopics,
-  claimTopic,
-  eligibleInOrder,
+  chooseCandidate,
   loadUsedTopics,
   parseJudgeVerdict,
   type UsedTopic,
@@ -395,14 +394,14 @@ export async function POST(req: NextRequest) {
         } catch (err) {
           console.warn('Failed to fetch sent captions:', err);
         }
-        // Topics this game has already used. A game from before topics existed gets its
-        // history labelled once, so jokes already told count straight away.
+        // Topics this game, and the group's recent games, have already used. A game from before
+        // topics existed gets its history labelled once, so jokes already told count straight away.
         let usedTopics: UsedTopic[] = [];
         try {
           const db = getAdminDb();
           usedTopics = await loadUsedTopics(db, gameId);
-          if (usedTopics.length === 0 && sentCaptions.length > 0) {
-            usedTopics = await backfillTopics(db, gameId, sentCaptions.map((c) => c.text), async (texts) => {
+          if (!usedTopics.some((t) => t.scope === 'game') && sentCaptions.length > 0) {
+            const backfilled = await backfillTopics(db, gameId, sentCaptions.map((c) => c.text), async (texts) => {
               const res = await client.chat.completions.create({
                 model: judgeModel,
                 ...completionParams(judgeModel, { temperature: 0, maxTokens: 400 }),
@@ -420,6 +419,7 @@ export async function POST(req: NextRequest) {
               const parsed = JSON.parse(res.choices[0]?.message?.content || '{}');
               return Array.isArray(parsed.topics) ? parsed.topics.map(String) : [];
             });
+            usedTopics = [...backfilled, ...usedTopics];
           }
         } catch (err) {
           console.warn('Failed to load caption topics:', err);
@@ -427,7 +427,7 @@ export async function POST(req: NextRequest) {
         // Topics, not the captions themselves: a list of past captions reads to the model as
         // examples to imitate, and it copied them (openers, joke templates, the ladder joke).
         const usedJokesConstraint = usedTopics.length
-          ? `TOPICS ALREADY USED IN THIS GAME — don't build the bit on any of these (no same prop, premise, or punchline): ` +
+          ? `TOPICS THIS GROUP HAS ALREADY HEARD — don't build the bit on any of these (no same prop, premise, or punchline): ` +
             Array.from(new Set(usedTopics.map((t) => t.topic))).join('; ') +
             `.\n\n`
           : '';
@@ -552,21 +552,23 @@ export async function POST(req: NextRequest) {
               candidates.length
             );
             judgeScore = verdict.score;
-            // Best candidate whose topic is fresh AND still unclaimed — another group captioning
-            // this same turn may have just taken it. If every topic is spent, send the judge's
-            // top pick anyway: a repeat beats a silent turn ping.
-            const db = getAdminDb();
-            let chosen = -1;
-            for (const i of eligibleInOrder(verdict, usedTopics)) {
-              if (await claimTopic(db, gameId, verdict.topics[i] || '', candidates[i])) {
-                chosen = i;
-                break;
-              }
-            }
-            const winner = chosen >= 0 ? chosen : verdict.ranking[0];
+            // Best candidate that repeats nothing AND whose topic is still unclaimed — another
+            // group captioning this same turn may have just taken it.
+            const { index: winner, fresh } = await chooseCandidate(
+              getAdminDb(),
+              gameId,
+              verdict,
+              candidates,
+              usedTopics
+            );
             caption = candidates[winner];
             captionTopic = verdict.topics[winner] || null;
-            if (chosen < 0) console.warn(`Fun-mode: every candidate repeats a used topic in game ${gameId}`);
+            if (fresh !== 'yes') {
+              console.warn(
+                `Fun-mode: every candidate repeats ${fresh === 'no' ? 'this game' : 'a recent game'} in game ${gameId}; ` +
+                  `sent ${JSON.stringify(captionTopic)}`
+              );
+            }
           } catch (judgeErr) {
             console.warn('Fun-mode judge failed; using first candidate', judgeErr);
             caption = candidates[0];

@@ -41,6 +41,8 @@ Send `/help` in the group for the full command list.
 
 **Fun mode** (on by default) turns each notification into a short in-character radio message from one of your units, with a hologram image. Turn it off with `/fun off` if you prefer plain text.
 
+Fun mode tries not to tell your group the same joke twice. Each turn it writes several candidates, and a judge model ranks them and names each one's topic: the prop or premise the punchline turns on ("ladder", "music school"). A candidate counts as a repeat if its topic overlaps one already told, if its text names a topic already told, or if an earlier caption names its topic. That last pair catches a ladder joke the judge called "high stakes". Topics are remembered for the whole game and, for 90 days, across your group's next games. If every candidate repeats, it relaxes the cross-game list first, and as a last resort sends the judge's top pick rather than skipping the ping.
+
 **Stuck?** Run `/status` to see whether the bot is watching your game. If turns aren’t coming through, try `/sync` once, or `/stop` then `/game` again to re-bind.
 
 ---
@@ -94,7 +96,7 @@ The **Signal bridge** (signal-cli REST) is separate infrastructure — the bot r
 
 ### Codebase overview
 
-- **Dashboard:** Next.js App Router. Main UI is `dashboard/src/app/page.tsx`; API routes under `dashboard/src/app/api/`. Firebase client in `dashboard/src/lib/firebase.ts`, admin in `dashboard/src/lib/firebase-admin.ts`. Fun-mode renderer: `dashboard/src/app/api/notify/render/route.ts`.
+- **Dashboard:** Next.js App Router. Main UI is `dashboard/src/app/page.tsx`; API routes under `dashboard/src/app/api/`. Firebase client in `dashboard/src/lib/firebase.ts`, admin in `dashboard/src/lib/firebase-admin.ts`. Fun-mode renderer: `dashboard/src/app/api/notify/render/route.ts`; its repeat filter is `dashboard/src/lib/caption-topics.ts`, which keeps used topics in `games/{id}/captionTopics` and, across games, `recentCaptionTopics`.
 - **Bot:** Single entry `bot/src/index.ts` — Firestore listeners, AWBW websocket per game, render call, Signal send, group commands.
 
 ### Making changes
