@@ -4,6 +4,13 @@
 // captions in the prompt, 58 of 60 candidates opened "Cruiser here" (for a CO) and a quarter
 // were the same ladder joke. Topics are short enough to list without priming, and the filter
 // runs in code rather than relying on the judge to obey a rule.
+//
+// Labels alone weren't enough. In game 1751089 the judge called a ladder joke "high stakes" ("Why
+// did the soldier bring a ladder to battle? Because he heard the stakes were high!"), a topic no
+// one had used, so it went out though "ladder" was already spent. So a candidate also repeats when
+// its text names a used topic, or when an earlier caption's text names the candidate's topic.
+// And the same group plays game after game: the ladder joke went out in every one of its five
+// games, so topics are shared across games for RECENT_TOPIC_DAYS too.
 
 /** How a topic is described, shared by the judge (labelling candidates) and the backfill. */
 export const TOPIC_RULE =
@@ -18,8 +25,27 @@ const GENERIC = new Set(
   (
     'a an the to of and or in on at for with by from my our your their his her its this that ' +
     'soldier soldiers trooper troop troops battle battlefield war fight fighting victory army armies ' +
-    'commander command orders order advance attack unit units day turn time move new big bring'
+    'commander command orders order advance attack unit units day turn time move new big bring ' +
+    // Backdrop of a turn ping, too common in caption text to count as having told a joke.
+    'wait waiting ready over map ground charge charging power firepower next ' +
+    // Everyday words that turned up as topics and then matched half the captions ("charge
+    // ahead", "open ground", "sights high").
+    'ahead more open high hot sharp tall stand strong loud wild fast great best good top line front way ' +
+    // Day numbers: "day ten" is a date, not a bit.
+    'one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen ' +
+    'twenty thirty first second third fourth fifth'
   ).split(' ')
+);
+
+/** AWBW's armies. Captions name them constantly, so a whole army name is backdrop ("Orange Star"
+ *  isn't a joke), though one of its words alone may be ("moon", "ice"). */
+const ARMIES = new RegExp(
+  '\\b(' +
+    'orange star|blue moon|green earth|yellow comet|black hole|red fire|grey sky|brown desert|' +
+    'amber blaze|jade sun|cobalt ice|pink cosmos|teal galaxy|purple lightning|acid rain|' +
+    'white nova|azure asteroid|noir eclipse|silver claw|umber wilds' +
+    ')\\b',
+  'g'
 );
 
 /** Lowercase letters and spaces only. */
@@ -27,13 +53,27 @@ export function normalizeTopic(topic: string): string {
   return topic.toLowerCase().replace(/[^a-z]+/g, ' ').trim();
 }
 
+/** Normalized, with army names taken out. */
+function contentWords(s: string): string[] {
+  return normalizeTopic(s).replace(ARMIES, ' ').split(' ').filter(Boolean);
+}
+
 /** The distinctive words of a topic, crudely singular so "ladders" and "ladder" meet. */
 export function topicKeywords(topic: string): string[] {
-  const words = normalizeTopic(topic)
-    .split(' ')
+  const words = contentWords(topic)
     .filter((w) => w.length >= 3 && !GENERIC.has(w))
     .map(singular);
   return Array.from(new Set(words));
+}
+
+/** Every word of a caption, singular, for checking whether it names a topic. */
+export function textWords(text: string): Set<string> {
+  return new Set(contentWords(text).map(singular));
+}
+
+/** Whether a caption names a topic: every distinctive word of the topic appears in it. */
+function mentions(words: Set<string>, keywords: string[]): boolean {
+  return keywords.length > 0 && keywords.every((k) => words.has(k));
 }
 
 /** Rough English singular — enough that "wrenches", "batteries" and "ladders" meet their singulars. */
@@ -59,6 +99,15 @@ export function isTopicUsed(topic: string, used: Array<{ keywords: string[] }>):
   return used.some((u) => u.keywords.some((k) => mine.includes(k)));
 }
 
+/** A candidate repeats a sent caption when their topics overlap, or when either's text names the
+ *  other's topic — so one mislabel ("high stakes" for a ladder joke) can't let a bit through. */
+export function isRepeat(topic: string, text: string, used: UsedTopic[]): boolean {
+  if (isTopicUsed(topic, used)) return true;
+  const mine = topicKeywords(topic);
+  const words = textWords(text);
+  return used.some((u) => mentions(words, u.keywords) || (!!u.text && mentions(textWords(u.text), mine)));
+}
+
 /** The judge's reply: candidate indices best first, and one topic per candidate (by candidate index). */
 export type JudgeVerdict = { ranking: number[]; topics: string[]; score: number | null };
 
@@ -81,56 +130,122 @@ export function parseJudgeVerdict(raw: unknown, candidateCount: number): JudgeVe
   return { ranking, topics, score: Number.isFinite(score) ? Math.max(0, Math.min(100, score)) : null };
 }
 
-/** Candidates in the order to try them: the judge's ranking with used topics skipped. Empty
- *  when every candidate repeats a topic — the caller then sends the judge's top pick anyway,
- *  because a repeat beats a silent turn ping. */
-export function eligibleInOrder(verdict: JudgeVerdict, used: Array<{ keywords: string[] }>): number[] {
-  return verdict.ranking.filter((i) => !isTopicUsed(verdict.topics[i] || '', used));
+/** Candidates in the order to try them: the judge's ranking with repeats skipped. Empty when
+ *  every candidate repeats — see chooseCandidate for what happens then. */
+export function eligibleInOrder(verdict: JudgeVerdict, candidates: string[], used: UsedTopic[]): number[] {
+  return verdict.ranking.filter((i) => !isRepeat(verdict.topics[i] || '', candidates[i] || '', used));
 }
 
+type Docs = { get(): Promise<{ docs: Array<{ data(): Record<string, unknown> }> }> };
+type TopicDoc = {
+  create(data: Record<string, unknown>): Promise<unknown>;
+  set(data: Record<string, unknown>, opts?: { merge?: boolean }): Promise<unknown>;
+};
+
 /** The slice of Firestore this module touches, so tests can pass a fake. */
-type Db = {
+export type Db = {
   collection(name: string): {
     doc(id: string): {
-      collection(name: string): {
-        doc(id: string): {
-          create(data: Record<string, unknown>): Promise<unknown>;
-          set(data: Record<string, unknown>, opts?: { merge?: boolean }): Promise<unknown>;
-        };
-        limit(n: number): { get(): Promise<{ docs: Array<{ data(): Record<string, unknown> }> }> };
-      };
-    };
+      collection(name: string): { doc(id: string): TopicDoc; limit(n: number): Docs };
+    } & TopicDoc;
+    where(field: string, op: '>=', value: Date): { orderBy(field: string, dir: 'desc'): { limit(n: number): Docs } };
   };
 };
 
-export type UsedTopic = { topic: string; keywords: string[] };
+/** A spent topic and the caption that spent it. `scope` is 'game' for this game's own topics and
+ *  'recent' for ones another game used lately. */
+export type UsedTopic = { topic: string; keywords: string[]; text?: string; scope?: 'game' | 'recent' };
+
+/** How long a topic told in one game stays spent in the group's next games. */
+export const RECENT_TOPIC_DAYS = 90;
+const RECENT_TOPIC_LIMIT = 300;
 
 function topicsOf(db: Db, gameId: string) {
   return db.collection('games').doc(gameId).collection('captionTopics');
 }
 
-export async function loadUsedTopics(db: Db, gameId: string): Promise<UsedTopic[]> {
-  const snap = await topicsOf(db, gameId).limit(500).get();
-  return snap.docs
+/** Topics across every game, one doc per topic key, newest use wins. Not per group (the render
+ *  route isn't told the group), which is fine while one group plays one game after another. */
+function recentTopics(db: Db) {
+  return db.collection('recentCaptionTopics');
+}
+
+function toUsed(d: Record<string, unknown>, scope: 'game' | 'recent'): UsedTopic | null {
+  if (typeof d.topic !== 'string') return null;
+  return { topic: d.topic, keywords: topicKeywords(d.topic), text: typeof d.text === 'string' ? d.text : undefined, scope };
+}
+
+/** This game's topics, plus those another game used in the last RECENT_TOPIC_DAYS. A failed
+ *  cross-game read just leaves this game's own topics. */
+export async function loadUsedTopics(db: Db, gameId: string, now = new Date()): Promise<UsedTopic[]> {
+  const since = new Date(now.getTime() - RECENT_TOPIC_DAYS * 86_400_000);
+  const [own, recent] = await Promise.all([
+    topicsOf(db, gameId).limit(500).get(),
+    recentTopics(db)
+      .where('at', '>=', since)
+      .orderBy('at', 'desc')
+      .limit(RECENT_TOPIC_LIMIT)
+      .get()
+      .catch((err) => {
+        console.warn('recent caption topics read failed', err);
+        return { docs: [] };
+      }),
+  ]);
+  const game = own.docs.map((d) => toUsed(d.data(), 'game')).filter((u): u is UsedTopic => !!u);
+  const others = recent.docs
     .map((d) => d.data())
-    .filter((d) => typeof d.topic === 'string')
-    .map((d) => ({ topic: d.topic as string, keywords: topicKeywords(d.topic as string) }));
+    .filter((d) => d.gameId !== gameId)
+    .map((d) => toUsed(d, 'recent'))
+    .filter((u): u is UsedTopic => !!u);
+  return [...game, ...others];
 }
 
 /** Claim a topic for this game. Atomic (create fails if it exists), so when two groups watch the
  *  same game and caption the same turn at once, only one of them can send the bit. Returns false
- *  only when someone else already holds it; a storage error must not cost the turn its caption. */
+ *  only when someone else already holds it; a storage error must not cost the turn its caption.
+ *  A won claim is also recorded across games, so the group's next game knows the bit too. */
 export async function claimTopic(db: Db, gameId: string, topic: string, text: string): Promise<boolean> {
   const key = topicKey(topic);
   if (!key) return true;
+  const data = { topic: normalizeTopic(topic), text, at: new Date() };
   try {
-    await topicsOf(db, gameId).doc(key).create({ topic: normalizeTopic(topic), text, at: new Date() });
-    return true;
+    await topicsOf(db, gameId).doc(key).create(data);
   } catch (err) {
     if ((err as { code?: number })?.code === 6) return false; // ALREADY_EXISTS
     console.warn('caption topic claim failed', err);
     return true;
   }
+  await recentTopics(db)
+    .doc(key)
+    .set({ ...data, gameId })
+    .catch((err) => console.warn('recent caption topic write failed', err));
+  return true;
+}
+
+/** Pick the caption to send: the judge's best candidate that repeats nothing and whose topic this
+ *  call wins the claim on. When every candidate repeats something, other games' topics are let go
+ *  first (better a bit from last game than one from this game), and then the judge's top pick goes
+ *  out anyway — a repeat beats a silent turn ping. `fresh` says which happened. */
+export async function chooseCandidate(
+  db: Db,
+  gameId: string,
+  verdict: JudgeVerdict,
+  candidates: string[],
+  used: UsedTopic[]
+): Promise<{ index: number; fresh: 'yes' | 'this-game' | 'no' }> {
+  const tiers: Array<['yes' | 'this-game', UsedTopic[]]> = [
+    ['yes', used],
+    ['this-game', used.filter((u) => u.scope !== 'recent')],
+  ];
+  const tried = new Set<number>();
+  for (const [fresh, tier] of tiers) {
+    for (const i of eligibleInOrder(verdict, candidates, tier)) {
+      if (tried.has(i)) continue;
+      tried.add(i);
+      if (await claimTopic(db, gameId, verdict.topics[i] || '', candidates[i])) return { index: i, fresh };
+    }
+  }
+  return { index: verdict.ranking[0] ?? 0, fresh: 'no' };
 }
 
 /** Captions per labelling call. Asked for all 66 of one game's captions at once, gpt-4o-mini
@@ -166,7 +281,7 @@ export async function backfillTopics(
       const topic = topics[i] || '';
       const key = topicKey(topic);
       if (!key) return;
-      out.push({ topic: normalizeTopic(topic), keywords: topicKeywords(topic) });
+      out.push({ topic: normalizeTopic(topic), keywords: topicKeywords(topic), text, scope: 'game' });
       await topicsOf(db, gameId)
         .doc(key)
         .set({ topic: normalizeTopic(topic), text, at: new Date(), backfilled: true }, { merge: true })
