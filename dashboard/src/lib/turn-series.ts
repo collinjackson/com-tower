@@ -42,42 +42,27 @@ function turnSlots(doc: TurnSampleDoc): Map<string, number> {
   return new Map(order.map((pid, rank) => [pid, rank / order.length]));
 }
 
-/** One point per player per finished day: their standing from the first sample after their
- *  own turn, once they have collected income, paid repairs and built. Mid-day samples are not
- *  comparable — whoever's turn just began holds unspent income the others have already spent
- *  or lost to repairs — so the chart compares players only where each has played the day.
- *  A day still in progress is left off; the point sits at the day's integer x. */
-export function dailySeries(docs: TurnSampleDoc[], metric: string): Series[] {
-  const samples = docs
+/** Drops each sample's reading of the player whose turn it is, carrying their previous one
+ *  instead: at the start of their turn they hold income they have not yet spent and that the
+ *  others have already spent or lost to repairs, so it is not comparable. Each line then steps
+ *  once its player's turn is over, and the chart never shows a turn still in progress. */
+export function settledSamples(docs: TurnSampleDoc[]): TurnSampleDoc[] {
+  const at = (d: TurnSampleDoc) => d.day! + turnFraction(d);
+  const settled = new Map<string, Record<string, unknown>>(); // player id -> last settled record
+  return docs
     .filter((d) => typeof d.day === 'number' && d.players)
-    .map((d) => ({ doc: d, at: d.day! + turnFraction(d), slots: turnSlots(d) }))
-    .sort((a, b) => a.at - b.at);
-  const latest = samples.at(-1);
-  if (!latest) return [];
-  // The day is over once everyone still playing has had their turn in it.
-  const live = Object.entries(latest.doc.players!).filter(([, p]) => p.eliminated !== true);
-  const lastSlot = Math.max(0, ...live.map(([pid]) => latest.slots.get(pid) ?? 0));
-
-  const series: Series[] = [];
-  for (const [pid, p] of Object.entries(latest.doc.players!)) {
-    const slot = latest.slots.get(pid) ?? 0;
-    const points: Sample[] = [];
-    for (let day = samples[0].doc.day!; day + lastSlot < latest.at; day++) {
-      // Before their next turn: that sample has the next day's income in it.
-      const after = samples.find((s) => s.at > day + slot && s.at < day + slot + 1);
-      const value = after?.doc.players?.[pid] && metricValue(after.doc.players[pid], metric);
-      if (typeof value === 'number' && Number.isFinite(value)) points.push({ day, turn: 0, value });
-    }
-    series.push({
-      key: pid,
-      label: String(p.username || pid),
-      army: (p.countryCode as string) || undefined,
-      eliminated: p.eliminated === true,
-      points,
+    .sort((a, b) => at(a) - at(b))
+    .map((d) => {
+      const players = { ...d.players! };
+      const pid = d.turnPlayerId && String(d.turnPlayerId);
+      if (pid && players[pid]) {
+        const prev = settled.get(pid);
+        if (prev) players[pid] = prev;
+        else delete players[pid];
+      }
+      for (const [id, p] of Object.entries(players)) settled.set(id, p);
+      return { ...d, players };
     });
-  }
-  const order = (pid: string) => Number(latest.doc.players![pid].order) || 0;
-  return series.filter((s) => s.points.length).sort((a, b) => order(a.key) - order(b.key));
 }
 
 /** Every sample gives every player one point, all at that sample's place in the day, so a
