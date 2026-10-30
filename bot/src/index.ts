@@ -808,9 +808,17 @@ const METRIC_LABELS: Record<string, string> = {
   unitCount: 'Unit count',
 };
 
+/** /stats arguments in any order: a metric (armyValue by default) and `log` for a log axis. */
+function parseStatsArgs(args: string[]): { metric: string; logScale: boolean } {
+  const logScale = args.some((a) => a.toLowerCase() === 'log');
+  const metric = args.find((a) => a.toLowerCase() !== 'log') || 'armyValue';
+  return { metric: metric.replace(/[^a-zA-Z]/g, ''), logScale };
+}
+
 async function buildStatsChart(
   gameId: string,
-  metric: string
+  metric: string,
+  logScale = false
 ): Promise<
   | {
       caption: string;
@@ -841,6 +849,7 @@ async function buildStatsChart(
 
     const url = new URL(`/api/chart/${gameId}`, renderUrl);
     url.searchParams.set('metric', metric);
+    if (logScale) url.searchParams.set('scale', 'log');
     const bypass = process.env.RENDER_BYPASS_TOKEN;
     const res = await fetch(url.toString(), {
       headers: bypass
@@ -853,7 +862,7 @@ async function buildStatsChart(
     }
     const buf = Buffer.from(await res.arrayBuffer());
     return {
-      caption: `📈 ${METRIC_LABELS[metric] || metric} — ${gameLink(gameId)}`,
+      caption: `📈 ${METRIC_LABELS[metric] || metric}${logScale ? ' (log scale)' : ''} — ${gameLink(gameId)}`,
       attachment: {
         dataB64: buf.toString('base64'),
         contentType: 'image/png',
@@ -1585,7 +1594,7 @@ const HELP_TEXT =
   '/showcase [on|off]   — let good posts appear (names blacked out) in the public gallery (mod)\n' +
   '/remind <dur|off>    — nudge the current player if they sit on their turn (mod)\n' +
   '/language <lang>     — your turn pings in another language (e.g. Klingon, Esperanto)\n' +
-  '/stats [metric]      — chart the game so far (armyValue, unitValue, funds, income, properties)\n' +
+  '/stats [metric] [log] — chart the game so far (armyValue, unitValue, funds, income, properties)\n' +
   '/status              — current state\n' +
   '/sync                — check AWBW now and post if we missed a turn\n' +
   '/stop                — stop watching (mod)\n' +
@@ -2030,8 +2039,8 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
       await reply('No game bound yet. Run /game <link> first.');
       return;
     }
-    const metric = (args[0] || 'armyValue').replace(/[^a-zA-Z]/g, '');
-    const chart = await buildStatsChart(gg.gameId, metric);
+    const { metric, logScale } = parseStatsArgs(args);
+    const chart = await buildStatsChart(gg.gameId, metric, logScale);
     if (!chart) {
       await reply(
         'No turns recorded yet. Com Tower charts from its own record of the game rather than ' +
@@ -2145,7 +2154,7 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
 const DM_HELP =
   '📋 Com Tower — direct commands\n' +
   'A DM has no bound game, so name one:\n' +
-  '/stats <awbw link or game id> [metric]\n' +
+  '/stats <awbw link or game id> [metric] [log]\n' +
   '     — chart the game (armyValue, unitValue, funds, income, properties, unitCount)\n' +
   '/ping — connectivity check\n' +
   '\n' +
@@ -2172,8 +2181,8 @@ async function handleDmCommand(env: any, text: string): Promise<void> {
       await reply('Which game? /stats <awbw link or game id> [metric]');
       return;
     }
-    const metric = (args[1] || 'armyValue').replace(/[^a-zA-Z]/g, '');
-    const chart = await buildStatsChart(gameId, metric);
+    const { metric, logScale } = parseStatsArgs(args.slice(1));
+    const chart = await buildStatsChart(gameId, metric, logScale);
     if (!chart) {
       await reply(
         `No turns recorded for game ${gameId} yet. Com Tower charts from its own record ` +

@@ -32,6 +32,22 @@ function niceStep(range: number, targetTicks: number) {
   return (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * mag;
 }
 
+function linearTicks(top: number): number[] {
+  const step = niceStep(top, 6);
+  const ticks: number[] = [];
+  for (let v = 0; v <= top; v += step) ticks.push(v);
+  return ticks;
+}
+
+/** 1/2/5 x 10^n inside the range, thinned to every decade when that would crowd the axis. */
+function logTicks(bottom: number, top: number): number[] {
+  const ticks: number[] = [];
+  for (let mag = 10 ** Math.floor(Math.log10(bottom)); mag <= top; mag *= 10) {
+    for (const m of [1, 2, 5]) if (m * mag >= bottom && m * mag <= top) ticks.push(m * mag);
+  }
+  return ticks.length > 8 ? ticks.filter((t) => Math.log10(t) % 1 === 0) : ticks;
+}
+
 const fmtK = (v: number) => (v >= 1000 ? `${Math.round(v / 100) / 10}k` : String(Math.round(v)));
 
 const DASH_PATTERNS: number[][] = SERIES_DASHES.map((d) =>
@@ -50,6 +66,9 @@ export function buildChartPng(opts: {
   title: string;
   subtitle?: string;
   yLabel: string;
+  /** Log y axis: one player far ahead flattens everyone else on a linear one, while a log
+   *  axis keeps equal ratios equal apart at any size. */
+  logScale?: boolean;
   width?: number;
   height?: number;
 }): Buffer {
@@ -59,7 +78,11 @@ export function buildChartPng(opts: {
   // magnitudes between players, which is a bar chart.
   const samplesPerSeries = Math.max(0, ...opts.series.map((s) => s.points.length));
   if (samplesPerSeries === 1) return buildSnapshotPng(opts);
-  const series = opts.series.map((s) => ({ ...s, points: inTimeOrder(s.points) }));
+  // Nothing at or below zero has a place on a log axis.
+  const series = opts.series.map((s) => ({
+    ...s,
+    points: inTimeOrder(opts.logScale ? s.points.filter((p) => p.value > 0) : s.points),
+  }));
   // 2x for a crisp image on phone screens, where these are actually read.
   const SCALE = 2;
   const W = opts.width ?? 900;
@@ -95,13 +118,19 @@ export function buildChartPng(opts: {
   const domain = xDomain(all);
   const maxVal = Math.max(...all.map((p) => p.value));
   // Baseline at zero: this is a magnitude, and a truncated axis would overstate every swing.
-  const yTop = Math.max(1, maxVal * 1.08);
+  // A log axis has no zero, so it starts just under the smallest value instead.
+  const yTop = Math.max(1, maxVal * (opts.logScale ? 1.15 : 1.08));
+  const yBottom = opts.logScale ? Math.min(yTop / 10, Math.min(...all.map((p) => p.value)) / 1.15) : 0;
+  const ticks = opts.logScale ? logTicks(yBottom, yTop) : linearTicks(yTop);
 
   // Fractional day so several samples within one day (one per player's turn) stay in order
   // instead of stacking on the same x.
   const x = (p: Sample) =>
     M.left + ((p.day + p.turn - domain.start) / (domain.end - domain.start)) * plotW;
-  const y = (v: number) => M.top + plotH - (v / yTop) * plotH;
+  const y = (v: number) =>
+    M.top +
+    plotH -
+    (opts.logScale ? Math.log(v / yBottom) / Math.log(yTop / yBottom) : v / yTop) * plotH;
 
   ctx.textAlign = 'left';
   ctx.font = `15px ${FONT}`;
@@ -114,10 +143,9 @@ export function buildChartPng(opts: {
   }
 
   // Recessive grid: horizontal only, so it never competes with the lines.
-  const step = niceStep(yTop, 6);
   ctx.lineWidth = 1;
   ctx.font = `10px ${FONT}`;
-  for (let v = 0; v <= yTop; v += step) {
+  for (const v of ticks) {
     const gy = y(v);
     ctx.strokeStyle = GRID;
     ctx.beginPath();
@@ -134,7 +162,7 @@ export function buildChartPng(opts: {
   ctx.rotate(-Math.PI / 2);
   ctx.textAlign = 'center';
   ctx.fillStyle = INK_MUTED;
-  ctx.fillText(opts.yLabel, 0, 0);
+  ctx.fillText(opts.logScale ? `${opts.yLabel} · log scale` : opts.yLabel, 0, 0);
   ctx.restore();
 
   // X ticks on day boundaries, thinned so labels never collide.

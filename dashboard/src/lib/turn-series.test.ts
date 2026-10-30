@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { inTimeOrder, metricValue, samplesToSeries, turnFraction, xDomain, type TurnSampleDoc } from './turn-series.ts';
+import { dailySeries, inTimeOrder, metricValue, samplesToSeries, turnFraction, xDomain, type TurnSampleDoc } from './turn-series.ts';
 
 // Game 1744366's real player ids and turn order. players_order is 3, 4, 9, 10, not 1..4, and
 // id order (…363, …417, …554, …869) is not turn order — el_mero_mero sorts second, plays last.
@@ -131,4 +131,71 @@ test('army value is no point at all when funds are withheld', () => {
 
 test('stored metrics read straight through', () => {
   assert.equal(metricValue({ income: 22000 }, 'income'), 22000);
+});
+
+/** A sample in turn order where each player's army value is units + funds. */
+function armySample(day: number, turn: Name, army: Record<Name, [number, number]>, extra: Partial<Record<Name, object>> = {}) {
+  const units = Object.fromEntries(Object.entries(army).map(([n, [u]]) => [n, u])) as Record<Name, number>;
+  const withFunds = Object.fromEntries(
+    Object.entries(army).map(([n, [, f]]) => [n, { funds: f, ...extra[n as Name] }])
+  ) as Partial<Record<Name, object>>;
+  return sample(day, turn, units, withFunds);
+}
+
+test('daily points read each player after their own turn, not mid-day with unspent income', () => {
+  // Game 1751089, day 6: el_mero_mero's turn-start sample credited his fresh 15.5k income as
+  // army and put him above ridiculotron, who had 7.7k more on the board.
+  const a = (r: [number, number], o: [number, number], al: [number, number], m: [number, number]) =>
+    ({ ridiculotron: r, onetrickwolf: o, alecnexus: al, el_mero_mero: m });
+  const docs = [
+    armySample(6, 'ridiculotron', a([43700, 20600], [100, 0], [100, 0], [36000, 0])), // ridiculotron paid
+    armySample(6, 'onetrickwolf', a([62500, 1600], [100, 0], [100, 0], [36000, 0])), // ridiculotron built
+    armySample(6, 'alecnexus', a([62500, 1600], [100, 0], [100, 0], [36000, 0])),
+    armySample(6, 'el_mero_mero', a([62500, 1600], [100, 0], [100, 0], [36000, 15500])), // mero paid
+    armySample(7, 'ridiculotron', a([62500, 1600], [100, 0], [100, 0], [46800, 500])), // mero built
+  ];
+  const day6 = Object.fromEntries(dailySeries(docs, 'armyValue').map((s) => [s.label, s.points.map((p) => p.value)]));
+  assert.deepEqual(day6, { ridiculotron: [64100], onetrickwolf: [100], alecnexus: [100], el_mero_mero: [47300] });
+});
+
+test('a day still being played is left off', () => {
+  const all = v(1, 1, 1, 1);
+  const docs = [
+    sample(1, 'ridiculotron', all), sample(1, 'onetrickwolf', all), sample(1, 'alecnexus', all), sample(1, 'el_mero_mero', all),
+    sample(2, 'ridiculotron', all), sample(2, 'onetrickwolf', all), sample(2, 'alecnexus', all), sample(2, 'el_mero_mero', all),
+  ];
+  // Day 2's last turn has begun but not ended, so only day 1 is finished.
+  for (const s of dailySeries(docs, 'unitValue')) assert.deepEqual(s.points.map((p) => p.day), [1], s.label);
+  assert.deepEqual(dailySeries(docs.slice(0, 3), 'unitValue'), [], 'no day has finished yet');
+});
+
+test('an eliminated player does not hold the day open', () => {
+  const out = { el_mero_mero: { eliminated: true } };
+  const docs = [
+    sample(3, 'ridiculotron', v(1, 1, 1, 0), out),
+    sample(3, 'onetrickwolf', v(1, 1, 1, 0), out),
+    sample(3, 'alecnexus', v(2, 2, 2, 0), out),
+    // No el_mero_mero turn: AWBW skips it. Day 3 ends when ridiculotron's day 4 begins.
+    sample(4, 'ridiculotron', v(3, 3, 3, 0), out),
+  ];
+  const series = dailySeries(docs, 'unitValue');
+  assert.deepEqual(series.map((s) => [s.label, s.points.map((p) => p.day)]), [
+    ['ridiculotron', [3]], ['onetrickwolf', [3]], ['alecnexus', [3]], ['el_mero_mero', [3]],
+  ]);
+  assert.equal(series.find((s) => s.label === 'el_mero_mero')!.eliminated, true);
+});
+
+test('a missed stretch leaves a gap rather than borrowing a later turn', () => {
+  const docs = [
+    sample(1, 'ridiculotron', v(1, 1, 1, 1)),
+    sample(1, 'onetrickwolf', v(1, 1, 1, 1)),
+    sample(2, 'alecnexus', v(2, 2, 2, 2)), // bot was down from day 1 alecnexus to here
+    sample(2, 'el_mero_mero', v(3, 3, 3, 3)),
+    sample(3, 'ridiculotron', v(4, 4, 4, 4)),
+  ];
+  const byName = Object.fromEntries(dailySeries(docs, 'unitValue').map((s) => [s.label, s.points]));
+  // alecnexus's day-1 turn ended before any sample until his day-2 turn began, which has day-2 income.
+  assert.deepEqual(byName.alecnexus.map((p) => [p.day, p.value]), [[2, 3]]);
+  // ridiculotron's turns were both seen, so each day reads the sample right after them.
+  assert.deepEqual(byName.ridiculotron.map((p) => [p.day, p.value]), [[1, 1], [2, 2]]);
 });
