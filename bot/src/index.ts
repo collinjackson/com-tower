@@ -6,6 +6,15 @@ import http from 'http';
 import { FieldValue, FieldPath } from 'firebase-admin/firestore';
 import { createOwnership, type Ownership, type LeaseStore } from './ownership.js';
 import { parseTurnStats, recordTurnStats, type TurnStats } from './stats.js';
+import {
+  backfillFromReplay,
+  computeTurnTimes,
+  formatSpan,
+  rankBySlowest,
+  replayToSnapshot,
+  summarize,
+  type ClockSnapshot,
+} from './turn-times.js';
 
 /** once = first notification only; hourly = at most once per hour; undefined = every turn */
 export type NotifyFrequency = 'once' | 'hourly';
@@ -875,6 +884,149 @@ async function buildStatsChart(
   }
 }
 
+/** Every reading of a game's turn clock Com Tower has: its own turn samples, plus any replay
+ *  turns fetched earlier to fill gaps. */
+async function loadClockSnapshots(gameId: string): Promise<ClockSnapshot[]> {
+  const game = getFirestore().collection('games').doc(gameId);
+  const [stats, clock] = await Promise.all([
+    game.collection('turnStats').limit(2000).get(),
+    game.collection('turnClock').limit(2000).get(),
+  ]);
+  const snaps: ClockSnapshot[] = [];
+  for (const doc of stats.docs) {
+    const d = doc.data() as TurnStats & { at?: { toMillis?: () => number } };
+    if (typeof d.day !== 'number' || !d.players) continue;
+    snaps.push({ ...turnStatsToClock(d), atMs: d.at?.toMillis?.(), source: 'notify' });
+  }
+  for (const doc of clock.docs) snaps.push({ ...(doc.data() as ClockSnapshot), source: 'replay' });
+  return snaps;
+}
+
+function turnStatsToClock(s: TurnStats): Omit<ClockSnapshot, 'source'> {
+  const players: ClockSnapshot['players'] = {};
+  for (const [pid, p] of Object.entries(s.players)) {
+    players[pid] = {
+      username: p.username,
+      countryCode: p.countryCode,
+      coName: p.coName,
+      order: p.order,
+      eliminated: p.eliminated,
+      turnStart: p.turnStart,
+    };
+  }
+  return { day: s.day, turnPlayerId: s.turnPlayerId, players };
+}
+
+/** One turn of the replay. Only reached for turns Com Tower has no reading of. */
+async function fetchReplayTurn(gameId: string, index: number): Promise<ClockSnapshot | undefined> {
+  const res = await fetch(`${AWBW_HTTP_BASE}/api/game/load_replay.php`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json;charset=UTF-8',
+      Origin: 'https://awbw.amarriner.com',
+      Referer: 'https://awbw.amarriner.com',
+    },
+    body: JSON.stringify({ gameId: Number(gameId), turn: index, initial: index === 0 }),
+  });
+  if (!res.ok) return undefined;
+  const data = (await res.json().catch(() => undefined)) as any;
+  if (!data || data.err) return undefined;
+  return replayToSnapshot(data);
+}
+
+/** Who is holding up the game: every player's turn lengths, slowest first, as a caption and
+ *  (when the renderer is reachable) a chart in each player's army colour. */
+async function buildTurnTimeReport(
+  gameId: string,
+  referenceMs: number | null = DEFAULT_REMINDER_MS
+): Promise<
+  | { caption: string; attachment?: { dataB64: string; contentType: string; filename: string } }
+  | undefined
+> {
+  const snaps = await loadClockSnapshots(gameId);
+  // A live read: it times the current turn, and the whole round before it.
+  const live = await resolveCurrentTurn(gameId).catch(() => undefined);
+  if (live?.stats) snaps.push({ ...turnStatsToClock(live.stats), source: 'live' });
+  if (snaps.length === 0) return undefined;
+
+  const added = await backfillFromReplay(snaps, (i) => fetchReplayTurn(gameId, i)).catch((err) => {
+    console.warn(`[turntime] replay backfill failed for ${gameId}`, err);
+    return [] as ClockSnapshot[];
+  });
+  if (added.length) {
+    console.log(`[turntime] game ${gameId}: filled ${added.length} turn(s) from the replay`);
+    const col = getFirestore().collection('games').doc(gameId).collection('turnClock');
+    await Promise.all(
+      added.map((s) => {
+        const { source: _source, ...doc } = s;
+        return col
+          .doc(`d${String(s.day).padStart(4, '0')}-p${s.turnPlayerId || 'x'}`)
+          .set({ ...doc, fetchedAt: FieldValue.serverTimestamp() })
+          .catch((err) => console.warn('[turntime] turnClock write failed', err));
+      })
+    );
+  }
+
+  const report = computeTurnTimes([...snaps, ...added], Date.now());
+  if (report.timedTurns === 0 && !report.players.some((p) => p.currentMs)) return undefined;
+  const ranked = rankBySlowest(report.players);
+
+  const lines = ranked.map((p) => {
+    const s = summarize(p.turns.map((t) => t.ms));
+    const who = `${p.username}${p.coName ? ` (${p.coName})` : ''}${p.eliminated ? ' — out' : ''}`;
+    const nums = s
+      ? `avg ${formatSpan(s.mean)} · med ${formatSpan(s.median)} · min ${formatSpan(s.min)} · max ${formatSpan(s.max)} · ${s.count} turn${s.count === 1 ? '' : 's'}`
+      : 'no finished turns timed';
+    const now = p.currentMs !== undefined ? `\n   ⏳ on the clock ${formatSpan(p.currentMs)}` : '';
+    return `${who}\n   ${nums}${now}`;
+  });
+  const span =
+    report.firstDay && report.currentDay
+      ? `Day ${report.firstDay}–${report.currentDay}, ${report.timedTurns} turns timed`
+      : `${report.timedTurns} turns timed`;
+  const caption = `⏱️ Turn time, slowest first (${span})\n\n${lines.join('\n')}\n\n${gameLink(gameId)}`;
+
+  let attachment: { dataB64: string; contentType: string; filename: string } | undefined;
+  if (renderUrl) {
+    try {
+      const gameName = await loadGameName(gameId);
+      const bypass = process.env.RENDER_BYPASS_TOKEN;
+      const res = await fetch(new URL('/api/turntime/render', renderUrl).toString(), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(bypass ? { 'x-vercel-protection-bypass': bypass, cookie: `x-vercel-protection-bypass=${bypass}` } : {}),
+        },
+        body: JSON.stringify({
+          title: `Turn time — ${gameName || `Game ${gameId}`}`,
+          subtitle: `${span} · slowest average first`,
+          referenceMs,
+          players: ranked.map((p) => ({
+            name: p.username,
+            co: p.coName,
+            army: p.countryCode,
+            eliminated: p.eliminated,
+            turnsMs: p.turns.map((t) => t.ms),
+            currentMs: p.currentMs,
+          })),
+        }),
+      });
+      if (res.ok) {
+        attachment = {
+          dataB64: Buffer.from(await res.arrayBuffer()).toString('base64'),
+          contentType: 'image/png',
+          filename: `awbw-${gameId}-turntime.png`,
+        };
+      } else {
+        console.warn(`[turntime] render failed ${res.status}`);
+      }
+    } catch (err) {
+      console.warn('[turntime] render fetch failed', err);
+    }
+  }
+  return { caption, attachment };
+}
+
 // Track recent NextTurn events to prevent duplicate processing
 const recentNextTurns = new Map<string, number>(); // key: `${gameId}-${day}-${playerId}`, value: timestamp
 const NEXT_TURN_DEDUP_WINDOW_MS = 5000; // Ignore duplicate NextTurn events within 5 seconds
@@ -1595,6 +1747,7 @@ const HELP_TEXT =
   '/remind <dur|off>    — nudge the current player if they sit on their turn (mod)\n' +
   '/language <lang>     — your turn pings in another language (e.g. Klingon, Esperanto)\n' +
   '/stats [metric] [log] — chart the game so far (armyValue, unitValue, funds, income, properties)\n' +
+  '/turntime            — how long each player takes per turn, slowest first\n' +
   '/status              — current state\n' +
   '/sync                — check AWBW now and post if we missed a turn\n' +
   '/stop                — stop watching (mod)\n' +
@@ -2052,6 +2205,23 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
     return;
   }
 
+  if (cmd === '/turntime' || cmd === '/clock' || cmd === '/thinktime') {
+    if (!gg.gameId) {
+      await reply('No game bound yet. Run /game <link> first.');
+      return;
+    }
+    const report = await buildTurnTimeReport(gg.gameId, reminderThresholdMs(gg)).catch((err) => {
+      console.warn('[turntime] failed', err);
+      return undefined;
+    });
+    if (!report) {
+      await reply('No turns timed yet — Com Tower needs to see at least one turn change first.');
+      return;
+    }
+    await sendGroupRaw(groupId, report.caption, undefined, report.attachment);
+    return;
+  }
+
   if (cmd === '/showcase') {
     if (!isGgMod(gg, senderAci)) {
       await reply('Only a mod can change showcase opt-in.');
@@ -2156,6 +2326,7 @@ const DM_HELP =
   'A DM has no bound game, so name one:\n' +
   '/stats <awbw link or game id> [metric] [log]\n' +
   '     — chart the game (armyValue, unitValue, funds, income, properties, unitCount)\n' +
+  '/turntime <awbw link or game id> — how long each player takes per turn\n' +
   '/ping — connectivity check\n' +
   '\n' +
   'Everything else lives in a group chat: add Com Tower there and run /game <link>.';
@@ -2191,6 +2362,23 @@ async function handleDmCommand(env: any, text: string): Promise<void> {
       return;
     }
     await sendDirect(to, chart.caption, chart.attachment);
+    return;
+  }
+  if (cmd === '/turntime' || cmd === '/clock' || cmd === '/thinktime') {
+    const gameId = extractGameIdFromArg(args[0]);
+    if (!gameId) {
+      await reply('Which game? /turntime <awbw link or game id>');
+      return;
+    }
+    const report = await buildTurnTimeReport(gameId).catch((err) => {
+      console.warn('[turntime] failed', err);
+      return undefined;
+    });
+    if (!report) {
+      await reply(`No turns timed for game ${gameId} yet.`);
+      return;
+    }
+    await sendDirect(to, report.caption, report.attachment);
     return;
   }
   await reply(DM_HELP);
