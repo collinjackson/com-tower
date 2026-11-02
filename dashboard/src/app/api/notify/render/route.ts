@@ -13,6 +13,7 @@ import {
   type UsedTopic,
 } from '@/lib/caption-topics';
 import { DEFAULT_JUDGE_MODEL, completionParams } from '@/lib/llm-params';
+import { holoGlow } from '@/lib/armies';
 
 // AWBW country code -> army name (for voice flavor). Unknown codes just omit the name.
 const ARMY_NAMES: Record<string, string> = {
@@ -146,17 +147,6 @@ const STYLES = [
   'bone-dry deadpan humor',
 ];
 
-// AWBW faction glow colors (approx palette). The hologram is rendered in the
-// army's own color instead of a fixed teal.
-const ARMY_COLOR: Record<string, [number, number, number]> = {
-  os: [255, 120, 40], bm: [70, 130, 240], ge: [70, 190, 90], yc: [245, 215, 70],
-  bh: [125, 90, 150], rf: [230, 60, 60], gs: [150, 160, 170], bd: [175, 115, 60],
-  ab: [240, 170, 60], js: [60, 200, 150], ci: [80, 170, 230], pc: [245, 130, 200],
-  tg: [40, 200, 190], pl: [170, 90, 220], ar: [170, 210, 70], wn: [235, 240, 245],
-  aa: [90, 200, 235], ne: [70, 70, 90], sc: [190, 200, 210], uw: [125, 85, 55],
-};
-const DEFAULT_COLOR: [number, number, number] = [130, 240, 255]; // teal fallback
-
 // Per-country facing — all units of a country face the same way (the barrel/
 // front reaches the left edge of the cell for these; everyone else faces right).
 // Used to put the hologram's lead room on the side it's looking.
@@ -228,14 +218,6 @@ async function storeSentCaption(
   }
 }
 
-// Brighten a faction color into a glow: scale so the brightest channel hits
-// ~235, preserving hue. Dark armies (Black Hole, Noir) become vivid/ghostly
-// glows instead of vanishing, so everyone stays holographic on black.
-function glowColor(C: [number, number, number]): [number, number, number] {
-  const s = 235 / Math.max(...C);
-  return C.map((c) => Math.min(255, Math.round(c * s))) as [number, number, number];
-}
-
 // Recolor curve + background + grain for a faction's hologram. Glow-on-black:
 // per channel, luminance L maps linearly from a dark tinted FLOOR (L=0) to a
 // bright HIGHLIGHT (L=255), so out_c = A*L + B. The highlight is a VIVID version
@@ -245,7 +227,7 @@ function glowColor(C: [number, number, number]): [number, number, number] {
 // stay saturated). The dark field + per-pixel gradient give the projection depth.
 const FLOOR_FRAC = 0.22; // dark-tint floor as a fraction of the glow color
 function holoSpec(code?: string) {
-  const G = glowColor((code && ARMY_COLOR[code]) || DEFAULT_COLOR);
+  const G = holoGlow(code);
   const Gv = G.map((c) => Math.min(255, Math.round((c * 255) / Math.max(...G))));
   const blueDom = (Gv[2] - (Gv[0] + Gv[1]) / 2) / 255; // +cool .. -warm
   const w = Math.max(0, Math.min(0.45, 0.22 + 0.3 * blueDom));

@@ -26,6 +26,29 @@ export const ARMY_COLORS: Record<string, string> = {
 
 export const DEFAULT_ARMY_COLOR = '#7dd08f';
 
+// Faction glow colours for the turn-notification holograms. Unlike ARMY_COLORS these are
+// tuned to glow on black, so they are also what anything else drawn on a dark surface should
+// use for a player: Cobalt Ice and Noir Eclipse stay readable instead of sinking into it.
+export const HOLO_ARMY_RGB: Record<string, [number, number, number]> = {
+  os: [255, 120, 40], bm: [70, 130, 240], ge: [70, 190, 90], yc: [245, 215, 70],
+  bh: [125, 90, 150], rf: [230, 60, 60], gs: [150, 160, 170], bd: [175, 115, 60],
+  ab: [240, 170, 60], js: [60, 200, 150], ci: [80, 170, 230], pc: [245, 130, 200],
+  tg: [40, 200, 190], pl: [170, 90, 220], ar: [170, 210, 70], wn: [235, 240, 245],
+  aa: [90, 200, 235], ne: [70, 70, 90], sc: [190, 200, 210], uw: [125, 85, 55],
+};
+const HOLO_DEFAULT_RGB: [number, number, number] = [130, 240, 255]; // teal fallback
+
+/** An army's hologram glow: its colour scaled until the brightest channel hits ~235, keeping
+ *  the hue. Dark armies (Black Hole, Noir) become vivid glows instead of vanishing on black. */
+export function holoGlow(code?: string): [number, number, number] {
+  const c = (code && HOLO_ARMY_RGB[code]) || HOLO_DEFAULT_RGB;
+  const s = 235 / Math.max(...c);
+  return c.map((v) => Math.min(255, Math.round(v * s))) as [number, number, number];
+}
+
+export const holoGlowHex = (code?: string) =>
+  '#' + holoGlow(code).map((v) => v.toString(16).padStart(2, '0')).join('');
+
 const hexToRgb = (h: string): [number, number, number] => [
   parseInt(h.slice(1, 3), 16),
   parseInt(h.slice(3, 5), 16),
