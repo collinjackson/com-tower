@@ -1,11 +1,18 @@
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore, type Firestore } from 'firebase-admin/firestore';
 import WebSocket from 'ws';
-import { GoogleAuth, IdTokenClient } from 'google-auth-library';
 import http from 'http';
+import {
+  createBackendFromEnv,
+  messagingPlatform,
+  platformOf,
+  SignalCliRestBackend,
+  type MessagingBackend,
+} from './messaging/index.js';
 import { FieldValue, FieldPath } from 'firebase-admin/firestore';
 import { createOwnership, type Ownership, type LeaseStore } from './ownership.js';
 import { parseTurnStats, recordTurnStats, type TurnStats } from './stats.js';
+import { fetchStrategyNote } from './strategy-note.js';
 import {
   backfillFromReplay,
   computeTurnTimes,
@@ -66,14 +73,22 @@ type RenderPayload = {
   captionId?: string;
 };
 
-const auth = new GoogleAuth();
-// Minimal request surface the bridge callers actually use ({ data, status }). Both a Google
-// IdTokenClient and the plain-fetch fallback below satisfy it.
-interface HttpRequester {
-  request(opts: any): Promise<{ data: any; status: number; statusText?: string }>;
-  getRequestHeaders(url?: string): Promise<any>;
+// The chat platform this worker serves (MESSAGING_PLATFORM, default "signal"), and how it reaches
+// it. Group games carry the platform that bound them; this worker only watches its own.
+const PLATFORM = messagingPlatform();
+const messaging: MessagingBackend | null = createBackendFromEnv();
+function requireMessaging(): MessagingBackend {
+  if (!messaging) throw new Error('Messaging bridge not configured (SIGNAL_CLI_URL / SIGNAL_BOT_NUMBER)');
+  return messaging;
 }
-const idTokenClients = new Map<string, HttpRequester>();
+/** The signal-cli-rest bridge, for endpoints outside the backend interface; null otherwise. */
+function signalCliBridge(): SignalCliRestBackend | null {
+  return messaging instanceof SignalCliRestBackend ? messaging : null;
+}
+/** Is this group game this worker's to watch? */
+function isOurPlatform(gg: { platform?: string } | undefined): boolean {
+  return platformOf(gg) === PLATFORM;
+}
 const renderUrl = process.env.NOTIFY_RENDER_URL;
 // Which games this replica is responsible for (SCALING_MODE: singleton|leader|shard). Set in main().
 let ownership: Ownership;
@@ -150,74 +165,13 @@ function readJsonBody<T>(req: http.IncomingMessage): Promise<T> {
   });
 }
 
-// Plain-HTTP requester for a bridge reached over a trusted private network (the VM-hosted
-// bridge) or a local stub (load tests) — no Google OIDC. Shapes responses/errors like the
-// google-auth-library client the callers expect.
-function makePlainRequester(): HttpRequester {
-  return {
-    async request(opts: any) {
-      const method = (opts.method || 'GET').toUpperCase();
-      const headers: Record<string, string> = { ...(opts.headers || {}) };
-      let body: string | undefined;
-      if (opts.data !== undefined) {
-        body = typeof opts.data === 'string' ? opts.data : JSON.stringify(opts.data);
-        if (!headers['Content-Type'] && !headers['content-type']) headers['Content-Type'] = 'application/json';
-      }
-      const res = await fetch(opts.url, {
-        method,
-        headers,
-        body,
-        signal: opts.timeout ? AbortSignal.timeout(opts.timeout) : undefined,
-      });
-      const text = await res.text();
-      let data: any = text;
-      try { data = text ? JSON.parse(text) : undefined; } catch { /* non-JSON, keep text */ }
-      if (!res.ok) {
-        const err: any = new Error(`Request failed ${res.status} ${res.statusText}`);
-        err.response = { status: res.status, data };
-        throw err;
-      }
-      return { data, status: res.status, statusText: res.statusText };
-    },
-    // Plain/local bridge needs no auth header.
-    async getRequestHeaders() {
-      return {};
-    },
-  };
-}
-
-async function getIdTokenClient(url: string): Promise<HttpRequester> {
-  if (idTokenClients.has(url)) return idTokenClients.get(url)!;
-  // Bypass OIDC for plain-HTTP/local bridges; opt in for a private-network https bridge too.
-  const noAuth = process.env.SIGNAL_CLI_NO_AUTH === '1' || /^http:\/\//i.test(url);
-  const client: HttpRequester = noAuth ? makePlainRequester() : await auth.getIdTokenClient(url);
-  idTokenClients.set(url, client);
-  return client;
-}
-
 async function getGroupIdByName(groupName: string): Promise<string> {
-  const bridgeUrl = process.env.SIGNAL_CLI_URL;
-  const botNumber = process.env.SIGNAL_BOT_NUMBER;
-  if (!bridgeUrl || !botNumber) {
-    throw new Error('Signal bridge not configured');
-  }
-
-  const client = await getIdTokenClient(bridgeUrl);
-  const numberPath = encodeURIComponent(botNumber);
-  const res = await client.request({
-    url: `${bridgeUrl}/v1/groups/${numberPath}`,
-    method: 'GET',
-    headers: { 'Content-Type': 'application/json' },
-  });
-  const groups = (res as any)?.data || [];
-  if (!Array.isArray(groups)) {
-    throw new Error(`Groups list response is not an array: ${JSON.stringify(groups)}`);
-  }
+  const groups = await requireMessaging().listGroups();
 
   // Simple exact match by name
   for (const group of groups) {
     if (group.name === groupName) {
-      const groupId = group.id || (group.internal_id ? `group.${group.internal_id}` : null);
+      const groupId = group.id || null;
       if (groupId) {
         console.log(`Found group "${groupName}" with id: ${groupId}`);
         return groupId;
@@ -723,6 +677,17 @@ async function buildMessage(
   const enableFun = !!meta.funEnabled;
   const effectivePlayerName = meta.playerName || meta.socketPlayerName;
 
+  // A strategy note about the position, when a STRATEGY_NOTE_URL service is configured, in place
+  // of the usual caption. Reminders keep their nudge. Any failure falls through to the caption.
+  if (!meta.reminderElapsed) {
+    const strategy = await fetchStrategyNote(gameId, effectivePlayerName);
+    if (strategy) {
+      const nameChunk = meta.gameName ? `(${meta.gameName}) ` : '';
+      const who = effectivePlayerName ? `${effectivePlayerName}, you're up.` : 'New turn.';
+      return { text: `${meta.day ? `Day ${meta.day}. ` : ''}${who} ${strategy.text} ${nameChunk}${link}` };
+    }
+  }
+
   if (renderUrl) {
     try {
       const bypass = process.env.RENDER_BYPASS_TOKEN;
@@ -1030,21 +995,11 @@ async function buildTurnTimeReport(
 // Track recent NextTurn events to prevent duplicate processing
 const recentNextTurns = new Map<string, number>(); // key: `${gameId}-${day}-${playerId}`, value: timestamp
 const NEXT_TURN_DEDUP_WINDOW_MS = 5000; // Ignore duplicate NextTurn events within 5 seconds
-const SIGNAL_RECEIVE_POLL_MS = 5000; // Poll for incoming Signal messages every 5 seconds
-
 // ── Receive diagnostics ──────────────────────────────────────────────────────
-// The bridge can run in poll (normal/native) mode where GET /v1/receive returns an
-// array, or json-rpc mode where receiving is a WebSocket. We support both and expose
-// what we've seen via the /debug/receive endpoint so receive can be verified without
-// Cloud Run log access.
-type ReceiverMode = 'unknown' | 'poll' | 'ws' | 'off';
-let receiverMode: ReceiverMode = 'unknown';
-let receiverActive = false; // is this replica currently running the Signal receiver?
+// What the receiver has seen, exposed via the /debug/receive endpoint so receive can be
+// verified without Cloud Run log access. (How it receives is the messaging backend's business.)
+let receiverActive = false; // is this replica currently running the receiver?
 let snapshotReady = false; // has the groupGames listener attached (initial snapshot received)?
-let receiverWs: WebSocket | null = null;
-let pollTimer: ReturnType<typeof setInterval> | null = null;
-let wsFailCount = 0;
-let lastReceiveError: string | null = null;
 let lastReceiveAt: number | null = null;
 const recentRawReceives: Array<{ at: string; raw: unknown }> = [];
 const MAX_RECENT_RECEIVES = 25;
@@ -1426,10 +1381,7 @@ async function runHourlyReminders(): Promise<void> {
 }
 
 async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId: string, abortSignal?: AbortSignal) {
-  const bridgeUrl = process.env.SIGNAL_CLI_URL;
-  const botNumber = process.env.SIGNAL_BOT_NUMBER;
-  if (!bridgeUrl) throw new Error('SIGNAL_CLI_URL not set');
-  if (!botNumber) throw new Error('SIGNAL_BOT_NUMBER not set');
+  const backend = requireMessaging();
 
   // Normalize DM handle to include leading '+' if missing (bridge rejects bare numbers)
   const normalizedHandle =
@@ -1445,8 +1397,6 @@ async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId
   if (abortSignal?.aborted) {
     throw new Error('Request aborted');
   }
-
-  const client = await getIdTokenClient(bridgeUrl);
 
   let messageText = payload.text;
   
@@ -1492,18 +1442,10 @@ async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId
     }
   }
 
-  const baseData: any = {
-    number: botNumber,
+  const outgoing = {
     message: messageText,
+    mentions: mentionPlaceholders.map((m) => ({ author: m.number, start: m.start, length: m.length })),
   };
-  if (mentionPlaceholders.length > 0) {
-    baseData.mentions = mentionPlaceholders.map((m) => ({
-      name: m.name,
-      number: m.number,
-      start: m.start,
-      length: m.length,
-    }));
-  }
   // Image sending temporarily disabled to troubleshoot basic chat sending
   // if (payload.imageData && payload.imageContentType) {
   //   console.log(
@@ -1521,24 +1463,12 @@ async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId
     if (!rawId) {
       throw new Error('Group subscriber missing groupId.');
     }
-    // signal-cli-rest-api (v2/send) sends to a group by putting "group.<base64(internalId)>"
-    // in the recipients array. Received messages give us groupInfo.groupId = the raw internal_id
-    // (base64 of the group master id); the create/list "id" field is already "group.<base64>".
-    const groupRecipient = rawId.startsWith('group.')
-      ? rawId
-      : `group.${Buffer.from(rawId, 'utf8').toString('base64')}`;
+    const groupRecipient = rawId;
     console.log(`[sendSignal] Group send to ${groupRecipient.substring(0, 60)}...`);
 
     const doGroupSend = async () => {
       if (abortSignal?.aborted) throw new Error('Request aborted');
-      return client.request({
-        url: `${bridgeUrl}/v2/send`,
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        data: { ...baseData, recipients: [groupRecipient] },
-        timeout: 30000,
-        signal: abortSignal,
-      });
+      return backend.sendToGroup(rawId, outgoing, { timeoutMs: 30000, signal: abortSignal });
     };
 
     try {
@@ -1570,14 +1500,7 @@ async function sendSignal(recipient: Subscriber, payload: RenderPayload, patchId
       normalizedHandle.startsWith('+') || normalizedHandle.startsWith('group.')
         ? normalizedHandle
         : `+${normalizedHandle}`;
-    return client.request({
-      url: `${bridgeUrl}/v2/send`,
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      data: { ...baseData, recipients: [dmRecipient] },
-      timeout: 30000,
-      signal: abortSignal,
-    });
+    return backend.sendToPerson(dmRecipient, outgoing, { timeoutMs: 30000, signal: abortSignal });
   };
   try {
     return await doSendDm();
@@ -1614,11 +1537,7 @@ async function sendGroupRaw(
   mentions?: Array<{ author: string; start: number; length: number }>,
   attachment?: { dataB64: string; contentType: string; filename: string }
 ): Promise<number | undefined> {
-  // v2/send takes the group as "group.<base64(internalId)>" in recipients.
-  const groupRecipient = groupId.startsWith('group.')
-    ? groupId
-    : `group.${Buffer.from(groupId, 'utf8').toString('base64')}`;
-  return sendToRecipient(groupRecipient, message, mentions, attachment);
+  return requireMessaging().sendToGroup(groupId, { message, mentions, attachment });
 }
 
 /** Reply straight to one person. A DM recipient is their number (or, when Signal withholds
@@ -1628,47 +1547,7 @@ async function sendDirect(
   message: string,
   attachment?: { dataB64: string; contentType: string; filename: string }
 ): Promise<number | undefined> {
-  const normalized = /^\d+$/.test(recipient) ? `+${recipient}` : recipient;
-  return sendToRecipient(normalized, message, undefined, attachment);
-}
-
-async function sendToRecipient(
-  recipient: string,
-  message: string,
-  mentions?: Array<{ author: string; start: number; length: number }>,
-  attachment?: { dataB64: string; contentType: string; filename: string }
-): Promise<number | undefined> {
-  const bridgeUrl = process.env.SIGNAL_CLI_URL;
-  const botNumber = process.env.SIGNAL_BOT_NUMBER;
-  if (!bridgeUrl || !botNumber) throw new Error('Signal bridge not configured');
-  const groupRecipient = recipient;
-  const client = await getIdTokenClient(bridgeUrl);
-  const data: any = { number: botNumber, message, recipients: [groupRecipient] };
-  if (mentions && mentions.length > 0) data.mentions = mentions;
-  if (attachment?.dataB64) {
-    // signal-cli-rest-api base64_attachments item: data:<mime>;filename=<name>;base64,<data>
-    data.base64_attachments = [
-      `data:${attachment.contentType};filename=${attachment.filename};base64,${attachment.dataB64}`,
-    ];
-  }
-  const res = await client.request({
-    url: `${bridgeUrl}/v2/send`,
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    data,
-    timeout: 45000,
-  });
-  // signal-cli-rest-api answers { "timestamp": <ms> } (number or string depending on version).
-  const ts = Number((res?.data as any)?.timestamp);
-  if (!(Number.isFinite(ts) && ts > 0)) {
-    // Not fatal — the message went out — but without it no reaction can ever be matched back
-    // to this post and it can never reach the gallery. Loud, because it would be invisible.
-    console.warn(
-      `[gg] send returned no usable timestamp (reactions/showcase disabled for this post): ${JSON.stringify(res?.data)?.slice(0, 200)}`
-    );
-    return undefined;
-  }
-  return ts;
+  return requireMessaging().sendToPerson(recipient, { message, attachment });
 }
 
 async function sendGroupReply(groupId: string, text: string): Promise<void> {
@@ -1712,6 +1591,7 @@ async function joinViaLink(
           await ref.set(
             {
               groupId,
+              platform: PLATFORM,
               status: snap.exists ? (snap.data() as GroupGame).status || 'pending' : 'pending',
               mods: [sender.aci],
               createdBy: { aci: sender.aci, number: sender.number || null },
@@ -1763,6 +1643,9 @@ type PlayerMapping = {
 };
 type GroupGame = {
   groupId: string;
+  /** Chat platform the group is on (see messaging/). Absent on games bound before it was
+   *  recorded, which are all Signal's. */
+  platform?: string;
   gameId?: string;
   gameName?: string;
   status: 'pending' | 'active' | 'stopped' | 'ended';
@@ -1860,7 +1743,7 @@ async function stampCaptionSend(
  *  Stored as reactions[reactorAci] = emoji — one per person, so a changed reaction replaces
  *  and a removed one deletes, with no double-counting. */
 async function handleSignalReaction(env: any, reaction: any): Promise<void> {
-  const botNumber = process.env.SIGNAL_BOT_NUMBER;
+  const botNumber = messaging?.botId;
   const targetAuthor = reaction.targetAuthorNumber || reaction.targetAuthor;
   // Only reactions to Com Tower's own messages — players reacting to each other is not ours.
   if (!botNumber || !targetAuthor || targetAuthor !== botNumber) return;
@@ -1951,6 +1834,13 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
 
   const snap = await ggRef(groupId).get();
   const gg = snap.exists ? ({ ...(snap.data() as GroupGame), groupId }) : undefined;
+  // A command arrived here, so the group is on this worker's platform. Record it on a game bound
+  // before platforms were recorded, so only this platform's worker watches it.
+  if (gg && !gg.platform) {
+    await ggRef(groupId).set({ platform: PLATFORM }, { merge: true }).catch((e) =>
+      console.error('[gg] platform tag failed', e)
+    );
+  }
 
   if (cmd === '/game') {
     const gameId = extractGameIdFromArg(args[0]);
@@ -1980,6 +1870,7 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
     await ggRef(groupId).set(
       {
         groupId,
+        platform: PLATFORM,
         gameId,
         gameName: gameName || null,
         status: 'active',
@@ -2441,191 +2332,26 @@ async function handleSignalIncoming(item: any): Promise<void> {
   });
 }
 
-/** Record a raw received item for diagnostics, normalize json-rpc wrapping, and route it. */
-async function handleRawReceive(raw: any): Promise<void> {
-  recordRaw(raw);
-  // json-rpc WS sends { jsonrpc, method: 'receive', params: { envelope, account } }.
-  // poll/GET sends { envelope, account }. Normalize to the latter.
-  const item = raw && raw.method === 'receive' && raw.params ? raw.params : raw;
+/** Record a received item for diagnostics and route it. */
+async function handleIncomingItem(item: any): Promise<void> {
+  recordRaw(item);
   await handleSignalIncoming(item).catch((err) =>
     console.error('[bot] Error handling incoming message:', err)
   );
 }
 
-/** One GET poll. Returns false if the bridge doesn't support poll-mode receive
- *  (non-array body, 400 json-rpc hint, or 404) so the caller can switch to WS. */
-async function pollSignalMessagesOnce(): Promise<boolean> {
-  const bridgeUrl = process.env.SIGNAL_CLI_URL!;
-  const botNumber = process.env.SIGNAL_BOT_NUMBER!;
-  try {
-    const client = await getIdTokenClient(bridgeUrl);
-    const numberPath = encodeURIComponent(botNumber);
-    const res = await client.request({
-      url: `${bridgeUrl}/v1/receive/${numberPath}`,
-      method: 'GET',
-      timeout: 10000,
-    });
-    const messages = (res as any)?.data;
-    if (!Array.isArray(messages)) {
-      lastReceiveError = `poll: non-array body (${typeof messages}) — bridge likely in json-rpc mode`;
-      console.warn(`[bot] ${lastReceiveError}; switching to ws receiver`);
-      return false;
-    }
-    if (messages.length > 0) {
-      console.log(`[bot] Received ${messages.length} Signal message(s) via poll`);
-      for (const item of messages) await handleRawReceive(item);
-    }
-    return true;
-  } catch (err: any) {
-    const status = err?.response?.status;
-    const body =
-      typeof err?.response?.data === 'string'
-        ? err.response.data
-        : JSON.stringify(err?.response?.data || '');
-    const msg = String(err?.message || err);
-    if (status === 404 || msg.includes('404') || msg.includes('Not Found')) {
-      lastReceiveError = 'poll: 404 — trying ws receiver';
-      console.warn('[bot] Signal receive GET 404; switching to ws receiver');
-      return false;
-    }
-    if (status === 400 && /websocket|json[\s_-]?rpc/i.test(body)) {
-      lastReceiveError = `poll: 400 json-rpc hint — switching to ws (${body.substring(0, 120)})`;
-      console.warn('[bot] Signal receive GET says json-rpc/websocket; switching to ws receiver');
-      return false;
-    }
-    lastReceiveError = `poll: ${msg}`;
-    console.warn('[bot] Signal receive poll failed (will retry):', msg);
-    return true; // transient — stay in poll mode
-  }
-}
-
-function startPollReceiver(): void {
-  receiverMode = 'poll';
-  console.log('[bot] receive mode: poll (GET /v1/receive)');
-  if (pollTimer) clearInterval(pollTimer);
-  const tick = async () => {
-    const ok = await pollSignalMessagesOnce().catch((e) => {
-      lastReceiveError = `poll: ${String(e?.message || e)}`;
-      return true;
-    });
-    if (ok === false) {
-      if (pollTimer) {
-        clearInterval(pollTimer);
-        pollTimer = null;
-      }
-      startWsReceiver();
-    }
-  };
-  pollTimer = setInterval(tick, SIGNAL_RECEIVE_POLL_MS);
-  tick(); // immediate first poll
-}
-
-function startWsReceiver(): void {
-  receiverMode = 'ws';
-  const bridgeUrl = process.env.SIGNAL_CLI_URL!;
-  const botNumber = process.env.SIGNAL_BOT_NUMBER!;
-  const numberPath = encodeURIComponent(botNumber);
-  const wsUrl = `${bridgeUrl.replace(/^http/i, 'ws')}/v1/receive/${numberPath}`;
-
-  (async () => {
-    let authorization: string | undefined;
-    try {
-      const client = await getIdTokenClient(bridgeUrl);
-      const hdrs: any = await client.getRequestHeaders(bridgeUrl);
-      authorization =
-        hdrs?.Authorization ||
-        hdrs?.authorization ||
-        (typeof hdrs?.get === 'function' ? hdrs.get('Authorization') : undefined);
-    } catch (e) {
-      console.error('[bot] ws auth header fetch failed', e);
-    }
-
-    console.log(`[bot] receive mode: ws — connecting ${wsUrl}`);
-    const ws = new WebSocket(wsUrl, authorization ? { headers: { Authorization: authorization } } : undefined);
-    receiverWs = ws;
-    let opened = false;
-
-    ws.on('open', () => {
-      opened = true;
-      wsFailCount = 0;
-      lastReceiveError = null;
-      console.log('[bot] receive websocket open');
-    });
-    ws.on('message', (data) => {
-      try {
-        const parsed = JSON.parse(data.toString());
-        handleRawReceive(parsed).catch(() => {});
-      } catch (e) {
-        console.warn('[bot] ws message parse error', e);
-      }
-    });
-    ws.on('error', (err: any) => {
-      lastReceiveError = `ws: ${String(err?.message || err)}`;
-      console.error('[bot] receive websocket error:', err?.message || err);
-    });
-    ws.on('close', (code) => {
-      receiverWs = null;
-      console.warn(`[bot] receive websocket closed (code=${code}, opened=${opened})`);
-      if (receiverMode !== 'ws') return;
-      if (!opened) wsFailCount++;
-      if (wsFailCount >= 3) {
-        wsFailCount = 0;
-        console.warn('[bot] ws failed to connect repeatedly; falling back to poll receiver');
-        startPollReceiver();
-        return;
-      }
-      setTimeout(() => {
-        if (receiverMode === 'ws') startWsReceiver();
-      }, 3000);
-    });
-  })();
-}
-
-/** Probe the bridge once and choose poll vs ws receive, then keep it running. */
+/** Start receiving through the messaging backend. */
 async function startSignalReceiver(): Promise<void> {
-  const bridgeUrl = process.env.SIGNAL_CLI_URL;
-  const botNumber = process.env.SIGNAL_BOT_NUMBER;
-  if (!bridgeUrl || !botNumber) {
-    console.warn('[bot] receiver disabled: SIGNAL_CLI_URL / SIGNAL_BOT_NUMBER not set');
+  if (!messaging) {
+    console.warn('[bot] receiver disabled: messaging bridge not configured (SIGNAL_CLI_URL / SIGNAL_BOT_NUMBER)');
     return;
   }
-  try {
-    const client = await getIdTokenClient(bridgeUrl);
-    const numberPath = encodeURIComponent(botNumber);
-    const res = await client.request({
-      url: `${bridgeUrl}/v1/receive/${numberPath}`,
-      method: 'GET',
-      timeout: 8000,
-    });
-    if (Array.isArray((res as any)?.data)) {
-      const messages = (res as any).data as any[];
-      if (messages.length > 0) {
-        console.log(`[bot] probe drained ${messages.length} queued message(s)`);
-        for (const item of messages) await handleRawReceive(item);
-      }
-      startPollReceiver();
-      return;
-    }
-    console.warn('[bot] probe: receive GET returned non-array; using ws receiver');
-    startWsReceiver();
-  } catch (err: any) {
-    const status = err?.response?.status;
-    const body =
-      typeof err?.response?.data === 'string'
-        ? err.response.data
-        : JSON.stringify(err?.response?.data || '');
-    lastReceiveError = `probe: ${status || ''} ${body || err?.message || ''}`.trim();
-    console.warn(`[bot] probe failed (${lastReceiveError}); defaulting to ws receiver`);
-    // json-rpc mode commonly 400s the GET; ws receiver will fall back to poll if it can't connect.
-    startWsReceiver();
-  }
+  await messaging.startReceiving(handleIncomingItem);
 }
 
-/** Stop the Signal receiver on this replica (used when it loses the receiver role). */
+/** Stop the receiver on this replica (used when it loses the receiver role). */
 function stopSignalReceiver(): void {
-  receiverMode = 'off'; // makes the ws-close/poll handlers stop reconnecting
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-  if (receiverWs) { try { receiverWs.close(); } catch { /* ignore */ } receiverWs = null; }
+  messaging?.stopReceiving();
 }
 
 /** Start/stop the receiver so exactly the replica that currently holds the receiver role runs it.
@@ -3067,6 +2793,10 @@ function applyGroupGameWatch(groupId: string, gg: GroupGame, changeType: string)
   }
   // Only watch games this replica owns (singleton owns all; shard owns its slice; leader owns
   // all iff elected). Games we don't own are another replica's responsibility — drop any socket.
+  if (!isOurPlatform(gg)) {
+    stopGGSocket(groupId, `on ${platformOf(gg)}, not ${PLATFORM}`);
+    return;
+  }
   if (!ownership.owns(gg.gameId)) {
     stopGGSocket(groupId, 'not owned by this replica');
     return;
@@ -3105,7 +2835,7 @@ async function runTurnPoll() {
   }
   for (const doc of snap.docs) {
     const gg = { ...(doc.data() as GroupGame), groupId: groupIdFromDocId(doc.id) };
-    if (!gg.gameId) continue;
+    if (!gg.gameId || !isOurPlatform(gg)) continue;
     if (!ownership.owns(gg.gameId)) continue; // another replica's game
     await syncGroupGameIfTurnChanged(gg.groupId, gg.gameId, 'turn-poll');
   }
@@ -3126,7 +2856,7 @@ async function runReminderCheck() {
   const now = Date.now();
   for (const doc of snap.docs) {
     const gg = { ...(doc.data() as GroupGame), groupId: groupIdFromDocId(doc.id) };
-    if (!gg.gameId || !ownership.owns(gg.gameId)) continue;
+    if (!gg.gameId || !isOurPlatform(gg) || !ownership.owns(gg.gameId)) continue;
     const threshold = reminderThresholdMs(gg);
     if (threshold === null) continue; // reminders disabled for this group
     const current = gg.lastTurn?.awbwUsername;
@@ -3315,7 +3045,8 @@ async function sendTurnReminder(gg: GroupGame, elapsedMs: number): Promise<void>
 // A transaction grants/renews the lease only if it's unheld, expired, or already ours — so at most
 // one replica is leader at a time. (The k8s-native swap-in later is a coordination.k8s.io/Lease.)
 function firestoreLeaseStore(db: Firestore): LeaseStore {
-  const ref = (key: string) => db.collection('_locks').doc(key);
+  // Each platform's workers elect among themselves. Signal keeps the unprefixed keys it always had.
+  const ref = (key: string) => db.collection('_locks').doc(PLATFORM === 'signal' ? key : `${PLATFORM}-${key}`);
   return {
     async tryAcquire(key: string, holderId: string, ttlMs: number): Promise<string | null> {
       return db.runTransaction(async (tx) => {
@@ -3351,7 +3082,7 @@ async function main() {
     syncReceiver();
   });
   console.log(
-    `Worker starting. SCALING_MODE=${ownership.mode}, receiver=${ownership.isReceiver()}. Watching groupGames...`
+    `Worker starting. PLATFORM=${PLATFORM}, SCALING_MODE=${ownership.mode}, receiver=${ownership.isReceiver()}. Watching groupGames...`
   );
 
   // Run the Signal receiver only on the replica that currently holds the receiver role, so incoming
@@ -3424,9 +3155,10 @@ async function main() {
         res.end(
           JSON.stringify(
             {
-              mode: receiverMode,
-              bridgeConfigured: !!(process.env.SIGNAL_CLI_URL && process.env.SIGNAL_BOT_NUMBER),
-              lastReceiveError,
+              platform: PLATFORM,
+              mode: messaging?.receiverDiagnostics().mode ?? 'off',
+              bridgeConfigured: !!messaging,
+              lastReceiveError: messaging?.receiverDiagnostics().lastError ?? null,
               lastReceiveAt: lastReceiveAt ? new Date(lastReceiveAt).toISOString() : null,
               count: recentRawReceives.length,
               recent: recentRawReceives,
@@ -3505,22 +3237,17 @@ async function main() {
             res.end(JSON.stringify({ error: 'challengeToken and captchaToken required' }));
             return;
           }
-          const bridgeUrl = process.env.SIGNAL_CLI_URL;
-          const botNumber = process.env.SIGNAL_BOT_NUMBER;
-          if (!bridgeUrl || !botNumber) {
+          const bridge = signalCliBridge();
+          if (!bridge) {
             res.statusCode = 500;
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ error: 'Bridge not configured' }));
             return;
           }
-          const client = await getIdTokenClient(bridgeUrl);
-          const numberPath = encodeURIComponent(botNumber);
-          const challengeRes = await client.request({
-            url: `${bridgeUrl}/v1/accounts/${numberPath}/rate-limit-challenge`,
+          const challengeRes = await bridge.request(bridge.accountPath('/rate-limit-challenge'), {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             data: { challenge: challengeToken, captcha: captchaToken },
-            timeout: 15000,
+            timeoutMs: 15000,
           });
           const data = (challengeRes as any)?.data ?? challengeRes;
           res.statusCode = 200;
@@ -3536,11 +3263,10 @@ async function main() {
         return;
       }
       if (url.pathname === '/list-groups') {
-        const bridgeUrl = process.env.SIGNAL_CLI_URL;
-        const botNumber = process.env.SIGNAL_BOT_NUMBER;
-        console.log(`[list-groups] Starting request. Bridge: ${bridgeUrl}, Bot: ${botNumber}`);
-        if (!bridgeUrl || !botNumber) {
-          console.error(`[list-groups] Bridge not configured. bridgeUrl=${!!bridgeUrl}, botNumber=${!!botNumber}`);
+        const bridge = signalCliBridge();
+        console.log(`[list-groups] Starting request. Bridge: ${bridge?.url}, Bot: ${bridge?.botId}`);
+        if (!bridge) {
+          console.error(`[list-groups] Bridge not configured.`);
           res.statusCode = 500;
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify({ error: 'Bridge not configured' }));
@@ -3548,22 +3274,13 @@ async function main() {
         }
         const startTime = Date.now();
         try {
-          console.log(`[list-groups] Getting ID token client for ${bridgeUrl}`);
-          const client = await getIdTokenClient(bridgeUrl);
-          const numberPath = encodeURIComponent(botNumber);
-          const requestUrl = `${bridgeUrl}/v1/groups/${numberPath}`;
-          console.log(`[list-groups] Making request to: ${requestUrl}`);
-          console.log(`[list-groups] Encoded number path: ${numberPath}`);
+          const requestPath = `/v1/groups/${encodeURIComponent(bridge.botId)}`;
+          console.log(`[list-groups] Making request to: ${bridge.url}${requestPath}`);
           // Try with a longer timeout - Signal bridge can be slow
           const timeoutMs = 30000; // 30 seconds
           console.log(`[list-groups] Setting timeout to ${timeoutMs}ms`);
-          
-          const groupsPromise = client.request({
-            url: requestUrl,
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' },
-            timeout: timeoutMs,
-          });
+
+          const groupsPromise = bridge.request(requestPath, { timeoutMs });
           
           const timeoutPromise = new Promise((_, reject) => 
             setTimeout(() => {
@@ -3656,28 +3373,15 @@ async function main() {
           res.end(JSON.stringify({ error: 'Missing groupId query parameter' }));
           return;
         }
-        const bridgeUrl = process.env.SIGNAL_CLI_URL;
-        const botNumber = process.env.SIGNAL_BOT_NUMBER;
-        if (!bridgeUrl || !botNumber) {
+        if (!messaging) {
           res.statusCode = 500;
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify({ error: 'Bridge not configured' }));
           return;
         }
         try {
-          const client = await getIdTokenClient(bridgeUrl);
-          const numberPath = encodeURIComponent(botNumber);
-          const groupsRes = await client.request({
-            url: `${bridgeUrl}/v1/groups/${numberPath}`,
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' },
-            timeout: 30000,
-          });
-          const groups = (groupsRes as any)?.data || [];
-          if (!Array.isArray(groups)) {
-            throw new Error(`Groups list response is not an array`);
-          }
-          
+          const groups: any[] = await messaging.listGroups();
+
           // Find the group by ID (try both id and internal_id formats)
           const group = groups.find((g: any) => {
             const gId = g.id || (g.internal_id ? `group.${g.internal_id}` : null);
@@ -3785,9 +3489,8 @@ async function main() {
             res.end(JSON.stringify({ error: 'inviteLink required' }));
             return;
           }
-          const bridgeUrl = process.env.SIGNAL_CLI_URL;
-          const botNumber = process.env.SIGNAL_BOT_NUMBER;
-          if (!bridgeUrl || !botNumber) {
+          const bridge = signalCliBridge();
+          if (!bridge) {
             res.statusCode = 500;
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ error: 'Bridge not configured' }));
@@ -3799,15 +3502,11 @@ async function main() {
           if (hashMatch) {
             joinUri = `https://signal.group/#${hashMatch[1]}`;
           }
-          const client = await getIdTokenClient(bridgeUrl);
-          const numberPath = encodeURIComponent(botNumber);
           console.log(`[join-group] Joining with URI: ${joinUri}`);
-          const joinRes = await client.request({
-            url: `${bridgeUrl}/v1/groups/${numberPath}/join/${encodeURIComponent(joinUri)}`,
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            timeout: 30000,
-          });
+          const joinRes = await bridge.request(
+            `/v1/groups/${encodeURIComponent(bridge.botId)}/join/${encodeURIComponent(joinUri)}`,
+            { method: 'POST', timeoutMs: 30000 }
+          );
           res.statusCode = 200;
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify({ ok: true, data: (joinRes as any)?.data }));
