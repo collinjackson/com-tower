@@ -4,7 +4,6 @@
 
 import { DashRule } from './components/DashRule';
 import { FieldOrders } from './components/FieldOrders';
-import { FeaturedPost } from './components/FeaturedPost';
 
 const SELF_HOST_GUIDE =
   'https://github.com/collinjackson/com-tower/blob/main/SELF_HOST.md';
@@ -42,10 +41,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 export default function Home() {
   return (
-    // ct-layout lays the memo and the dispatch pile out as two columns on wide screens, with
-    // the gap between them equal to the margins outside them. Below xl the pile is hidden and
-    // this just centres.
-    <div className="ct-layout min-h-screen flex items-center justify-center px-4 sm:px-8 py-16 text-[#43371f]">
+    <div className="min-h-screen flex items-center justify-center px-4 sm:px-8 py-16 text-[#43371f]">
       {/* The memo — one typewriter size, uniform kerning; rules are whole runs of typed hyphens.
           Dismissible: filing it away clears the view down to the console gallery below. */}
       <FieldOrders>
@@ -109,7 +105,6 @@ export default function Home() {
         </div>
       </main>
       </FieldOrders>
-      <FeaturedPost />
     </div>
   );
 }
