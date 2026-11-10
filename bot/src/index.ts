@@ -55,6 +55,8 @@ type NextTurnMeta = {
   playerId?: string | number;
   includeImage?: boolean;
   players?: string[];
+  /** The chat's /iam players (AWBW names): lets the strategy note coach a one-team chat. */
+  members?: string[];
   countries?: string[];
   gameName?: string;
   funEnabled?: boolean;
@@ -455,7 +457,7 @@ async function buildMessage(
   // their nudge. Any failure falls through to the usual text.
   let strategyText: string | null = null;
   if (!meta.reminderElapsed) {
-    const strategy = await fetchStrategyNote(gameId, effectivePlayerName);
+    const strategy = await fetchStrategyNote(gameId, { playerName: effectivePlayerName, members: meta.members });
     if (strategy) {
       const nameChunk = meta.gameName ? `(${meta.gameName}) ` : '';
       const who = effectivePlayerName ? `${effectivePlayerName}, you're up.` : 'New turn.';
@@ -2265,6 +2267,7 @@ async function onGroupGameNextTurn(
       playerName: currentPlayer,
       socketPlayerName: meta.socketPlayer,
       players: info.players,
+      members: Object.keys(gg.players || {}),
       gameName,
       funEnabled: gg.funEnabled,
     },
