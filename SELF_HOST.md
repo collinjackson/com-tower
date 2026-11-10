@@ -51,10 +51,6 @@ Signal group  ←→  signal-cli REST (SIGNAL_CLI_URL)
 | `COM_TOWER_WORKER_URL` | yes | Your Cloud Run bot URL |
 | `INVITE_SHARED_SECRET` | yes | Random string; copy to bot env |
 | `NEXT_PUBLIC_SITE_URL` | recommended | `https://your-app.vercel.app` (invite links) |
-| `OPENAI_API_KEY` | optional | Fun-mode captions in `/api/notify/render` |
-| `FUN_MODE_MODEL_TEXT` | optional | Caption writer model (default `gpt-4o-mini`) |
-| `FUN_MODE_JUDGE_MODEL` | optional | Model that ranks candidates and labels their topics (default `gpt-5.5`) |
-| `FUN_MODE_CANDIDATES` | optional | Candidates written per caption, 1–20 (default 10) |
 
 Copy `dashboard/.env.local.example` to `.env.local` and fill in values.
 
@@ -71,7 +67,6 @@ Copy `dashboard/.env.local.example` to `.env.local` and fill in values.
 | `INVITE_SHARED_SECRET` | yes | Same as dashboard |
 | `AWBW_WS_BASE` | optional | Default `wss://awbw.amarriner.com` |
 | `RENDER_BYPASS_TOKEN` | optional | Auth for render endpoint |
-| `OPENAI_API_KEY` | optional | Only if render runs on bot fallback paths |
 
 See `bot/deploy.sh` for Cloud Run deploy with Secret Manager or plain env vars.
 

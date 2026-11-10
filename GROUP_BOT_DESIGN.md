@@ -107,7 +107,7 @@ useful (player/country scrape cache).
 | `/unsetplayer @member` | admin | Remove a mapping. |
 | `/players` (`/who`) | anyone | Show current `awbw <-> signal` mapping; flag unmapped slots. |
 | `/scope mine\|all` | admin | Ping only the player whose turn it is (default) or the whole group. |
-| `/fun [on\|off]` | admin | Toggle fun-mode captions. |
+| `/fun [on\|off]` | admin | Toggle the unit/CO hologram image. |
 | `/status` | anyone | Active game, last turn seen, watch state. |
 | `/stop` | admin | Stop watching; closes the socket. |
 | `/help` | anyone | Command list. |
@@ -198,7 +198,7 @@ Memo content (sketch):
 │   /setplayer @m <user>  CO assigns a player    │
 │   /players              show the roster        │
 │   /scope mine|all       who gets pinged        │
-│   /fun [on|off]         flavor text            │
+│   /fun [on|off]         hologram image         │
 │   /status               current orders         │
 │   /stop                 stand down             │
 │   /help                 this memo              │
