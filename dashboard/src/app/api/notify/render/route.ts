@@ -4,6 +4,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { getAdminDb } from '@/lib/firebase-admin';
 import { emojiList, JUDGE_EMOJI_LEGEND } from '@/lib/reactions';
 import {
+  HUMOR_TARGET_RULE,
   JUDGE_REPLY_FORMAT,
   TOPIC_RULE,
   backfillTopics,
@@ -416,7 +417,8 @@ export async function POST(req: NextRequest) {
 
         // Joke craft applies to both voices — a flagged failure mode (limp non-jokes).
         const jokeCraft =
-          `If your format is a joke or pun, it MUST work as one — a real setup and a punchline that genuinely lands (the wordplay has to actually make sense); a flat non-sequitur is worse than a straight call.\n`;
+          `If your format is a joke or pun, it MUST work as one — a real setup and a punchline that genuinely lands (the wordplay has to actually make sense); a flat non-sequitur is worse than a straight call.\n` +
+          `${HUMOR_TARGET_RULE}\n`;
         // Optional language/style. Guarded: only well-known real or novelty languages,
         // and never a mocking/offensive impression.
         // Battlefield context (unit voice only): the ASCII map + surroundings + HP swing.
@@ -523,6 +525,8 @@ export async function POST(req: NextRequest) {
                     `the humor itself shows the idle restlessness — DOWNRANK any that explicitly say they're bored/restless/antsy/itching or that narrate having nothing to do; ` +
                     `conveys mood/morale without stating HP numbers; clearly conveys it's ${who}'s turn (needs orders); ` +
                     `lands a callback to the chatter ONLY if there's a real hook; tight (ideally under ~160 chars); not cringe or mean.\n` +
+                    `Before ranking, apply this rule and list every candidate that breaks it as "offside" — those are never sent, however funny: ` +
+                    `${HUMOR_TARGET_RULE} (Example of offside: "What do you call a soldier who survived mustard gas and pepper spray? A seasoned vet!")\n` +
                     `Candidates:\n${list}\n` +
                     `Rank EVERY candidate, best first, and label each one's topic. ${TOPIC_RULE}\n` +
                     JUDGE_REPLY_FORMAT,
@@ -534,22 +538,53 @@ export async function POST(req: NextRequest) {
               candidates.length
             );
             judgeScore = verdict.score;
-            // Best candidate that repeats nothing AND whose topic is still unclaimed — another
-            // group captioning this same turn may have just taken it.
-            const { index: winner, fresh } = await chooseCandidate(
-              getAdminDb(),
-              gameId,
-              verdict,
-              candidates,
-              usedTopics
-            );
-            caption = candidates[winner];
-            captionTopic = verdict.topics[winner] || null;
-            if (fresh !== 'yes') {
+            if (verdict.offside.length) {
               console.warn(
-                `Fun-mode: every candidate repeats ${fresh === 'no' ? 'this game' : 'a recent game'} in game ${gameId}; ` +
-                  `sent ${JSON.stringify(captionTopic)}`
+                `Fun-mode: judge flagged ${verdict.offside.length} candidate(s) as punching down in game ${gameId}: ` +
+                  JSON.stringify(verdict.offside.map((i) => candidates[i]))
               );
+              // Kept for review: what the rule stopped, and whether it stopped everything.
+              if (gameId) {
+                const db = getAdminDb();
+                const allOffside = verdict.ranking.length === 0;
+                await Promise.all(
+                  verdict.offside.map((i) =>
+                    db.collection('games').doc(gameId).collection('offsideCaptions').add({
+                      text: candidates[i],
+                      topic: verdict.topics[i] || null,
+                      style,
+                      day: day ?? 0,
+                      speakerName: featuringCo ? coName || null : unitName || null,
+                      allOffside,
+                      judgeModel,
+                      createdAt: FieldValue.serverTimestamp(),
+                    })
+                  )
+                ).catch((err) => console.warn('Failed to store offside captions:', err));
+              }
+            }
+            if (verdict.ranking.length === 0) {
+              // Every candidate punched down: no caption, so the plain turn ping goes out.
+              // (Not a throw: the catch below would send candidates[0].)
+              console.warn(`Fun-mode: every candidate was offside in game ${gameId}; sending the plain ping`);
+            } else {
+              // Best candidate that repeats nothing AND whose topic is still unclaimed — another
+              // group captioning this same turn may have just taken it.
+              const { index: winner, fresh } = await chooseCandidate(
+                getAdminDb(),
+                gameId,
+                verdict,
+                candidates,
+                usedTopics
+              );
+              caption = candidates[winner];
+              captionTopic = verdict.topics[winner] || null;
+              if (fresh !== 'yes') {
+                console.warn(
+                  `Fun-mode: every candidate repeats ${fresh === 'no' ? 'this game' : 'a recent game'} in game ${gameId}; ` +
+                    `sent ${JSON.stringify(captionTopic)}`
+                );
+              }
             }
           } catch (judgeErr) {
             console.warn('Fun-mode judge failed; using first candidate', judgeErr);

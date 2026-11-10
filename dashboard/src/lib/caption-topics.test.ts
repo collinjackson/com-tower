@@ -83,7 +83,7 @@ test('a malformed judge reply still ranks every candidate once', () => {
   assert.deepEqual(v.topics, ['a', '', '', '']);
   assert.equal(v.score, null);
   // The old {best} shape still works.
-  assert.deepEqual(parseJudgeVerdict({ best: 1, score: 150 }, 3), { ranking: [1, 0, 2], topics: ['', '', ''], score: 100 });
+  assert.deepEqual(parseJudgeVerdict({ best: 1, score: 150 }, 3), { ranking: [1, 0, 2], topics: ['', '', ''], score: 100, offside: [] });
   assert.deepEqual(parseJudgeVerdict(null, 2).ranking, [0, 1]);
 });
 
@@ -283,4 +283,20 @@ test('a topic another group just claimed for this turn passes to the next candid
   const verdict = parseJudgeVerdict({ ranking: [0, 1], topics: { 0: 'coffee break', 1: 'rusty wrench' } }, 2);
   const pick = await chooseCandidate(db, 'g', verdict, ['Coffee break!', 'Hand me that rusty wrench!'], []);
   assert.deepEqual(pick, { index: 1, fresh: 'yes' });
+});
+
+test('candidates the judge flags as punching down never rank', () => {
+  const v = parseJudgeVerdict({ ranking: [1, 0, 2], topics: { 0: 'a', 1: 'b', 2: 'c' }, offside: [1] }, 3);
+  assert.deepEqual(v.ranking, [0, 2]);
+  assert.deepEqual(v.offside, [1]);
+  // Left off the judge's ranking, an offside candidate still isn't appended back.
+  assert.deepEqual(parseJudgeVerdict({ ranking: [0], offside: [2] }, 3).ranking, [0, 1]);
+  // Junk in offside is ignored; an older reply without it is unchanged.
+  assert.deepEqual(parseJudgeVerdict({ ranking: [0, 1], offside: [7, 'x'] }, 2).ranking, [0, 1]);
+  assert.deepEqual(parseJudgeVerdict({ ranking: [1, 0] }, 2).offside, []);
+});
+
+test('when every candidate is offside nothing is eligible', () => {
+  const v = parseJudgeVerdict({ ranking: [0, 1], offside: [0, 1] }, 2);
+  assert.deepEqual(v.ranking, []);
 });
