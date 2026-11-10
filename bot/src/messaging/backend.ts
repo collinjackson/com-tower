@@ -40,8 +40,7 @@ export interface MessagingBackend {
   /** The bot's own id on the platform (for Signal, its phone number). */
   readonly botId: string;
 
-  /** Send to a group. Resolves to the platform's timestamp for the message, when it gives one;
-   *  reactions are matched back to a post by that timestamp. */
+  /** Send to a group. Resolves to the platform's timestamp for the message, when it gives one. */
   sendToGroup(groupId: string, msg: OutgoingMessage, opts?: SendOptions): Promise<number | undefined>;
   /** Send to one person. */
   sendToPerson(personId: string, msg: OutgoingMessage, opts?: SendOptions): Promise<number | undefined>;

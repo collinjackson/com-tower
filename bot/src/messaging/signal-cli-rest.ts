@@ -161,10 +161,9 @@ export class SignalCliRestBackend implements MessagingBackend {
     // Answers { "timestamp": <ms> } (number or string depending on version).
     const ts = Number((res?.data as any)?.timestamp);
     if (!(Number.isFinite(ts) && ts > 0)) {
-      // Not fatal — the message went out — but without it no reaction can ever be matched back
-      // to this post. Loud, because it would be invisible.
+      // Not fatal — the message went out.
       console.warn(
-        `[${this.platform}] send returned no usable timestamp (reactions/showcase disabled for this post): ${JSON.stringify(res?.data)?.slice(0, 200)}`
+        `[${this.platform}] send returned no usable timestamp: ${JSON.stringify(res?.data)?.slice(0, 200)}`
       );
       return undefined;
     }
