@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { holoGlow } from '@/lib/armies';
+import { getAdminDb, adminAvailable } from '@/lib/firebase-admin';
+import { FEATURED_LABELS, FEATURED_METRICS, pickMetric, type FeaturedMetric } from '@/lib/featured';
+import { buildFeaturedGif, spriteFrames, spriteUrl } from '@/lib/featured-chart';
+import { samplesToSeries, settledSamples, type Series, type TurnSampleDoc } from '@/lib/turn-series';
+import type { Image } from '@napi-rs/canvas';
 
 // Per-country facing — all units of a country face the same way (the barrel/
 // front reaches the left edge of the cell for these; everyone else faces right).
@@ -46,6 +51,42 @@ function holoGrain(w: number, h: number, [gr, gg, gb]: [number, number, number])
     buf[o + 3] = Math.round(Math.random() ** 3 * 40); // cube bias -> mostly transparent
   }
   return { input: buf, raw: { width: w, height: h, channels: 4 as const }, blend: 'over' as const };
+}
+
+/** The turn ping's featured chart: the stat that moved most over the last round (never the one
+ *  featured last time), as an animated GIF with each player's soldier riding their line. Null
+ *  until a game has a few recorded turns; the ping then keeps its hologram. Best-effort. */
+async function featuredChart(gameId: string): Promise<{ data: Buffer; metric: FeaturedMetric } | null> {
+  if (!adminAvailable) return null;
+  const db = getAdminDb();
+  const gameRef = db.collection('games').doc(gameId);
+  const [snap, game] = await Promise.all([
+    gameRef.collection('turnStats').orderBy('day', 'asc').limit(600).get(),
+    gameRef.get(),
+  ]);
+  const docs = settledSamples(snap.docs.map((d) => d.data() as TurnSampleDoc));
+  const byMetric: Partial<Record<FeaturedMetric, Series[]>> = {};
+  for (const m of FEATURED_METRICS) byMetric[m] = samplesToSeries(docs, m);
+  const previous = (game.data() as { lastFeaturedMetric?: string } | undefined)?.lastFeaturedMetric;
+  const metric = pickMetric(byMetric, previous);
+  if (!metric) return null;
+  const series = byMetric[metric]!;
+  const sprites = new Map<string, Image[]>();
+  await Promise.all(
+    series.map(async (s) => {
+      if (!s.army || !/^[a-z]{2,3}$/.test(s.army)) return;
+      const res = await fetch(spriteUrl(s.army));
+      if (res.ok) sprites.set(s.key, await spriteFrames(new Uint8Array(await res.arrayBuffer())));
+    })
+  );
+  const gif = await buildFeaturedGif({
+    series,
+    title: FEATURED_LABELS[metric],
+    isMoney: metric === 'armyValue' || metric === 'income',
+    sprites,
+  });
+  await gameRef.set({ lastFeaturedMetric: metric }, { merge: true });
+  return { data: gif.data, metric };
 }
 
 export async function POST(req: NextRequest) {
@@ -98,7 +139,21 @@ export async function POST(req: NextRequest) {
         ? null
         : 'no-unit-and-no-co-portrait'
       : 'image-off';
-    if (enableFun && army.code && /^[a-z]{2,3}$/.test(army.code) && unitFile) {
+    // A chart of how the game is going comes first; the hologram is the fallback.
+    if (enableFun && gameId) {
+      try {
+        const chart = await featuredChart(gameId);
+        if (chart) {
+          imageData = chart.data.toString('base64');
+          imageContentType = 'image/gif';
+          imageFilename = `${chart.metric}.gif`;
+          imageSkipReason = null;
+        }
+      } catch (err) {
+        console.warn(`Featured chart failed for game ${gameId} (falling back to the hologram)`, err);
+      }
+    }
+    if (!imageData && enableFun && army.code && /^[a-z]{2,3}$/.test(army.code) && unitFile) {
       try {
         const sharp = (await import('sharp')).default;
         const spriteUrl = `https://awbw.amarriner.com/terrain/ani/${army.code}${unitFile}.gif`;
