@@ -2,10 +2,11 @@
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-<img height="250" alt="Preview" src="https://github.com/user-attachments/assets/3e17d888-b04d-4fb3-a762-1171fbb8b9a7" align="right" />
-
-
 **Turn notifications for [Advance Wars By Web](https://awbw.amarriner.com)** — get Signal alerts when it’s your turn.
+
+```
+Day 12. ExamplePlayer, you’re up. https://awbw.amarriner.com/game.php?games_id=123456
+```
 
 **Live app:** [com-tower.vercel.app](https://com-tower.vercel.app)
 
@@ -18,7 +19,7 @@ Com Tower is a Signal bot. Add it to your AWBW game’s group chat (or DM it one
 1. **Add Com Tower** to your game’s Signal group — the bot number is on the [homepage](https://com-tower.vercel.app). A DM works too.
 2. **Bind the game** — in that chat, run `/game <AWBW link>`. Whoever runs it first becomes the **mod**.
 3. **Turn on notifications** for the group in Signal (or run `/iam <your_awbw_name>` for a personal @ping on your turn).
-4. **Play** — Com Tower watches the game and posts each turn. Fun mode is on by default: in-character radio calls with a holographic unit sprite.
+4. **Play** — Com Tower watches the game and posts each turn. By default each post carries a hologram of one of your units (or your CO).
 
 Send `/help` in the group for the full command list.
 
@@ -30,18 +31,15 @@ Send `/help` in the group for the full command list.
 | `/iam <awbw_name>` | anyone | Get an @ping on your turn |
 | `/setplayer @x <name>` | mod | Map a member to an AWBW player |
 | `/players` | anyone | Show the roster |
-| `/fun [on\|off]` | mod | Toggle flavor-text notifications |
-| `/language <lang>` | anyone | Turn pings in another language (after `/iam`) |
+| `/fun [on\|off]` | mod | Toggle the hologram image |
 | `/status` | anyone | Current watch state |
 | `/sync` | anyone | Check AWBW now; post if a turn was missed |
 | `/stop` | mod | Stop watching |
 | `/ping` | anyone | Connectivity check |
 
-**Mods** can change the game, stop watching, toggle fun mode, and manage player mappings. The first person to run `/game` in a group is the mod; mods can add others with `/addmod @x`.
+**Mods** can change the game, stop watching, toggle the hologram image, and manage player mappings. The first person to run `/game` in a group is the mod; mods can add others with `/addmod @x`.
 
-**Fun mode** (on by default) turns each notification into a short in-character radio message from one of your units, with a hologram image. Turn it off with `/fun off` if you prefer plain text.
-
-Fun mode tries not to tell your group the same joke twice. Each turn it writes several candidates, and a judge model ranks them and names each one's topic: the prop or premise the punchline turns on ("ladder", "music school"). A candidate counts as a repeat if its topic overlaps one already told, if its text names a topic already told, or if an earlier caption names its topic. That last pair catches a ladder joke the judge called "high stakes". Topics are remembered for the whole game and, for 90 days, across your group's next games. If every candidate repeats, it relaxes the cross-game list first, and as a last resort sends the judge's top pick rather than skipping the ping.
+**The hologram image** (on by default) attaches one of your units, or your CO early in the game or when a CO power is charged, as a scanlined hologram in your army's colour. The text is the same either way. Turn it off with `/fun off` if you prefer plain text.
 
 **Stuck?** Run `/status` to see whether the bot is watching your game. If turns aren’t coming through, try `/sync` once, or `/stop` then `/game` again to re-bind.
 
@@ -96,7 +94,7 @@ The **Signal bridge** (signal-cli REST) is separate infrastructure — the bot r
 
 ### Codebase overview
 
-- **Dashboard:** Next.js App Router. Main UI is `dashboard/src/app/page.tsx`; API routes under `dashboard/src/app/api/`. Firebase client in `dashboard/src/lib/firebase.ts`, admin in `dashboard/src/lib/firebase-admin.ts`. Fun-mode renderer: `dashboard/src/app/api/notify/render/route.ts`; its repeat filter is `dashboard/src/lib/caption-topics.ts`, which keeps used topics in `games/{id}/captionTopics` and, across games, `recentCaptionTopics`.
+- **Dashboard:** Next.js App Router. Main UI is `dashboard/src/app/page.tsx`; API routes under `dashboard/src/app/api/`. Firebase client in `dashboard/src/lib/firebase.ts`, admin in `dashboard/src/lib/firebase-admin.ts`. Notification renderer (text plus hologram image): `dashboard/src/app/api/notify/render/route.ts`.
 - **Bot:** Single entry `bot/src/index.ts` — Firestore listeners, AWBW websocket per game, render call, Signal send, group commands.
 
 ### Making changes
