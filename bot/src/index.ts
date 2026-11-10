@@ -451,15 +451,18 @@ async function buildMessage(
   const effectivePlayerName = meta.playerName || meta.socketPlayerName;
 
   // A strategy note about the position, when a STRATEGY_NOTE_URL service is configured, in place
-  // of the usual text. Reminders keep their nudge. Any failure falls through to the usual text.
+  // of the usual text. The render still runs for the image (chart or hologram). Reminders keep
+  // their nudge. Any failure falls through to the usual text.
+  let strategyText: string | null = null;
   if (!meta.reminderElapsed) {
     const strategy = await fetchStrategyNote(gameId, effectivePlayerName);
     if (strategy) {
       const nameChunk = meta.gameName ? `(${meta.gameName}) ` : '';
       const who = effectivePlayerName ? `${effectivePlayerName}, you're up.` : 'New turn.';
-      return { text: `${meta.day ? `Day ${meta.day}. ` : ''}${who} ${strategy.text} ${nameChunk}${link}` };
+      strategyText = `${meta.day ? `Day ${meta.day}. ` : ''}${who} ${strategy.text} ${nameChunk}${link}`;
     }
   }
+  if (strategyText && !renderUrl) return { text: strategyText };
 
   if (renderUrl) {
     try {
@@ -506,7 +509,7 @@ async function buildMessage(
             text = `${text} ${nameChunk}`;
           }
           return {
-            text,
+            text: strategyText ?? text,
             imageData: data.imageData || undefined,
             imageContentType: data.imageContentType || undefined,
             imageFilename: data.imageFilename || undefined,
@@ -519,6 +522,7 @@ async function buildMessage(
       }
     } catch (err) {
       console.error('Render fetch failed', err);
+      if (strategyText) return { text: strategyText }; // the note stands on its own
       const errMsg = err instanceof Error ? err.message : 'Render fetch failed';
       const errParts = [
         meta.day ? `Day ${meta.day}.` : '',
