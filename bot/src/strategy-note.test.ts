@@ -26,3 +26,12 @@ test('falls back on errors and empty text', async () => {
   const boom = (async () => { throw new Error('down'); }) as unknown as typeof fetch;
   assert.equal(await fetchStrategyNote(1, 'p', cfg, boom), null);
 });
+
+test('with the chat\'s members the service picks the audience', async () => {
+  let seen: RequestInit | undefined;
+  const f = (async (_u: string, init: RequestInit) => { seen = init; return new Response(JSON.stringify({ text: 'Push the left.' })); }) as unknown as typeof fetch;
+  await fetchStrategyNote(7, { playerName: 'p', members: ['p', 'q'] }, { url: 'http://x/note' }, f);
+  assert.deepEqual(JSON.parse(seen!.body as string), { gameId: 7, playerName: 'p', audience: 'auto', members: ['p', 'q'] });
+  await fetchStrategyNote(7, { playerName: 'p', members: [] }, { url: 'http://x/note' }, f);
+  assert.equal(JSON.parse(seen!.body as string).audience, 'all');
+});
