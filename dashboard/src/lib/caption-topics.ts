@@ -108,17 +108,31 @@ export function isRepeat(topic: string, text: string, used: UsedTopic[]): boolea
   return used.some((u) => mentions(words, u.keywords) || (!!u.text && mentions(textWords(u.text), mine)));
 }
 
-/** The judge's reply: candidate indices best first, and one topic per candidate (by candidate index). */
-export type JudgeVerdict = { ranking: number[]; topics: string[]; score: number | null };
+/** Who a joke may be at the expense of. Both the generator and the judge get it; the judge flags
+ *  breakers as `offside` and they never go out. Flagged after "a soldier who survived mustard gas
+ *  and pepper spray? A seasoned vet!" went to a group. */
+export const HUMOR_TARGET_RULE =
+  `NO PUNCHING DOWN: the joke can be at the expense of the enemy army, the player whose turn it is (affectionately), ` +
+  `this unit or CO, their gear, or the game itself — cartoon combat against the enemy is fine. It must NEVER get its ` +
+  `laugh from people for who they are or what has been done to them: disability, injury, illness, trauma or PTSD, ` +
+  `wounded or gassed veterans, real atrocities (chemical weapons, torture, war crimes), race, ethnicity, nationality, ` +
+  `religion, gender, sexuality, bodies, age, or poverty. A punchline that only works because someone was hurt or is ` +
+  `disadvantaged is out, however clever the wordplay.`;
+
+/** The judge's reply: candidate indices best first, and one topic per candidate (by candidate index).
+ *  `ranking` leaves out candidates the judge flagged as punching down (`offside`), so it can be empty. */
+export type JudgeVerdict = { ranking: number[]; topics: string[]; score: number | null; offside: number[] };
 
 /** Read the judge's JSON defensively: an older-shape `{best}` reply, a ranking with gaps or junk,
- *  or missing topics all still yield every candidate exactly once, best first. */
+ *  or missing topics all still yield every candidate exactly once, best first — except the ones
+ *  flagged `offside`, which are left out of the ranking entirely. */
 export function parseJudgeVerdict(raw: unknown, candidateCount: number): JudgeVerdict {
   const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
   const valid = (i: unknown): i is number => Number.isInteger(i) && (i as number) >= 0 && (i as number) < candidateCount;
+  const offside = Array.from(new Set((Array.isArray(r.offside) ? r.offside : []).map(Number).filter(valid)));
   const ranked = (Array.isArray(r.ranking) ? r.ranking : [r.best]).map(Number).filter(valid);
-  const ranking = Array.from(new Set(ranked));
-  for (let i = 0; i < candidateCount; i++) if (!ranking.includes(i)) ranking.push(i);
+  const ranking = Array.from(new Set(ranked)).filter((i) => !offside.includes(i));
+  for (let i = 0; i < candidateCount; i++) if (!ranking.includes(i) && !offside.includes(i)) ranking.push(i);
   // Topics keyed by candidate index ({"0": "ladder", ...}). A parallel array was misread: asked
   // for topics "in candidate order" beside a best-first ranking, smaller models wrote them in
   // ranked order, so every label landed on the wrong candidate. An array is still accepted.
@@ -127,7 +141,7 @@ export function parseJudgeVerdict(raw: unknown, candidateCount: number): JudgeVe
     typeof byIndex[i] === 'string' ? (byIndex[i] as string) : ''
   );
   const score = Number(r.score);
-  return { ranking, topics, score: Number.isFinite(score) ? Math.max(0, Math.min(100, score)) : null };
+  return { ranking, topics, score: Number.isFinite(score) ? Math.max(0, Math.min(100, score)) : null, offside };
 }
 
 /** Candidates in the order to try them: the judge's ranking with repeats skipped. Empty when
@@ -295,4 +309,5 @@ export async function backfillTopics(
 export const JUDGE_REPLY_FORMAT =
   `Reply as JSON: {"ranking": [<every candidate index, best first>], ` +
   `"topics": {"<candidate index>": "<that candidate's topic>", ...one entry per candidate}, ` +
+  `"offside": [<index of every candidate that breaks the NO PUNCHING DOWN rule; [] if none>], ` +
   `"score": <0-100, how good your top pick is on its own merits — judge the writing itself, NOT how earlier messages were reacted to>}`;
