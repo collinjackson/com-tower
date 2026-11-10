@@ -25,7 +25,7 @@ Required:
 - `NOTIFY_RENDER_URL` — dashboard render endpoint, e.g. `https://com-tower.vercel.app/api/notify/render`
 
 Optional: `AWBW_WS_BASE` (default `wss://awbw.amarriner.com`), `RENDER_BYPASS_TOKEN`,
-`OPENAI_API_KEY`, `JOIN_SHIM_URL`/`JOIN_SHIM_SECRET`.
+`JOIN_SHIM_URL`/`JOIN_SHIM_SECRET`.
 
 ## Deploy
 

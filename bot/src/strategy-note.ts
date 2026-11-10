@@ -1,7 +1,7 @@
 /**
  * Optional strategy notes from an external service (STRATEGY_NOTE_URL, with a bearer token in
  * STRATEGY_NOTE_TOKEN). When set, a "your turn" notification carries the service's note about the
- * position instead of the usual caption. The service is anything that answers
+ * position after the usual "you're up" line. The service is anything that answers
  *   POST {url}  {"gameId": number, "playerName"?: string, "audience"?: "all" | "team"}  ->  {"text": string}
  * audience "all" (default): the chat holds every side, so the note must not coach one of them.
  * Any failure, timeout or empty text returns null, and the caller sends its usual message.

@@ -9,7 +9,7 @@ import {
   SignalCliRestBackend,
   type MessagingBackend,
 } from './messaging/index.js';
-import { FieldValue, FieldPath } from 'firebase-admin/firestore';
+import { FieldValue } from 'firebase-admin/firestore';
 import { createOwnership, type Ownership, type LeaseStore } from './ownership.js';
 import { parseTurnStats, recordTurnStats, type TurnStats } from './stats.js';
 import { fetchStrategyNote } from './strategy-note.js';
@@ -58,9 +58,8 @@ type NextTurnMeta = {
   countries?: string[];
   gameName?: string;
   funEnabled?: boolean;
-  language?: string;
   inviterUid?: string;
-  reminderElapsed?: string; // set for turn reminders → caption becomes an impatient nudge
+  reminderElapsed?: string; // set for turn reminders → the text becomes a "still your move" nudge
 };
 type RenderPayload = {
   text: string;
@@ -68,9 +67,6 @@ type RenderPayload = {
   imageData?: string;
   imageContentType?: string;
   imageFilename?: string;
-  /** sentCaptions doc id from the render endpoint — stamped with the Signal send
-   *  timestamp after the message goes out, so reactions can be matched back to it. */
-  captionId?: string;
 };
 
 // The chat platform this worker serves (MESSAGING_PLATFORM, default "signal"), and how it reaches
@@ -352,109 +348,8 @@ type AwbwUnit = {
   name: string;
   code?: string;
   hp: number;
-  lowFuel: boolean;
-  lowAmmo: boolean;
-  terrainTile?: string; // AWBW terrain/aw1 tile filename the unit stands on (for the sprite backdrop)
   id?: string; // AWBW units_id (stable across turns, for HP-change tracking)
-  x?: number;
-  y?: number;
-  terrainName?: string; // human terrain/building name the unit stands on (e.g. Mountain, City)
 };
-// One battlefield tile/unit snapshot, for the ASCII map + adjacency context.
-type Battlefield = {
-  width: number;
-  height: number;
-  terrainName: Record<string, string>; // "x,y" -> terrain or building name
-  units: Array<{ x: number; y: number; code?: string; name: string; hp: number; playerId: string }>;
-};
-
-// AWBW country code -> lowercase army name used in building tile filenames (e.g. orangestarhq.gif).
-const ARMY_FULLNAME: Record<string, string> = {
-  os: 'orangestar', bm: 'bluemoon', ge: 'greenearth', yc: 'yellowcomet', bh: 'blackhole',
-  rf: 'redfire', gs: 'greysky', bd: 'browndesert', ab: 'amberblaze', js: 'jadesun',
-  ci: 'cobaltice', pc: 'pinkcosmos', tg: 'tealgalaxy', pl: 'purplelightning', wn: 'whitenova',
-};
-// Building terrain_name -> tile word (army prefix added unless neutral; silo is always neutral art).
-const BUILDING_WORD: Record<string, string> = {
-  Headquarters: 'hq', HQ: 'hq', City: 'city', Base: 'base', Factory: 'base',
-  Airport: 'airport', Port: 'port', Seaport: 'port',
-  'Com Tower': 'comtower', 'Comm Tower': 'comtower', 'Communications Tower': 'comtower',
-  Lab: 'lab', Laboratory: 'lab', 'Missile Silo': 'missilesilo',
-};
-// Base terrain_name -> verified tile filename. ('Wood' aw1 art is wrong/blue, so use plains.)
-const BASE_TILE: Record<string, string> = {
-  Plain: 'plain', Mountain: 'mountain', Sea: 'sea', Reef: 'sea', Shoal: 'sea',
-  Wood: 'plain', Road: 'plain', Bridge: 'plain', River: 'plain',
-};
-// terrain_name -> single ASCII char for the battlefield map.
-const TERRAIN_CHAR: Record<string, string> = {
-  Plain: '.', Wood: 'T', Mountain: '^', Road: '-', Bridge: '=', River: 'r',
-  Sea: '~', Shoal: '_', Reef: 'o', Pipe: '#', 'Pipe Seam': '+',
-};
-const BUILDING_CHAR: Record<string, string> = {
-  Headquarters: 'H', HQ: 'H', City: 'c', Base: 'b', Factory: 'b',
-  Airport: 'a', Port: 'p', Seaport: 'p',
-  'Com Tower': 't', 'Comm Tower': 't', 'Communications Tower': 't',
-  Lab: 'l', Laboratory: 'l', 'Missile Silo': 'i',
-};
-
-// Render the battlefield as ASCII: terrain chars, units overlaid (your other
-// units lowercase 'u', enemies 'E'), and an '@' "you are here" pin on the
-// featured unit. Windowed to a manageable box around the unit for big maps.
-function renderMapAscii(bf: Battlefield, fx: number, fy: number): string {
-  const RAD = 6; // 13x13 window keeps tokens bounded and centers on the unit
-  const x0 = Math.max(0, Math.min(fx - RAD, bf.width - (RAD * 2 + 1)));
-  const y0 = Math.max(0, Math.min(fy - RAD, bf.height - (RAD * 2 + 1)));
-  const x1 = Math.min(bf.width - 1, x0 + RAD * 2);
-  const y1 = Math.min(bf.height - 1, y0 + RAD * 2);
-  const unitAt = new Map<string, { code?: string; playerId: string }>();
-  for (const u of bf.units) unitAt.set(`${u.x},${u.y}`, u);
-  const featuredCode = unitAt.get(`${fx},${fy}`)?.playerId;
-  const lines: string[] = [];
-  for (let y = y0; y <= y1; y++) {
-    let row = '';
-    for (let x = x0; x <= x1; x++) {
-      if (x === fx && y === fy) { row += '@'; continue; } // you are here
-      const u = unitAt.get(`${x},${y}`);
-      if (u) { row += u.playerId === featuredCode ? 'u' : 'E'; continue; }
-      const name = bf.terrainName[`${x},${y}`];
-      row += (name && (BUILDING_CHAR[name] || TERRAIN_CHAR[name])) || '.';
-    }
-    lines.push(row);
-  }
-  return lines.join('\n');
-}
-
-// Evocative terrain hints — we deliberately DON'T pass AWBW's literal terrain
-// words to the LLM (it parrots them); these nudge imagery while staying subtle.
-const TERRAIN_HINT: Record<string, string> = {
-  Plain: 'open ground', Wood: 'tree cover', Mountain: 'high rocky ground', Road: 'a road',
-  Bridge: 'a bridge', River: 'a river crossing', Sea: 'open water', Shoal: 'the shallows', Reef: 'a reef',
-  Pipe: 'a pipeline', 'Pipe Seam': 'a pipe seam',
-  Headquarters: 'the home base', HQ: 'the home base', City: 'a town', Base: 'a factory yard', Factory: 'a factory yard',
-  Airport: 'an airfield', Port: 'a harbor', Seaport: 'a harbor',
-  'Com Tower': 'a comms tower', 'Comm Tower': 'a comms tower', 'Communications Tower': 'a comms tower',
-  Lab: 'a lab', Laboratory: 'a lab', 'Missile Silo': 'a missile silo',
-};
-const terrainHint = (name?: string): string => (name && TERRAIN_HINT[name]) || 'open ground';
-
-// Plain-language read of the featured unit's tile and its 4 neighbors (evocative
-// terrain hint + whether a friendly/enemy unit sits there) — for subtle flavor.
-function describeSurroundings(bf: Battlefield, fx: number, fy: number, ownCode?: string): string {
-  const unitAt = new Map<string, { code?: string; playerId: string }>();
-  for (const u of bf.units) unitAt.set(`${u.x},${u.y}`, u);
-  const here = terrainHint(bf.terrainName[`${fx},${fy}`]);
-  const dirs: Array<[string, number, number]> = [['north', 0, -1], ['east', 1, 0], ['south', 0, 1], ['west', -1, 0]];
-  const neigh = dirs.map(([d, dx, dy]) => {
-    const k = `${fx + dx},${fy + dy}`;
-    if (fx + dx < 0 || fy + dy < 0 || fx + dx >= bf.width || fy + dy >= bf.height) return `${d}: edge of the map`;
-    const t = terrainHint(bf.terrainName[k]);
-    const u = unitAt.get(k);
-    const occ = u ? (ownCode && u.code === ownCode ? ' (friendly unit)' : ' (ENEMY unit!)') : '';
-    return `${d}: ${t}${occ}`;
-  });
-  return `on ${here}. Adjacent — ${neigh.join('; ')}.`;
-}
 
 /** Resolve the current player from the game page: username, army, and their REAL living units.
  *  AWBW exposes `currentTurn = <players_id>` and a `unitsInfo = {...}` map of placed units
@@ -466,7 +361,6 @@ async function resolveCurrentTurn(gameId: string): Promise<
       countryName?: string;
       co?: { name?: string; imageUrl?: string; power?: 'SCOP' | 'COP' };
       units: AwbwUnit[];
-      battlefield?: Battlefield;
       stats?: TurnStats;
       day?: number;
       dayLimit?: number; // last day of the game; undefined when the game has no day limit
@@ -509,131 +403,21 @@ async function resolveCurrentTurn(gameId: string): Promise<
       coMaxS > 0 && coPow >= coMaxS ? 'SCOP' : coMaxP > 0 && coPow >= coMaxP ? 'COP' : undefined;
     const co = coName || coImageUrl ? { name: coName, imageUrl: coImageUrl, power } : undefined;
 
-    // Per-unit-type max fuel/ammo, to decide if the game would show a low warning.
-    const maxByType: Record<string, { fuel: number; ammo: number }> = {};
-    const gm = html.match(/genericUnits\s*=\s*(\{[^;]*\})\s*;/);
-    if (gm) {
-      try {
-        const gu = JSON.parse(gm[1]) as Record<string, any>;
-        for (const [name, def] of Object.entries(gu)) {
-          maxByType[name] = { fuel: Number(def.units_fuel) || 0, ammo: Number(def.units_ammo) || 0 };
-        }
-      } catch (e) {
-        console.warn('genericUnits parse failed', e);
-      }
-    }
-
-    // Map data for the terrain backdrop: terrain name per (x,y), buildings per [x][y], player->code.
-    const terrainByXY = new Map<string, string>();
-    try {
-      const tm = html.match(/terrainInfo\s*=\s*(\[[^;]*\])\s*;/);
-      if (tm) {
-        const walk = (o: any) => {
-          if (Array.isArray(o)) o.forEach(walk);
-          else if (o && typeof o === 'object' && o.tiles_x !== undefined)
-            terrainByXY.set(`${o.tiles_x},${o.tiles_y}`, o.terrain_name);
-        };
-        walk(JSON.parse(tm[1]));
-      }
-    } catch (e) {
-      console.warn('terrainInfo parse failed', e);
-    }
-    let buildingsByXY: Record<string, Record<string, any>> = {};
-    try {
-      const bm = html.match(/buildingsInfo\s*=\s*(\{[^;]*\})\s*;/);
-      if (bm) buildingsByXY = JSON.parse(bm[1]);
-    } catch (e) {
-      console.warn('buildingsInfo parse failed', e);
-    }
-
-    // The current player's actual living units (grounds the unit pick + voice in reality).
+    // The current player's actual living units (the hologram features one of them).
     let units: AwbwUnit[] = [];
-    let battlefield: Battlefield | undefined;
     const um = html.match(/unitsInfo\s*=\s*(\{[^;]*\})\s*;/);
     if (um) {
       try {
         const obj = JSON.parse(um[1]) as Record<string, any>;
-        // players_id -> countries_code (for coloring buildings the unit stands on).
-        const playerCode: Record<string, string> = {};
-        for (const u of Object.values(obj)) {
-          if (u.units_players_id && u.countries_code) playerCode[String(u.units_players_id)] = u.countries_code;
-        }
-        const tileAt = (x: number, y: number): string => {
-          const b = buildingsByXY[String(x)]?.[String(y)];
-          if (b?.terrain_name) {
-            const word = BUILDING_WORD[b.terrain_name as string];
-            if (word === 'missilesilo') return 'missilesilo';
-            if (word) {
-              const code = b.buildings_players_id ? playerCode[String(b.buildings_players_id)] : undefined;
-              const full = code ? ARMY_FULLNAME[code] : 'neutral';
-              if (full) return `${full}${word}`;
-            }
-          }
-          const tn = terrainByXY.get(`${x},${y}`);
-          return (tn && BASE_TILE[tn]) || 'plain';
-        };
-        // Human terrain/building name at a tile (building wins), for the map + adjacency.
-        const nameAt = (x: number, y: number): string => {
-          const b = buildingsByXY[String(x)]?.[String(y)];
-          if (b?.terrain_name) return String(b.terrain_name);
-          return terrainByXY.get(`${x},${y}`) || 'Plain';
-        };
         units = Object.entries(obj)
           .filter(([, u]) => String(u.units_players_id) === curId && Number(u.units_hit_points) > 0)
-          .map(([id, u]) => {
-            const name = String(u.units_name || '');
-            const fuel = Number(u.units_fuel);
-            const ammo = Number(u.units_ammo);
-            const fuelPerTurn = Number(u.units_fuel_per_turn) || 0;
-            const max = maxByType[name] || { fuel: 0, ammo: 0 };
-            // Low fuel: <=20% of max, or (for fuel-burning air/naval) within ~2 turns of stranding.
-            const lowFuel =
-              max.fuel > 0 &&
-              (fuel <= Math.ceil(max.fuel * 0.2) || (fuelPerTurn > 0 && fuel <= fuelPerTurn * 2));
-            // Low ammo: only for units that carry ammo, at/under ~1/3 of max.
-            const lowAmmo = max.ammo > 0 && ammo <= Math.max(1, Math.floor(max.ammo / 3));
-            const x = Number(u.units_x);
-            const y = Number(u.units_y);
-            return {
-              name,
-              code: u.countries_code || undefined,
-              hp: Number(u.units_hit_points),
-              lowFuel,
-              lowAmmo,
-              terrainTile: tileAt(x, y),
-              id,
-              x,
-              y,
-              terrainName: nameAt(x, y),
-            };
-          })
-          .filter((u) => u.name);
-
-        // Battlefield snapshot (ALL living units + terrain/building names + dims) for the ASCII map.
-        let maxX = 0, maxY = 0;
-        for (const k of terrainByXY.keys()) {
-          const [sx, sy] = k.split(',').map(Number);
-          if (sx > maxX) maxX = sx;
-          if (sy > maxY) maxY = sy;
-        }
-        const terrainName: Record<string, string> = {};
-        for (const [k, v] of terrainByXY) terrainName[k] = v;
-        for (const xs of Object.keys(buildingsByXY))
-          for (const ys of Object.keys(buildingsByXY[xs])) {
-            const tn = buildingsByXY[xs][ys]?.terrain_name;
-            if (tn) terrainName[`${xs},${ys}`] = String(tn);
-          }
-        const allUnits = Object.values(obj)
-          .filter((u) => Number(u.units_hit_points) > 0)
-          .map((u) => ({
-            x: Number(u.units_x),
-            y: Number(u.units_y),
-            code: u.countries_code || undefined,
+          .map(([id, u]) => ({
             name: String(u.units_name || ''),
+            code: u.countries_code || undefined,
             hp: Number(u.units_hit_points),
-            playerId: String(u.units_players_id),
-          }));
-        battlefield = { width: maxX + 1, height: maxY + 1, terrainName, units: allUnits };
+            id,
+          }))
+          .filter((u) => u.name);
       } catch (e) {
         console.warn('unitsInfo parse failed', e);
       }
@@ -642,7 +426,7 @@ async function resolveCurrentTurn(gameId: string): Promise<
     // Only in the settings table: `<td class=small_text>Day Limit:</td><td class=small_text>30</td>`
     // ("Off" when unset, which the \d+ skips).
     const dayLimit = Number(html.match(/Day Limit:\s*<\/td>\s*<td[^>]*>\s*(\d+)/i)?.[1]) || undefined;
-    return { username, countryCode, countryName, co, units, battlefield, stats: parseTurnStats(html, curId), day, dayLimit };
+    return { username, countryCode, countryName, co, units, stats: parseTurnStats(html, curId), day, dayLimit };
   } catch (err) {
     console.error('resolveCurrentTurn failed', err);
     return undefined;
@@ -657,20 +441,9 @@ async function resolveCurrentPlayerName(gameId: string): Promise<string | undefi
 async function buildMessage(
   gameId: string,
   meta: NextTurnMeta,
-  recentChat?: Array<{ name?: string; text: string }>,
   army?: { code?: string; name?: string },
-  unit?: {
-    name: string;
-    hp: number;
-    lowFuel: boolean;
-    lowAmmo: boolean;
-    terrainTile?: string;
-    terrainName?: string;
-    hpChange?: 'hurt' | 'healed';
-    surroundings?: string;
-    map?: string;
-  },
-  co?: { name?: string; imageUrl?: string; power?: 'SCOP' | 'COP' }
+  unit?: { name: string },
+  co?: { name?: string; imageUrl?: string }
 ): Promise<RenderPayload> {
   const link = gameLink(gameId);
   const gameName = meta.gameName || `Game ${gameId}`;
@@ -678,7 +451,7 @@ async function buildMessage(
   const effectivePlayerName = meta.playerName || meta.socketPlayerName;
 
   // A strategy note about the position, when a STRATEGY_NOTE_URL service is configured, in place
-  // of the usual caption. Reminders keep their nudge. Any failure falls through to the caption.
+  // of the usual text. Reminders keep their nudge. Any failure falls through to the usual text.
   if (!meta.reminderElapsed) {
     const strategy = await fetchStrategyNote(gameId, effectivePlayerName);
     if (strategy) {
@@ -706,11 +479,9 @@ async function buildMessage(
           gameName,
           link,
           enableFun,
-          recentChat: enableFun && recentChat?.length ? recentChat : undefined,
           army: enableFun && army?.code ? army : undefined,
           unit: enableFun && unit ? unit : undefined,
           co: enableFun && co ? co : undefined,
-          language: enableFun && meta.language ? meta.language : undefined,
           reminderElapsed: enableFun && meta.reminderElapsed ? meta.reminderElapsed : undefined,
         }),
       });
@@ -739,7 +510,6 @@ async function buildMessage(
             imageData: data.imageData || undefined,
             imageContentType: data.imageContentType || undefined,
             imageFilename: data.imageFilename || undefined,
-            captionId: data.captionId || undefined,
           };
         }
         throw new Error('Render returned no text');
@@ -1622,10 +1392,8 @@ const HELP_TEXT =
   '/players             — show the roster\n' +
   '/addmod @x           — make someone a mod (mod)\n' +
   '/removemod @x        — remove a mod (mod)\n' +
-  '/fun [on|off]        — flavor text (mod)\n' +
-  '/showcase [on|off]   — let good posts appear (names blacked out) in the public gallery (mod)\n' +
+  '/fun [on|off]        — unit/CO hologram image on turn pings (mod)\n' +
   '/remind <dur|off>    — nudge the current player if they sit on their turn (mod)\n' +
-  '/language <lang>     — your turn pings in another language (e.g. Klingon, Esperanto)\n' +
   '/stats [metric] [log] — chart the game so far (armyValue, unitValue, funds, income, properties)\n' +
   '/turntime            — how long each player takes per turn, slowest first\n' +
   '/status              — current state\n' +
@@ -1639,7 +1407,6 @@ type PlayerMapping = {
   displayName?: string;
   claimedBy: 'self' | 'mod';
   claimedAt?: any;
-  language?: string; // fun-mode turn pings rendered in this language/style (best effort)
 };
 type GroupGame = {
   groupId: string;
@@ -1660,9 +1427,6 @@ type GroupGame = {
   turnStartedAt?: number;     // ms epoch when the current player's turn began (from our POV)
   reminderMs?: number | null; // override threshold; null = reminders off; undefined = default
   lastReminderAt?: number;    // ms epoch of the most recent reminder sent this turn (repeat cadence)
-  // Opt-in to the public gallery on the website. Off unless a mod runs /showcase on: a fun-mode
-  // caption can riff on group chatter, so publishing one is the group's call, not ours.
-  showcaseEnabled?: boolean;
   dayLimitNoticeDay?: number; // game day the last day-limit countdown was posted for
 };
 type CmdCtx = {
@@ -1701,83 +1465,6 @@ function logBindingEvent(groupId: string, event: string, data: Record<string, un
     .collection('bindingEvents')
     .add({ groupId, event, at: FieldValue.serverTimestamp(), ...data })
     .catch((e) => console.error('[audit] bindingEvent write failed', e));
-}
-
-/** Stamp the Signal send timestamp — plus everything the public showcase needs to redact the
- *  post later — onto the caption doc the render endpoint created. Without the timestamp a
- *  reaction can never be matched back to the message it was aimed at. Fire-and-forget. */
-async function stampCaptionSend(
-  gameId: string,
-  captionId: string,
-  fields: {
-    sentTimestamp: number;
-    groupId: string;
-    turnPlayer?: string;
-    roster: string[];
-    gameName?: string;
-  }
-): Promise<void> {
-  try {
-    await getFirestore()
-      .collection('games')
-      .doc(gameId)
-      .collection('sentCaptions')
-      .doc(captionId)
-      .update({
-        sentTimestamp: fields.sentTimestamp,
-        groupId: fields.groupId,
-        turnPlayer: fields.turnPlayer ?? null,
-        // Snapshotted now so redaction is exact string replacement later, rather than
-        // guessing at names once the roster has moved on.
-        roster: fields.roster,
-        gameName: fields.gameName ?? null,
-        sentAt: FieldValue.serverTimestamp(),
-      });
-  } catch (e) {
-    console.warn('[gg] caption stamp failed', e);
-  }
-}
-
-/** Record an emoji reaction to one of our own posts. Signal delivers these as a dataMessage
- *  with no body, so they fall straight through the command path unless we branch first.
- *  Stored as reactions[reactorAci] = emoji — one per person, so a changed reaction replaces
- *  and a removed one deletes, with no double-counting. */
-async function handleSignalReaction(env: any, reaction: any): Promise<void> {
-  const botNumber = messaging?.botId;
-  const targetAuthor = reaction.targetAuthorNumber || reaction.targetAuthor;
-  // Only reactions to Com Tower's own messages — players reacting to each other is not ours.
-  if (!botNumber || !targetAuthor || targetAuthor !== botNumber) return;
-  const target = Number(reaction.targetSentTimestamp);
-  const reactor: string | undefined = env?.sourceUuid || env?.sourceNumber;
-  const groupId: string | undefined = env?.dataMessage?.groupInfo?.groupId;
-  if (!target || !reactor || !groupId) return;
-
-  const snap = await ggRef(groupId).get();
-  if (!snap.exists) return;
-  const gameId = (snap.data() as GroupGame).gameId;
-  if (!gameId) return;
-
-  // sentTimestamp is unique per post, so this needs only the automatic single-field index.
-  const found = await getFirestore()
-    .collection('games')
-    .doc(gameId)
-    .collection('sentCaptions')
-    .where('sentTimestamp', '==', target)
-    .limit(1)
-    .get();
-  if (found.empty) return;
-
-  const emoji = typeof reaction.emoji === 'string' ? reaction.emoji.trim() : '';
-  const remove = reaction.isRemove === true || !emoji;
-  await found.docs[0].ref.update(
-    new FieldPath('reactions', reactor),
-    remove ? FieldValue.delete() : emoji,
-    'reactionsUpdatedAt',
-    FieldValue.serverTimestamp()
-  );
-  console.log(
-    `[react] ${remove ? 'removed' : emoji} on game ${gameId} caption ${found.docs[0].id}`
-  );
 }
 
 // Turn-reminder helpers.
@@ -1938,39 +1625,6 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
     return;
   }
 
-  if (cmd === '/language' || cmd === '/lang') {
-    if (!senderAci) {
-      await reply("Couldn't read your Signal identity — try again.");
-      return;
-    }
-    const players = gg.players || {};
-    const key = Object.keys(players).find((k) => players[k]?.aci === senderAci);
-    if (!key) {
-      await reply('First claim your player with /iam <your_awbw_username>, then set /language.');
-      return;
-    }
-    const arg = args.join(' ').trim();
-    if (!arg) {
-      const cur = players[key].language;
-      await reply(
-        `🗣️ ${key}'s turn pings: ${cur || 'English'}.\n` +
-          'Set with /language <language> — try: Spanish, French, German, Japanese, Esperanto, Klingon, Swedish Chef, Pirate, Yoda. /language off resets to English.'
-      );
-      return;
-    }
-    if (/^(off|none|english|en|reset|default)$/i.test(arg)) {
-      delete players[key].language;
-      await ggRef(groupId).update({ players, updatedAt: FieldValue.serverTimestamp() });
-      await reply(`🗣️ ${key} → English.`);
-      return;
-    }
-    const lang = arg.slice(0, 40);
-    players[key].language = lang;
-    await ggRef(groupId).update({ players, updatedAt: FieldValue.serverTimestamp() });
-    await reply(`🗣️ ${key} → ${lang}. Your fun-mode turn pings will come through in ${lang} (best effort). /language off to undo.`);
-    return;
-  }
-
   if (cmd === '/setplayer') {
     if (!isGgMod(gg, senderAci)) {
       await reply('Only a mod can use /setplayer.');
@@ -2068,13 +1722,13 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
 
   if (cmd === '/fun') {
     if (!isGgMod(gg, senderAci)) {
-      await reply('Only a mod can toggle fun mode.');
+      await reply('Only a mod can toggle the hologram image.');
       return;
     }
     const explicit = (args[0] || '').toLowerCase();
     const newFun = explicit === 'on' ? true : explicit === 'off' ? false : !gg.funEnabled;
     await ggRef(groupId).update({ funEnabled: newFun, updatedAt: FieldValue.serverTimestamp() });
-    await reply(`Fun mode ${newFun ? 'enabled ✨' : 'disabled'}.`);
+    await reply(`Hologram image ${newFun ? 'on ✨' : 'off'}.`);
     return;
   }
 
@@ -2110,22 +1764,6 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
       return;
     }
     await sendGroupRaw(groupId, report.caption, undefined, report.attachment);
-    return;
-  }
-
-  if (cmd === '/showcase') {
-    if (!isGgMod(gg, senderAci)) {
-      await reply('Only a mod can change showcase opt-in.');
-      return;
-    }
-    const explicit = (args[0] || '').toLowerCase();
-    const on = explicit === 'on' ? true : explicit === 'off' ? false : !gg.showcaseEnabled;
-    await ggRef(groupId).update({ showcaseEnabled: on, updatedAt: FieldValue.serverTimestamp() });
-    await reply(
-      on
-        ? 'Showcase on — this game\u2019s best posts can appear in the public gallery, with every player name blacked out. Note a fun-mode post may riff on group chatter, so only leave this on if that\u2019s fine with everyone here.'
-        : 'Showcase off — nothing from this game appears in the public gallery.'
-    );
     return;
   }
 
@@ -2275,21 +1913,10 @@ async function handleDmCommand(env: any, text: string): Promise<void> {
   await reply(DM_HELP);
 }
 
-// Recent non-command group chat per groupId, for fun-mode context (most recent last).
-const recentChatByGroup = new Map<string, Array<{ name?: string; text: string; at: number }>>();
-
 async function handleSignalIncoming(item: any): Promise<void> {
   const env = item?.envelope;
   const dataMessage = env?.dataMessage;
   if (!dataMessage) return;
-  // Reactions arrive as a dataMessage with message: null — handle before the text checks below,
-  // which would otherwise drop them as "not a command".
-  if (dataMessage.reaction) {
-    await handleSignalReaction(env, dataMessage.reaction).catch((err) =>
-      console.error('[react] failed to record reaction:', err)
-    );
-    return;
-  }
   const text: string = (dataMessage.message || '').trim();
   // Onboarding: a Signal group invite link (works in a DM, before the bot is a member) -> join it.
   const linkMatch = text.match(/https:\/\/signal\.group\/#\S+/);
@@ -2299,13 +1926,6 @@ async function handleSignalIncoming(item: any): Promise<void> {
     return;
   }
   const groupId: string | undefined = dataMessage.groupInfo?.groupId;
-  // Buffer recent group chat (non-command) so fun-mode turn alerts can riff on it.
-  if (groupId && text && !text.startsWith('/')) {
-    const buf = recentChatByGroup.get(groupId) || [];
-    buf.push({ name: env.sourceName, text: text.slice(0, 200), at: Date.now() });
-    while (buf.length > 12) buf.shift();
-    recentChatByGroup.set(groupId, buf);
-  }
   if (!text.startsWith('/')) return;
   if (!groupId) {
     // A DM has no bound game, so only the stateless queries make sense here — they take the
@@ -2599,7 +2219,7 @@ async function onGroupGameNextTurn(
     meta.socketPlayer;
   // Feature a real living unit by default. Only feature the CO when there's a
   // CO-related reason — a CO Power / Super CO Power is charged — or there are no
-  // units to feature (early game). COs command; they don't chatter for no reason.
+  // units to feature (early game).
   const liveUnits = turn?.units || [];
   const lastHp = gg.lastUnitHp || {};
   // HP change since this player's last turn (damage taken in the round, or healing).
@@ -2616,25 +2236,10 @@ async function onGroupGameNextTurn(
     const pool = damaged.length ? damaged : healed.length ? healed : withDelta;
     chosenUnit = pool[Math.floor(Math.random() * pool.length)].u;
   }
-  const chosenDelta = chosenUnit ? withDelta.find((w) => w.u === chosenUnit)?.delta ?? 0 : 0;
   const co = featureCo ? turn?.co : undefined;
   const armyCode = chosenUnit?.code || turn?.countryCode;
   const army = armyCode ? { code: armyCode } : undefined;
-  const bf = turn?.battlefield;
-  const hasPos = !!chosenUnit && typeof chosenUnit.x === 'number' && typeof chosenUnit.y === 'number';
-  const unitInfo = chosenUnit
-    ? {
-        name: chosenUnit.name,
-        hp: chosenUnit.hp,
-        lowFuel: chosenUnit.lowFuel,
-        lowAmmo: chosenUnit.lowAmmo,
-        terrainTile: chosenUnit.terrainTile,
-        terrainName: chosenUnit.terrainName,
-        hpChange: chosenDelta < 0 ? ('hurt' as const) : chosenDelta > 0 ? ('healed' as const) : undefined,
-        surroundings: bf && hasPos ? describeSurroundings(bf, chosenUnit.x!, chosenUnit.y!, chosenUnit.code) : undefined,
-        map: bf && hasPos ? renderMapAscii(bf, chosenUnit.x!, chosenUnit.y!) : undefined,
-      }
-    : undefined;
+  const unitInfo = chosenUnit ? { name: chosenUnit.name } : undefined;
   if (!currentPlayer) {
     // Couldn't name the player, but a turn DID change — notify anyway so it's never silent.
     console.log('[gg] turn changed but current player unresolved; sending generic notice');
@@ -2649,20 +2254,6 @@ async function onGroupGameNextTurn(
   }
   const info = await loadPlayers(gameId).catch(() => ({ players: [] as string[], countries: [] as string[] }));
   const gameName = gg.gameName || (await loadGameName(gameId)) || undefined;
-  // For fun mode, pass recent group chat (last ~45 min) so the caption can riff on it.
-  let recentChat: Array<{ name?: string; text: string }> | undefined;
-  if (gg.funEnabled) {
-    const cutoff = Date.now() - 45 * 60 * 1000;
-    recentChat = (recentChatByGroup.get(groupId) || [])
-      .filter((c) => c.at >= cutoff)
-      .slice(-6)
-      .map((c) => ({ name: c.name, text: c.text }));
-  }
-  // The current player's chosen fun-mode language (if they've claimed their slot and set one).
-  const langKey = Object.keys(gg.players || {}).find(
-    (k) => k.toLowerCase() === String(currentPlayer).toLowerCase()
-  );
-  const playerLang = langKey ? gg.players?.[langKey]?.language : undefined;
   const payload = await buildMessage(
     gameId,
     {
@@ -2672,9 +2263,7 @@ async function onGroupGameNextTurn(
       players: info.players,
       gameName,
       funEnabled: gg.funEnabled,
-      language: playerLang,
     },
-    recentChat,
     army,
     unitInfo,
     co
@@ -2713,9 +2302,8 @@ async function onGroupGameNextTurn(
   for (const u of liveUnits) if (u.id) newUnitHp[u.id] = u.hp;
 
   try {
-    let sentTimestamp: number | undefined;
     try {
-      sentTimestamp = await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined, attachment);
+      await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined, attachment);
     } catch (sendErr) {
       if (attachment) {
         // Attachment uploads are the slow window where a competing connection on the same
@@ -2724,27 +2312,14 @@ async function onGroupGameNextTurn(
         console.warn('[gg] send with attachment failed; retrying with attachment', sendErr);
         await new Promise((r) => setTimeout(r, 2000));
         try {
-          sentTimestamp = await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined, attachment);
+          await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined, attachment);
         } catch (retryErr) {
           console.warn('[gg] attachment retry failed; sending text-only', retryErr);
-          sentTimestamp = await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined);
+          await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined);
         }
       } else {
         throw sendErr;
       }
-    }
-    // Bind the post we just sent to the caption row behind it, so reactions have something
-    // to land on and the showcase has the names it must redact.
-    if (payload.captionId && sentTimestamp) {
-      await stampCaptionSend(gameId, payload.captionId, {
-        sentTimestamp,
-        groupId,
-        turnPlayer: currentPlayer,
-        roster: Array.from(
-          new Set([...(info.players || []), ...Object.keys(gg.players || {}), currentPlayer || ''])
-        ).filter(Boolean),
-        gameName,
-      });
     }
     await ggRef(groupId)
       .update({
@@ -2887,20 +2462,18 @@ async function runReminderCheck() {
   }
 }
 
-/** Build a fun-mode reminder caption (+ hologram image) for the current player. Mirrors the
- *  turn-ping context (a featured living unit, or the CO early / on a charged power) but the render
- *  is framed as an impatient nudge via `reminderElapsed`. Returns undefined if fun context is
- *  unavailable or the render degraded, so the caller falls back to the plain line. */
+/** Build a reminder nudge with the hologram image for the current player. Mirrors the turn-ping
+ *  context (a featured living unit, or the CO early / on a charged power); the render returns the
+ *  "still your move" text via `reminderElapsed`. Returns undefined if the render degraded, so the
+ *  caller falls back to the plain line. */
 async function buildFunReminder(
   gg: GroupGame,
   currentPlayer: string,
-  elapsed: string,
-  language?: string
+  elapsed: string
 ): Promise<
   | {
       text: string;
       attachment?: { dataB64: string; contentType: string; filename: string };
-      captionId?: string;
     }
   | undefined
 > {
@@ -2915,26 +2488,7 @@ async function buildFunReminder(
   const co = featureCo ? turn?.co : undefined;
   const armyCode = chosenUnit?.code || turn?.countryCode;
   const army = armyCode ? { code: armyCode } : undefined;
-  const bf = turn?.battlefield;
-  const hasPos = !!chosenUnit && typeof chosenUnit.x === 'number' && typeof chosenUnit.y === 'number';
-  const unitInfo = chosenUnit
-    ? {
-        name: chosenUnit.name,
-        hp: chosenUnit.hp,
-        lowFuel: chosenUnit.lowFuel,
-        lowAmmo: chosenUnit.lowAmmo,
-        terrainTile: chosenUnit.terrainTile,
-        terrainName: chosenUnit.terrainName,
-        surroundings: bf && hasPos ? describeSurroundings(bf, chosenUnit.x!, chosenUnit.y!, chosenUnit.code) : undefined,
-        map: bf && hasPos ? renderMapAscii(bf, chosenUnit.x!, chosenUnit.y!) : undefined,
-      }
-    : undefined;
-
-  const cutoff = Date.now() - 45 * 60 * 1000;
-  const recentChat = (recentChatByGroup.get(gg.groupId) || [])
-    .filter((c) => c.at >= cutoff)
-    .slice(-6)
-    .map((c) => ({ name: c.name, text: c.text }));
+  const unitInfo = chosenUnit ? { name: chosenUnit.name } : undefined;
 
   const info = await loadPlayers(gameId).catch(() => ({ players: [] as string[], countries: [] as string[] }));
   const gameName = gg.gameName || (await loadGameName(gameId)) || undefined;
@@ -2946,10 +2500,8 @@ async function buildFunReminder(
       players: info.players,
       gameName,
       funEnabled: true,
-      language,
       reminderElapsed: elapsed,
     },
-    recentChat.length ? recentChat : undefined,
     army,
     unitInfo,
     co
@@ -2964,12 +2516,12 @@ async function buildFunReminder(
         filename: payload.imageFilename || 'unit.gif',
       }
     : undefined;
-  return { text: payload.text, attachment, captionId: payload.captionId };
+  return { text: payload.text, attachment };
 }
 
-/** Send a single turn-reminder nudge that @-pings only the current player. Plain "still your move"
- *  line by default; when fun mode is on, an in-voice nudge (with the unit/CO hologram) via the
- *  render endpoint, falling back to the plain line if that path fails. */
+/** Send a single turn-reminder nudge that @-pings only the current player: a plain "still your
+ *  move" line, plus the unit/CO hologram from the render endpoint when the image is on (/fun),
+ *  falling back to the plain line if that path fails. */
 async function sendTurnReminder(gg: GroupGame, elapsedMs: number): Promise<void> {
   const current = gg.lastTurn?.awbwUsername;
   if (!gg.gameId || !current) return;
@@ -2978,21 +2530,19 @@ async function sendTurnReminder(gg: GroupGame, elapsedMs: number): Promise<void>
   const mapping = key ? players[key] : undefined;
   const elapsed = formatDurationMs(elapsedMs);
 
-  // Plain nudge — the whole message when fun mode is off, and the fallback if the fun render fails.
+  // Plain nudge — the whole message when the image is off, and the fallback if the render fails.
   let message = `⏰ Still your move, ${current} — ${elapsed} on the clock.\n${gameLink(gg.gameId)}`;
   let attachment: { dataB64: string; contentType: string; filename: string } | undefined;
-  let captionId: string | undefined;
 
   if (gg.funEnabled) {
     try {
-      const built = await buildFunReminder(gg, current, elapsed, mapping?.language);
+      const built = await buildFunReminder(gg, current, elapsed);
       if (built?.text) {
         message = built.text;
         attachment = built.attachment;
-        captionId = built.captionId;
       }
     } catch (e) {
-      console.warn('[remind] fun reminder build failed; sending plain nudge', e);
+      console.warn('[remind] hologram reminder build failed; sending plain nudge', e);
     }
   }
 
@@ -3004,37 +2554,22 @@ async function sendTurnReminder(gg: GroupGame, elapsedMs: number): Promise<void>
     mentions.push({ author: mapping.aci, start, length: 1 });
   }
 
-  let sentTimestamp: number | undefined;
   try {
-    sentTimestamp = await sendGroupRaw(gg.groupId, message, mentions.length ? mentions : undefined, attachment);
+    await sendGroupRaw(gg.groupId, message, mentions.length ? mentions : undefined, attachment);
   } catch (sendErr) {
     if (attachment) {
       // Same slow-attachment-upload race as the turn ping: retry with the image, then text-only.
       console.warn('[remind] send with attachment failed; retrying, then text-only', sendErr);
       await new Promise((r) => setTimeout(r, 2000));
       try {
-        sentTimestamp = await sendGroupRaw(gg.groupId, message, mentions.length ? mentions : undefined, attachment);
+        await sendGroupRaw(gg.groupId, message, mentions.length ? mentions : undefined, attachment);
       } catch (retryErr) {
         console.warn('[remind] attachment retry failed; sending text-only', retryErr);
-        sentTimestamp = await sendGroupRaw(gg.groupId, message, mentions.length ? mentions : undefined);
+        await sendGroupRaw(gg.groupId, message, mentions.length ? mentions : undefined);
       }
     } else {
       throw sendErr;
     }
-  }
-  // A reminder is a real post that people react to, so it earns its place in the gallery the
-  // same way a turn ping does.
-  if (captionId && sentTimestamp && gg.gameId) {
-    const info = await loadPlayers(gg.gameId).catch(() => ({ players: [] as string[], countries: [] as string[] }));
-    await stampCaptionSend(gg.gameId, captionId, {
-      sentTimestamp,
-      groupId: gg.groupId,
-      turnPlayer: current,
-      roster: Array.from(
-        new Set([...(info.players || []), ...Object.keys(gg.players || {}), current])
-      ).filter(Boolean),
-      gameName: gg.gameName,
-    });
   }
   console.log(
     `[remind] nudged ${gg.groupId.substring(0, 16)} player=${current} elapsed=${elapsed} fun=${gg.funEnabled ? 'on' : 'off'} img=${attachment ? 'yes' : 'no'}`
