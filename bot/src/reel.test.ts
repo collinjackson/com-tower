@@ -42,3 +42,9 @@ test('on Cloud Run: identity token for the service origin, own token alongside',
   assert.equal(h.Authorization, 'Bearer ID.TOKEN');
   assert.equal(h['X-Reel-Token'], 't');
 });
+
+test('waits up to REEL_TIMEOUT_MS, 100 s by default', () => {
+  assert.equal(reelConfig({ REEL_URL: 'https://r.example/reel' })?.timeoutMs, 100_000);
+  assert.equal(reelConfig({ REEL_URL: 'https://r.example/reel', REEL_TIMEOUT_MS: '45000' })?.timeoutMs, 45_000);
+  assert.equal(reelConfig({ REEL_URL: 'https://r.example/reel', REEL_TIMEOUT_MS: 'soon' })?.timeoutMs, 100_000);
+});
