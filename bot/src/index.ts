@@ -67,6 +67,8 @@ type NextTurnMeta = {
 };
 type RenderPayload = {
   text: string;
+  /** The full text, for when the image can't be sent: a reel ping's own text is only the link. */
+  fallbackText?: string;
   imageUrl?: string;
   imageData?: string;
   imageContentType?: string;
@@ -443,7 +445,9 @@ async function resolveCurrentPlayerName(gameId: string): Promise<string | undefi
 }
 
 /** The ping, with the turn's highlight reel (REEL_URL) as its image when the service has one;
- *  fetched alongside the rest, and any failure keeps the usual image. Reminders keep theirs. */
+ *  fetched alongside the rest, and any failure keeps the usual image. Reminders keep theirs.
+ *  With a reel the text is only the game link (the picture says the rest: "cut the text entirely because
+ *  a picture tells 1000 words"); the usual text stays as the fallback if the image can't be sent. */
 async function buildMessage(
   gameId: string,
   meta: NextTurnMeta,
@@ -454,7 +458,16 @@ async function buildMessage(
   const reel = meta.reminderElapsed ? Promise.resolve(null)
     : fetchReel(gameId, { day: meta.day, players: meta.players?.length || undefined });
   const [base, r] = await Promise.all([buildMessageBase(gameId, meta, army, unit, co), reel]);
-  return r ? { ...base, imageUrl: undefined, imageData: r.dataB64, imageContentType: r.contentType, imageFilename: r.filename } : base;
+  return r ? { ...base, text: gameLink(gameId), fallbackText: base.text, imageUrl: undefined, imageData: r.dataB64, imageContentType: r.contentType, imageFilename: r.filename } : base;
+}
+
+/** Appends a 1-char '@' placeholder that signal-cli renders as the contact mention.
+ *  JS string .length is UTF-16 code units == signal-cli char offsets. */
+function withMention(text: string, aci?: string): { message: string; mentions: Array<{ author: string; start: number; length: number }> } {
+  if (!aci) return { message: text, mentions: [] };
+  const spacer = text.endsWith(' ') || text.endsWith('\n') ? '' : ' ';
+  const start = (text + spacer).length;
+  return { message: `${text}${spacer}@`, mentions: [{ author: aci, start, length: 1 }] };
 }
 
 async function buildMessageBase(
@@ -2292,9 +2305,7 @@ async function onGroupGameNextTurn(
     unitInfo,
     co
   );
-  let message = payload.text;
   const players = gg.players || {};
-  const mentions: Array<{ author: string; start: number; length: number }> = [];
 
   // The message always goes to the whole group and names whose turn it is, so anyone with
   // group notifications on is covered. Mapping is optional: if the current player has claimed
@@ -2304,14 +2315,8 @@ async function onGroupGameNextTurn(
     (k) => k.toLowerCase() === String(currentPlayer).toLowerCase()
   );
   const mapping = key ? players[key] : undefined;
-  if (mapping?.aci) {
-    // Append a 1-char '@' placeholder signal-cli renders as the contact mention.
-    // JS string .length is UTF-16 code units == signal-cli char offsets.
-    const spacer = message.endsWith(' ') || message.endsWith('\n') ? '' : ' ';
-    const start = (message + spacer).length;
-    message = `${message}${spacer}@`;
-    mentions.push({ author: mapping.aci, start, length: 1 });
-  }
+  const { message, mentions } = withMention(payload.text, mapping?.aci);
+  const fallback = withMention(payload.fallbackText ?? payload.text, mapping?.aci);
 
   const attachment = payload.imageData
     ? {
@@ -2339,7 +2344,7 @@ async function onGroupGameNextTurn(
           await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined, attachment);
         } catch (retryErr) {
           console.warn('[gg] attachment retry failed; sending text-only', retryErr);
-          await sendGroupRaw(groupId, message, mentions.length ? mentions : undefined);
+          await sendGroupRaw(groupId, fallback.message, fallback.mentions.length ? fallback.mentions : undefined);
         }
       } else {
         throw sendErr;
