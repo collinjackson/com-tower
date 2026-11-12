@@ -2458,6 +2458,7 @@ async function reevaluateOwnership() {
   }
 }
 
+const STARTUP_TURN_POLL_MS = 30 * 1000; // after the groupGames listener and sockets settle
 const TURN_POLL_MS = 60 * 60 * 1000; // hourly — slow is fine; this exists so missed turns are eventually caught
 /** Poll the game page and compare current player to lastTurn. Independent of websocket health.
  *  The websocket is the fast path; this is the recovery path when we never noticed a turn change. */
@@ -2685,7 +2686,12 @@ async function main() {
   // commands aren't processed N times. syncReceiver() also handles start/stop on role changes.
   syncReceiver();
 
-  // Hourly page poll: if current player ≠ last notified, we missed a turn — post now.
+  // Hourly page poll: if current player ≠ last notified, we missed a turn — post now. Once shortly
+  // after start too, so a turn that changed while the worker was down or redeploying isn't missed
+  // for up to an hour.
+  setTimeout(() => {
+    runTurnPoll().catch((err) => console.error('[gg] turn-poll error', err));
+  }, STARTUP_TURN_POLL_MS);
   setInterval(() => {
     runTurnPoll().catch((err) => console.error('[gg] turn-poll error', err));
   }, TURN_POLL_MS);
