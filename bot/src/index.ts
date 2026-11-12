@@ -13,6 +13,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { createOwnership, type Ownership, type LeaseStore } from './ownership.js';
 import { parseTurnStats, recordTurnStats, type TurnStats } from './stats.js';
 import { fetchStrategyNote } from './strategy-note.js';
+import { fetchReel } from './reel.js';
 import {
   backfillFromReplay,
   computeTurnTimes,
@@ -440,7 +441,22 @@ async function resolveCurrentPlayerName(gameId: string): Promise<string | undefi
   return (await resolveCurrentTurn(gameId))?.username;
 }
 
+/** The ping, with the turn's highlight reel (REEL_URL) as its image when the service has one;
+ *  fetched alongside the rest, and any failure keeps the usual image. Reminders keep theirs. */
 async function buildMessage(
+  gameId: string,
+  meta: NextTurnMeta,
+  army?: { code?: string; name?: string },
+  unit?: { name: string },
+  co?: { name?: string; imageUrl?: string }
+): Promise<RenderPayload> {
+  const reel = meta.reminderElapsed ? Promise.resolve(null)
+    : fetchReel(gameId, { day: meta.day, players: meta.players?.length || undefined });
+  const [base, r] = await Promise.all([buildMessageBase(gameId, meta, army, unit, co), reel]);
+  return r ? { ...base, imageUrl: undefined, imageData: r.dataB64, imageContentType: r.contentType, imageFilename: r.filename } : base;
+}
+
+async function buildMessageBase(
   gameId: string,
   meta: NextTurnMeta,
   army?: { code?: string; name?: string },
