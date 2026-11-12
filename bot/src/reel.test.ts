@@ -49,8 +49,11 @@ test('waits up to REEL_TIMEOUT_MS, 100 s by default', () => {
   assert.equal(reelConfig({ REEL_URL: 'https://r.example/reel', REEL_TIMEOUT_MS: 'soon' })?.timeoutMs, 100_000);
 });
 
-test('failWhale quotes Cypher and ends with the link', () => {
-  const t = failWhale('https://awbw.amarriner.com/game.php?games_id=1');
-  assert.match(t, /too much information to decode the Matrix/);
+test('failWhale is addressed to the player, keeps the joke unexplained, ends with the link', () => {
+  const t = failWhale('https://awbw.amarriner.com/game.php?games_id=1', 'el_mero_mero');
+  assert.ok(t.startsWith('el_mero_mero: '));
+  assert.match(t, /too much information to decode\."/);
+  assert.doesNotMatch(t, /Cypher|Matrix/);
   assert.ok(t.endsWith('https://awbw.amarriner.com/game.php?games_id=1'));
+  assert.ok(!failWhale('x').startsWith(':'));
 });
