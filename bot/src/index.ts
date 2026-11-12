@@ -13,7 +13,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { createOwnership, type Ownership, type LeaseStore } from './ownership.js';
 import { parseTurnStats, recordTurnStats, type TurnStats } from './stats.js';
 import { fetchStrategyNote } from './strategy-note.js';
-import { fetchReel } from './reel.js';
+import { failWhale, fetchReel, reelConfig } from './reel.js';
 import { SendRetries } from './retry.js';
 import {
   backfillFromReplay,
@@ -447,7 +447,7 @@ async function resolveCurrentPlayerName(gameId: string): Promise<string | undefi
 /** The ping, with the turn's highlight reel (REEL_URL) as its image when the service has one;
  *  fetched alongside the rest, and any failure keeps the usual image. Reminders keep theirs.
  *  With a reel the text is only the game link (the picture says the rest: "cut the text entirely because
- *  a picture tells 1000 words"); the usual text stays as the fallback if the image can't be sent. */
+ *  a picture tells 1000 words"). If the reel can't be shown, the text is a fail whale instead. */
 async function buildMessage(
   gameId: string,
   meta: NextTurnMeta,
@@ -458,7 +458,10 @@ async function buildMessage(
   const reel = meta.reminderElapsed ? Promise.resolve(null)
     : fetchReel(gameId, { day: meta.day, players: meta.players?.length || undefined });
   const [base, r] = await Promise.all([buildMessageBase(gameId, meta, army, unit, co), reel]);
-  return r ? { ...base, text: gameLink(gameId), fallbackText: base.text, imageUrl: undefined, imageData: r.dataB64, imageContentType: r.contentType, imageFilename: r.filename } : base;
+  if (meta.reminderElapsed || !reelConfig()) return base;
+  const whale = failWhale(gameLink(gameId));
+  return r ? { ...base, text: gameLink(gameId), fallbackText: whale, imageUrl: undefined, imageData: r.dataB64, imageContentType: r.contentType, imageFilename: r.filename }
+    : { ...base, text: whale };
 }
 
 /** Appends a 1-char '@' placeholder that signal-cli renders as the contact mention.

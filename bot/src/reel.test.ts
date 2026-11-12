@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchReel, reelConfig } from './reel.ts';
+import { failWhale, fetchReel, reelConfig } from './reel.ts';
 
 test('off without a URL', async () => {
   assert.equal(reelConfig({}), null);
@@ -47,4 +47,10 @@ test('waits up to REEL_TIMEOUT_MS, 100 s by default', () => {
   assert.equal(reelConfig({ REEL_URL: 'https://r.example/reel' })?.timeoutMs, 100_000);
   assert.equal(reelConfig({ REEL_URL: 'https://r.example/reel', REEL_TIMEOUT_MS: '45000' })?.timeoutMs, 45_000);
   assert.equal(reelConfig({ REEL_URL: 'https://r.example/reel', REEL_TIMEOUT_MS: 'soon' })?.timeoutMs, 100_000);
+});
+
+test('failWhale quotes Cypher and ends with the link', () => {
+  const t = failWhale('https://awbw.amarriner.com/game.php?games_id=1');
+  assert.match(t, /too much information to decode the Matrix/);
+  assert.ok(t.endsWith('https://awbw.amarriner.com/game.php?games_id=1'));
 });

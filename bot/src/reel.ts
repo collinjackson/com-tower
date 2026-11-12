@@ -11,6 +11,13 @@
  */
 export type Reel = { dataB64: string; contentType: string; filename: string };
 
+/** The text when the reel can't be shown (it failed to record, or the image wouldn't send): a fail
+ *  whale, not a description of the game; the reel is the description. */
+export function failWhale(link: string): string {
+  return '\u{1F433} The newscast got lost on the way. As Cypher put it: "The image translators work for the '
+    + 'construct program, but there\'s way too much information to decode the Matrix." Raw feed: ' + link;
+}
+
 /** A reel takes about a minute to record, so the ping waits up to REEL_TIMEOUT_MS (100 s). */
 export const DEFAULT_REEL_TIMEOUT_MS = 100_000;
 
