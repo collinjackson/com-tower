@@ -67,8 +67,10 @@ type NextTurnMeta = {
 };
 type RenderPayload = {
   text: string;
-  /** The full text, for when the image can't be sent: a reel ping's own text is only the link. */
+  /** The text for when the image can't be sent (a fail whale): a reel ping's own text is only the link. */
   fallbackText?: string;
+  /** The mention goes in front of the text, not after it (a fail whale is addressed to the player). */
+  leadMention?: boolean;
   imageUrl?: string;
   imageData?: string;
   imageContentType?: string;
@@ -459,15 +461,16 @@ async function buildMessage(
     : fetchReel(gameId, { day: meta.day, players: meta.players?.length || undefined });
   const [base, r] = await Promise.all([buildMessageBase(gameId, meta, army, unit, co), reel]);
   if (meta.reminderElapsed || !reelConfig()) return base;
-  const whale = failWhale(gameLink(gameId));
+  const whale = failWhale(gameLink(gameId), meta.playerName || meta.socketPlayerName);
   return r ? { ...base, text: gameLink(gameId), fallbackText: whale, imageUrl: undefined, imageData: r.dataB64, imageContentType: r.contentType, imageFilename: r.filename }
-    : { ...base, text: whale };
+    : { ...base, text: whale, leadMention: true };
 }
 
 /** Appends a 1-char '@' placeholder that signal-cli renders as the contact mention.
  *  JS string .length is UTF-16 code units == signal-cli char offsets. */
-function withMention(text: string, aci?: string): { message: string; mentions: Array<{ author: string; start: number; length: number }> } {
+function withMention(text: string, aci?: string, lead = false): { message: string; mentions: Array<{ author: string; start: number; length: number }> } {
   if (!aci) return { message: text, mentions: [] };
+  if (lead) return { message: `@ ${text}`, mentions: [{ author: aci, start: 0, length: 1 }] };
   const spacer = text.endsWith(' ') || text.endsWith('\n') ? '' : ' ';
   const start = (text + spacer).length;
   return { message: `${text}${spacer}@`, mentions: [{ author: aci, start, length: 1 }] };
@@ -2318,8 +2321,8 @@ async function onGroupGameNextTurn(
     (k) => k.toLowerCase() === String(currentPlayer).toLowerCase()
   );
   const mapping = key ? players[key] : undefined;
-  const { message, mentions } = withMention(payload.text, mapping?.aci);
-  const fallback = withMention(payload.fallbackText ?? payload.text, mapping?.aci);
+  const { message, mentions } = withMention(payload.text, mapping?.aci, !!payload.leadMention);
+  const fallback = payload.fallbackText ? withMention(payload.fallbackText, mapping?.aci, true) : { message, mentions };
 
   const attachment = payload.imageData
     ? {
