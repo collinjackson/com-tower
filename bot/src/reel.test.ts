@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { failWhale, fetchReel, reelConfig } from './reel.ts';
+import { failWhale, fetchReel, reelConfig, rememberCaptions } from './reel.ts';
 
 test('off without a URL', async () => {
   assert.equal(reelConfig({}), null);
@@ -14,7 +14,7 @@ test('returns the GIF and sends the token, day and player count', async () => {
     seen = init; return new Response(JSON.stringify({ gif: 'R0lG', filename: 'day3.gif' }));
   }) as unknown as typeof fetch;
   const r = await fetchReel(42, { day: 3, players: 2 }, { url: 'http://x/reel', token: 't' }, f);
-  assert.deepEqual(r, { dataB64: 'R0lG', contentType: 'image/gif', filename: 'day3.gif' });
+  assert.deepEqual(r, { dataB64: 'R0lG', contentType: 'image/gif', filename: 'day3.gif', captions: [] });
   assert.equal((seen!.headers as Record<string, string>).Authorization, 'Bearer t');
   assert.equal((seen!.headers as Record<string, string>)['X-Reel-Token'], 't');
   assert.deepEqual(JSON.parse(seen!.body as string), { gameId: 42, day: 3, players: 2 });
@@ -56,4 +56,20 @@ test('failWhale is addressed to the player, keeps the joke unexplained, ends wit
   assert.doesNotMatch(t, /Cypher|Matrix/);
   assert.ok(t.endsWith('https://awbw.amarriner.com/game.php?games_id=1'));
   assert.ok(!failWhale('x').startsWith(':'));
+});
+
+test('rememberCaptions keeps the newest lines, capped', () => {
+  assert.deepEqual(rememberCaptions(['a', 'b'], ['c'], 2), ['b', 'c']);
+  assert.deepEqual(rememberCaptions([], ['x', 'y']), ['x', 'y']);
+});
+
+test('sends the recent lines and returns the lines shown', async () => {
+  let seen: RequestInit | undefined;
+  const f = (async (u: string, init: RequestInit) => {
+    if (String(u).includes('metadata.google.internal')) throw new Error('not on GCP');
+    seen = init; return new Response(JSON.stringify({ gif: 'R0lG', captions: ['Not ideal.', 7] }));
+  }) as unknown as typeof fetch;
+  const r = await fetchReel(42, { recent: ['A Lander, briefly.'] }, { url: 'http://x/reel', token: 't' }, f);
+  assert.deepEqual(JSON.parse(seen!.body as string).recent, ['A Lander, briefly.']);
+  assert.deepEqual(r?.captions, ['Not ideal.']);
 });
