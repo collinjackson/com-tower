@@ -13,7 +13,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { createOwnership, type Ownership, type LeaseStore } from './ownership.js';
 import { parseTurnStats, recordTurnStats, type TurnStats } from './stats.js';
 import { fetchStrategyNote } from './strategy-note.js';
-import { failWhale, fetchReel, reelConfig } from './reel.js';
+import { failWhale, fetchReel, reelConfig, rememberCaptions } from './reel.js';
 import { SendRetries } from './retry.js';
 import {
   backfillFromReplay,
@@ -457,13 +457,26 @@ async function buildMessage(
   unit?: { name: string },
   co?: { name?: string; imageUrl?: string }
 ): Promise<RenderPayload> {
-  const reel = meta.reminderElapsed ? Promise.resolve(null)
-    : fetchReel(gameId, { day: meta.day, players: meta.players?.length || undefined });
+  const reel = meta.reminderElapsed ? Promise.resolve(null) : reelWithMemory(gameId, meta);
   const [base, r] = await Promise.all([buildMessageBase(gameId, meta, army, unit, co), reel]);
   if (meta.reminderElapsed || !reelConfig()) return base;
   const whale = failWhale(gameLink(gameId), meta.playerName || meta.socketPlayerName);
   return r ? { ...base, text: gameLink(gameId), fallbackText: whale, imageUrl: undefined, imageData: r.dataB64, imageContentType: r.contentType, imageFilename: r.filename }
     : { ...base, text: whale, leadMention: true };
+}
+
+/** The game's reel, sent the caption lines its earlier reels showed (Firestore reelCaptions/{gameId})
+ *  so the commentator doesn't repeat itself; the lines this one shows are added to them. */
+async function reelWithMemory(gameId: string, meta: NextTurnMeta) {
+  if (!reelConfig()) return null;
+  const ref = getFirestore().collection('reelCaptions').doc(String(gameId));
+  const recent = await ref.get().then((d) => (d.exists ? ((d.data()?.lines as string[]) || []) : [])).catch(() => [] as string[]);
+  const r = await fetchReel(gameId, { day: meta.day, players: meta.players?.length || undefined, recent });
+  if (r?.captions.length) {
+    await ref.set({ lines: rememberCaptions(recent, r.captions), updatedAt: FieldValue.serverTimestamp() })
+      .catch((err) => console.warn(`reelCaptions ${gameId}: not saved`, err));
+  }
+  return r;
 }
 
 /** Appends a 1-char '@' placeholder that signal-cli renders as the contact mention.
