@@ -14,6 +14,7 @@ import { createOwnership, type Ownership, type LeaseStore } from './ownership.js
 import { parseTurnStats, recordTurnStats, type TurnStats } from './stats.js';
 import { fetchStrategyNote } from './strategy-note.js';
 import { fetchReel } from './reel.js';
+import { SendRetries } from './retry.js';
 import {
   backfillFromReplay,
   computeTurnTimes,
@@ -2353,13 +2354,26 @@ async function onGroupGameNextTurn(
         updatedAt: FieldValue.serverTimestamp(),
       })
       .catch(() => {});
+    sendRetries.succeeded(groupId);
     console.log(
       `[gg] notified group ${groupId.substring(0, 16)} turn=${currentPlayer} mentioned=${mentions.length > 0} attachment=${attachment ? `${attachment.filename} (${Math.round(attachment.dataB64.length * 0.75 / 1024)}KB)` : 'none'}`
     );
   } catch (err) {
     console.error('[gg] send failed', err);
+    // lastTurn wasn't advanced, so a re-check notifies again: try in a few minutes rather than
+    // waiting for the hourly turn poll (2026-11-12: the Peachy daemon's disk filled; pings failed).
+    const ms = sendRetries.failed(groupId);
+    if (ms !== null) console.warn(`[gg] will retry group ${groupId.substring(0, 16)} in ${Math.round(ms / 60000)} min`);
   }
 }
+
+/** Retries of turn pings that failed to send: re-check the game and notify if still unsent. */
+const sendRetries = new SendRetries(async (groupId) => {
+  const snap = await ggRef(groupId).get();
+  const gg = snap.exists ? (snap.data() as GroupGame) : undefined;
+  if (!gg?.gameId) return;
+  await syncGroupGameIfTurnChanged(groupId, gg.gameId, 'send-retry');
+});
 
 /** Scrape current player vs lastTurn; notify if the turn advanced (websocket fallback). */
 async function syncGroupGameIfTurnChanged(
