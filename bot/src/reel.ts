@@ -11,9 +11,14 @@
  */
 export type Reel = { dataB64: string; contentType: string; filename: string };
 
-export function reelConfig(env: NodeJS.ProcessEnv = process.env): { url: string; token?: string } | null {
+/** A reel takes about a minute to record, so the ping waits up to REEL_TIMEOUT_MS (100 s). */
+export const DEFAULT_REEL_TIMEOUT_MS = 100_000;
+
+export function reelConfig(env: NodeJS.ProcessEnv = process.env): { url: string; token?: string; timeoutMs?: number } | null {
   const url = env.REEL_URL?.trim();
-  return url ? { url, token: env.REEL_TOKEN?.trim() || undefined } : null;
+  const t = Number(env.REEL_TIMEOUT_MS);
+  const timeoutMs = Number.isFinite(t) && t > 0 ? t : DEFAULT_REEL_TIMEOUT_MS;
+  return url ? { url, token: env.REEL_TOKEN?.trim() || undefined, timeoutMs } : null;
 }
 
 /** A Google identity token for `audience`, from the metadata server; undefined off Google Cloud. */
@@ -32,7 +37,7 @@ export async function fetchReel(
   opts: { day?: number; players?: number },
   config = reelConfig(),
   fetchImpl: typeof fetch = fetch,
-  timeoutMs = 60000,
+  timeoutMs = config?.timeoutMs ?? DEFAULT_REEL_TIMEOUT_MS,
 ): Promise<Reel | null> {
   if (!config) return null;
   try {
