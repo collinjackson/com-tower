@@ -2267,6 +2267,9 @@ async function onGroupGameNextTurn(
           .join(' ')
     );
   }
+  // A poll or /sync knows only the player: take the day from the page, so the reel finds the
+  // right turn quickly instead of walking up from day 1.
+  if (meta.day == null && turn?.day != null) meta = { ...meta, day: turn.day };
   await maybeAnnounceDayLimit(groupId, turn?.day ?? meta.day, turn?.dayLimit);
   const currentPlayer =
     turn?.username ||
