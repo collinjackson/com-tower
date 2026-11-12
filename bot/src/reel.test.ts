@@ -9,10 +9,14 @@ test('off without a URL', async () => {
 
 test('returns the GIF and sends the token, day and player count', async () => {
   let seen: RequestInit | undefined;
-  const f = (async (_u: string, init: RequestInit) => { seen = init; return new Response(JSON.stringify({ gif: 'R0lG', filename: 'day3.gif' })); }) as unknown as typeof fetch;
+  const f = (async (u: string, init: RequestInit) => {
+    if (String(u).includes('metadata.google.internal')) throw new Error('not on GCP');
+    seen = init; return new Response(JSON.stringify({ gif: 'R0lG', filename: 'day3.gif' }));
+  }) as unknown as typeof fetch;
   const r = await fetchReel(42, { day: 3, players: 2 }, { url: 'http://x/reel', token: 't' }, f);
   assert.deepEqual(r, { dataB64: 'R0lG', contentType: 'image/gif', filename: 'day3.gif' });
   assert.equal((seen!.headers as Record<string, string>).Authorization, 'Bearer t');
+  assert.equal((seen!.headers as Record<string, string>)['X-Reel-Token'], 't');
   assert.deepEqual(JSON.parse(seen!.body as string), { gameId: 42, day: 3, players: 2 });
 });
 
@@ -22,4 +26,19 @@ test('falls back on errors, a missing gif and exceptions', async () => {
   assert.equal(await fetchReel(1, {}, cfg, ok({}, 500)), null);
   assert.equal(await fetchReel(1, {}, cfg, ok({ error: 'no finished turn found' })), null);
   assert.equal(await fetchReel(1, {}, cfg, (async () => { throw new Error('down'); }) as unknown as typeof fetch), null);
+});
+
+test('on Cloud Run: identity token for the service origin, own token alongside', async () => {
+  const seen: Record<string, RequestInit> = {};
+  const f = (async (u: string, init: RequestInit) => {
+    seen[String(u)] = init;
+    if (String(u).includes('metadata.google.internal')) return new Response('ID.TOKEN');
+    return new Response(JSON.stringify({ gif: 'R0lG' }));
+  }) as unknown as typeof fetch;
+  await fetchReel(7, {}, { url: 'https://reel.example.run.app/reel', token: 't' }, f);
+  const meta = Object.keys(seen).find((u) => u.includes('metadata'))!;
+  assert.ok(meta.endsWith(`audience=${encodeURIComponent('https://reel.example.run.app')}`));
+  const h = seen['https://reel.example.run.app/reel'].headers as Record<string, string>;
+  assert.equal(h.Authorization, 'Bearer ID.TOKEN');
+  assert.equal(h['X-Reel-Token'], 't');
 });
