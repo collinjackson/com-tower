@@ -23,7 +23,11 @@ export type TurnSampleDoc = {
  *  from funds to units instead of reading as a sudden gain. Anything not finite (funds a fog
  *  game withholds, say) is no point at all rather than a misleading zero. */
 export function metricValue(player: Record<string, unknown>, metric: string): number {
-  if (metric === 'armyValue') return Number(player.unitValue) + Number(player.funds);
+  if (metric === 'armyValue') {
+    // settledSamples sets armyValue directly on a turn taker's own sample.
+    if (player.armyValue != null && Number.isFinite(Number(player.armyValue))) return Number(player.armyValue);
+    return Number(player.unitValue) + Number(player.funds);
+  }
   return Number(player[metric]);
 }
 
@@ -42,10 +46,16 @@ function turnSlots(doc: TurnSampleDoc): Map<string, number> {
   return new Map(order.map((pid, rank) => [pid, rank / order.length]));
 }
 
-/** Drops each sample's reading of the player whose turn it is, carrying their previous one
- *  instead: at the start of their turn they hold income they have not yet spent and that the
- *  others have already spent or lost to repairs, so it is not comparable. Each line then steps
- *  once its player's turn is over, and the chart never shows a turn still in progress. */
+/** The turn taker's reading in a sample taken as their turn began holds income they have not
+ *  yet spent, while everyone else's has already been spent or lost to repairs, so it is not
+ *  comparable as it stands. With funds and income both known, take the income back out: what's
+ *  left is their army value when their turn came round, after whatever the others did to them
+ *  (repairs only move value from funds to units). Without them (a fog game, an older sample),
+ *  carry their previous reading instead. The chart never shows a turn still in progress.
+ *
+ *  Why not always carry: for the player who moves first each day, the next sample after a hit
+ *  from the last player is always their own turn start, so the hit never showed. One line ran
+ *  flat across a day in which that player lost and rebuilt a full day's income. */
 export function settledSamples(docs: TurnSampleDoc[]): TurnSampleDoc[] {
   const at = (d: TurnSampleDoc) => d.day! + turnFraction(d);
   const settled = new Map<string, Record<string, unknown>>(); // player id -> last settled record
@@ -56,8 +66,16 @@ export function settledSamples(docs: TurnSampleDoc[]): TurnSampleDoc[] {
       const players = { ...d.players! };
       const pid = d.turnPlayerId && String(d.turnPlayerId);
       if (pid && players[pid]) {
+        const p = players[pid];
+        const funds = Number(p.funds);
+        const income = Number(p.income);
         const prev = settled.get(pid);
-        if (prev) players[pid] = prev;
+        const units = Number(p.unitValue);
+        if ([p.funds, p.income, p.unitValue].every((x) => x != null) && [funds, income, units].every(Number.isFinite)) {
+          // Only army value is adjusted: funds alone could go below zero (repairs come out of
+          // the same income), so the other metrics carry the previous reading as before.
+          players[pid] = { ...(prev ?? p), armyValue: units + funds - income };
+        } else if (prev) players[pid] = prev;
         else delete players[pid];
       }
       for (const [id, p] of Object.entries(players)) settled.set(id, p);

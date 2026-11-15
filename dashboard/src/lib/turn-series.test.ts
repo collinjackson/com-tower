@@ -150,3 +150,21 @@ test('the turn taker keeps their previous reading until their turn is over', () 
   const reversed = settledSamples([docs[1], docs[2], docs[0]]);
   assert.equal(value(reversed[1], 'el_mero_mero'), 47300);
 });
+
+test("the turn taker's own sample takes their fresh income back out, so a hit just before shows", () => {
+  // The first player ends a day at 93.2k units + 9.7k funds; the last player then hits them for
+  // 15.7k; their own next sample has 77.5k units and 26.4k funds after 25.5k income and repairs.
+  // Carrying 102.9k would hide the hit; taking the income out shows 78.4k.
+  const first = (units: number, funds: number) => ({ username: 'first', order: 1, unitValue: units, funds, income: 25500 });
+  const other = { username: 'second', order: 2, unitValue: 1, funds: 0, income: 0 };
+  const docs: TurnSampleDoc[] = [
+    { day: 8, turnPlayerId: 'p2', players: { p1: first(93200, 9700), p2: other } },
+    { day: 9, turnPlayerId: 'p1', players: { p1: first(77500, 26400), p2: other } },
+  ];
+  const settled = settledSamples(docs);
+  const army = (d: TurnSampleDoc) => metricValue(d.players!.p1, 'armyValue');
+  assert.equal(army(settled[0]), 102900);
+  assert.equal(army(settled[1]), 78400);
+  // Funds still carry the last settled reading, so they never dip below zero mid-repair.
+  assert.equal(settled[1].players!.p1.funds, 9700);
+});
