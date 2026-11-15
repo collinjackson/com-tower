@@ -73,3 +73,16 @@ test('sends the recent lines and returns the lines shown', async () => {
   assert.deepEqual(JSON.parse(seen!.body as string).recent, ['A Lander, briefly.']);
   assert.deepEqual(r?.captions, ['Not ideal.']);
 });
+
+test('sends the language when there is one', async () => {
+  let body: any;
+  const f = (async (u: string, init: RequestInit) => {
+    if (String(u).includes('metadata')) throw new Error('off cloud');
+    body = JSON.parse(String(init.body));
+    return new Response(JSON.stringify({ gif: 'R0lG' }), { status: 200 });
+  }) as typeof fetch;
+  await fetchReel(5, { language: 'Klingon' }, { url: 'https://r.example/reel' }, f);
+  assert.equal(body.language, 'Klingon');
+  await fetchReel(5, {}, { url: 'https://r.example/reel' }, f);
+  assert.equal('language' in body, false);
+});

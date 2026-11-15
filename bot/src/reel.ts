@@ -2,7 +2,7 @@
  * Optional highlight reel of the turn that just ended, from an external service (REEL_URL, with a
  * bearer token in REEL_TOKEN). When set, a "your turn" notification carries the reel as its image
  * (a GIF) in place of the usual chart. The service is anything that answers
- *   POST {url}  {"gameId": number, "day"?: number, "players"?: number, "recent"?: string[]}
+ *   POST {url}  {"gameId": number, "day"?: number, "players"?: number, "recent"?: string[], "language"?: string}
  *     ->  {"gif": base64, "contentType"?: string, "filename"?: string, "captions"?: string[]}
  * `recent` is the caption lines already shown in this game (the service avoids repeating them);
  * `captions` is the lines this reel shows, for the caller to remember.
@@ -52,7 +52,7 @@ export async function identityToken(audience: string, fetchImpl: typeof fetch = 
 
 export async function fetchReel(
   gameId: string | number,
-  opts: { day?: number; players?: number; recent?: string[] },
+  opts: { day?: number; players?: number; recent?: string[]; language?: string },
   config = reelConfig(),
   fetchImpl: typeof fetch = fetch,
   timeoutMs = config?.timeoutMs ?? DEFAULT_REEL_TIMEOUT_MS,
@@ -70,7 +70,7 @@ export async function fetchReel(
     const res = await fetchImpl(config.url, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ gameId: Number(gameId), day: opts.day, players: opts.players, recent: opts.recent?.length ? opts.recent : undefined }),
+      body: JSON.stringify({ gameId: Number(gameId), day: opts.day, players: opts.players, recent: opts.recent?.length ? opts.recent : undefined, language: opts.language || undefined }),
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) {

@@ -14,6 +14,7 @@ import { createOwnership, type Ownership, type LeaseStore } from './ownership.js
 import { parseTurnStats, recordTurnStats, type TurnStats } from './stats.js';
 import { fetchStrategyNote } from './strategy-note.js';
 import { failWhale, fetchReel, reelConfig, rememberCaptions } from './reel.js';
+import { languageOf, parseLanguage } from './language.js';
 import { SendRetries, sameTurn } from './retry.js';
 import {
   backfillFromReplay,
@@ -64,6 +65,8 @@ type NextTurnMeta = {
   funEnabled?: boolean;
   inviterUid?: string;
   reminderElapsed?: string; // set for turn reminders → the text becomes a "still your move" nudge
+  /** The player to move's /language: the reel's captions are written in it. */
+  language?: string;
 };
 type RenderPayload = {
   text: string;
@@ -471,7 +474,7 @@ async function reelWithMemory(gameId: string, meta: NextTurnMeta) {
   if (!reelConfig()) return null;
   const ref = getFirestore().collection('reelCaptions').doc(String(gameId));
   const recent = await ref.get().then((d) => (d.exists ? ((d.data()?.lines as string[]) || []) : [])).catch(() => [] as string[]);
-  const r = await fetchReel(gameId, { day: meta.day, players: meta.players?.length || undefined, recent });
+  const r = await fetchReel(gameId, { day: meta.day, players: meta.players?.length || undefined, recent, language: meta.language });
   if (r?.captions.length) {
     await ref.set({ lines: rememberCaptions(recent, r.captions), updatedAt: FieldValue.serverTimestamp() })
       .catch((err) => console.warn(`reelCaptions ${gameId}: not saved`, err));
@@ -1442,6 +1445,7 @@ const HELP_TEXT =
   '📋 Com Tower — AWBW turn alerts\n' +
   '/game <link>         — watch an AWBW game (mod)\n' +
   '/iam <awbw_name>     — get an @ping on your turn (optional)\n' +
+  '/language <lang|off> — captions on your turn videos in another language (after /iam)\n' +
   '/setplayer @x <name> — @ping a member on their turn (mod, optional)\n' +
   '/unsetplayer @x      — remove a mapping (mod)\n' +
   '/players             — show the roster\n' +
@@ -1462,6 +1466,8 @@ type PlayerMapping = {
   displayName?: string;
   claimedBy: 'self' | 'mod';
   claimedAt?: any;
+  /** /language: the captions on this player's turn videos (any language or style; English when unset). */
+  language?: string;
 };
 type GroupGame = {
   groupId: string;
@@ -1653,6 +1659,31 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
 
   if (!gg || !gg.gameId) {
     await reply('No game set yet. Run /game <AWBW link> to start.');
+    return;
+  }
+
+  if (cmd === '/language' || cmd === '/lang') {
+    if (!senderAci) {
+      await reply("Couldn't read your identity — try again.");
+      return;
+    }
+    const players = gg.players || {};
+    const key = Object.keys(players).find((k) => players[k]?.aci === senderAci);
+    if (!key) {
+      await reply('First claim your player with /iam <your_awbw_username>, then set /language.');
+      return;
+    }
+    const arg = args.join(' ').trim();
+    if (!arg) {
+      await reply(`🗣️ ${key}'s turn video captions: ${players[key].language || 'English'}.\n`
+        + 'Set with /language <language>: Spanish, French, Japanese, Esperanto, Pirate, Yoda… /language off for English.');
+      return;
+    }
+    const lang = parseLanguage(arg);
+    if (lang) players[key].language = lang;
+    else delete players[key].language;
+    await ggRef(groupId).update({ players, updatedAt: FieldValue.serverTimestamp() });
+    await reply(`🗣️ ${key} → ${lang || 'English'}.${lang ? ' Captions on your turn videos will be in it (best effort).' : ''}`);
     return;
   }
 
@@ -2325,6 +2356,7 @@ async function onGroupGameNextTurn(
       members: Object.keys(gg.players || {}),
       gameName,
       funEnabled: gg.funEnabled,
+      language: languageOf(gg.players, currentPlayer),
     },
     army,
     unitInfo,
