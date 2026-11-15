@@ -10,6 +10,19 @@ export function sendRetryDelay(attempt: number, delays: readonly number[] = SEND
   return attempt >= 0 && attempt < delays.length ? delays[attempt] : null;
 }
 
+/** Whether the turn on the page is the one the group was last pinged for. Both the player and
+ *  the day must match: in a two-player game a missed ping leaves the same name a day later, and a
+ *  name alone would call that turn already sent. A day either side doesn't know (an older record,
+ *  a page that didn't parse) falls back to the name. */
+export function sameTurn(
+  last: { day?: number | null; awbwUsername?: string | null } | undefined,
+  player: string,
+  day?: number | null
+): boolean {
+  if (!last?.awbwUsername || last.awbwUsername.toLowerCase() !== player.toLowerCase()) return false;
+  return last.day == null || day == null || last.day === day;
+}
+
 /** Per-group retry bookkeeping: one pending timer a group, attempts counted until a send lands. */
 export class SendRetries {
   private attempts = new Map<string, number>();

@@ -14,7 +14,7 @@ import { createOwnership, type Ownership, type LeaseStore } from './ownership.js
 import { parseTurnStats, recordTurnStats, type TurnStats } from './stats.js';
 import { fetchStrategyNote } from './strategy-note.js';
 import { failWhale, fetchReel, reelConfig, rememberCaptions } from './reel.js';
-import { SendRetries } from './retry.js';
+import { SendRetries, sameTurn } from './retry.js';
 import {
   backfillFromReplay,
   computeTurnTimes,
@@ -2301,10 +2301,13 @@ async function onGroupGameNextTurn(
   if (!currentPlayer) {
     // Couldn't name the player, but a turn DID change — notify anyway so it's never silent.
     console.log('[gg] turn changed but current player unresolved; sending generic notice');
-    await sendGroupRaw(
-      groupId,
-      `⏭️${meta.day ? ` Day ${meta.day}.` : ''} New turn.\n${gameLink(gameId)}`
-    ).catch((e) => console.error('[gg] generic notice failed', e));
+    try {
+      await sendGroupRaw(groupId, `⏭️${meta.day ? ` Day ${meta.day}.` : ''} New turn.\n${gameLink(gameId)}`);
+    } catch (e) {
+      // Not sent, so not recorded: the next check notifies again.
+      console.error('[gg] generic notice failed', e);
+      return;
+    }
     await ggRef(groupId)
       .update({ lastTurn: { day: meta.day ?? null, awbwUsername: null }, turnStartedAt: Date.now(), lastReminderAt: null, updatedAt: FieldValue.serverTimestamp() })
       .catch(() => {});
@@ -2412,12 +2415,13 @@ async function syncGroupGameIfTurnChanged(
   if (!snap.exists) return 'inactive';
   const gg = snap.data() as GroupGame;
   if (gg.status !== 'active' || gg.gameId !== gameId) return 'inactive';
-  const currentPlayer = await resolveCurrentPlayerName(gameId).catch(() => undefined);
+  const turn = await resolveCurrentTurn(gameId).catch(() => undefined);
+  const currentPlayer = turn?.username;
   if (!currentPlayer) return 'no_player';
-  if (currentPlayer === (gg.lastTurn?.awbwUsername || undefined)) return 'unchanged';
-  console.log(`[gg] ${reason}: turn=${currentPlayer} for group ${groupId.substring(0, 16)}`);
+  if (sameTurn(gg.lastTurn, currentPlayer, turn?.day)) return 'unchanged';
+  console.log(`[gg] ${reason}: turn=${currentPlayer} day=${turn?.day ?? '?'} for group ${groupId.substring(0, 16)}`);
   try {
-    await onGroupGameNextTurn(groupId, gameId, { socketPlayer: currentPlayer });
+    await onGroupGameNextTurn(groupId, gameId, { socketPlayer: currentPlayer, day: turn?.day });
     return 'notified';
   } catch (e) {
     console.error('[gg] sync notify failed', e);
