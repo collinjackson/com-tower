@@ -1,0 +1,30 @@
+# systemd unit for `peachy daemon`, the Peachy side of a Com Tower that runs on Peachy.
+# install.sh puts it at /etc/systemd/system/peachy-daemon.service.
+#
+# The daemon answers signal-cli-rest-api's HTTP API for the bot's Peachy account, and the
+# Com Tower worker talks to it as it would to a Signal bridge (see README.md).
+
+[Unit]
+Description=peachy daemon (signal-cli REST API for a Peachy bot account)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=peachy-bot
+Group=peachy-bot
+# PEACHY_DAEMON_TOKEN: the bearer token the worker must send.
+# PEACHY_LISTEN: host:port to answer on, e.g. 127.0.0.1:8081, or 0.0.0.0:8081 for a worker on
+# a private network. Root-only file, so the token stays out of the unit and argv.
+EnvironmentFile=/etc/peachy-daemon/env
+ExecStart=/usr/local/bin/peachy -d /var/lib/peachy-bot daemon -listen ${PEACHY_LISTEN} -mode json-rpc
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/peachy-bot
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

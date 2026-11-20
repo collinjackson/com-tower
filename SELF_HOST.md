@@ -129,6 +129,14 @@ Then set `COM_TOWER_WORKER_URL` on the dashboard to the Cloud Run service URL.
 
 Deploy `dashboard/firestore.rules` to your Firebase project. Ensure composite indexes exist for queries in `dashboard/src/app/api/game/[id]/activity/route.ts` and admin/captcha routes (Firebase Console will prompt with create links on first failure).
 
+## Peachy
+
+The same worker can serve [Peachy](https://pchy.app) group chats. On Peachy the bridge is
+`peachy daemon` from [peachy-go](https://github.com/collinjackson/peachy-go), which answers
+signal-cli-rest-api's HTTP API; the worker runs with `MESSAGING_PLATFORM=peachy`, and can share
+your Firebase project with a Signal worker. [deploy/peachy/](deploy/peachy/README.md) has the
+setup: a systemd unit and install script for the daemon, and the worker's settings.
+
 ## Verify it works
 
 1. Open your dashboard URL; confirm the homepage shows **your** bot number.
