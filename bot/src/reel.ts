@@ -6,12 +6,17 @@
  *     ->  {"gif": base64, "contentType"?: string, "filename"?: string, "captions"?: string[]}
  * `recent` is the caption lines already shown in this game (the service avoids repeating them);
  * `captions` is the lines this reel shows, for the caller to remember.
- * Any failure, timeout or missing gif returns null, and the caller keeps its usual image.
+ * An answer without a gif (e.g. {"error": "no finished turn found"} on day 1, before anyone has
+ * moved) returns NO_REEL: there was nothing to record, so the caller sends its usual ping.
+ * A real failure (bad status, timeout, exception) returns null, and the caller sends a fail whale.
  * On Cloud Run the call also carries a Google identity token for the service's origin (from the
  * metadata server), so the service can stay private to this worker's account; elsewhere the
  * bearer token alone is sent.
  */
 export type Reel = { dataB64: string; contentType: string; filename: string; captions: string[] };
+
+/** The service answered but had no reel to give (nothing to record yet). */
+export const NO_REEL = 'none' as const;
 
 /** How many recent caption lines a game remembers and sends with each reel request. */
 export const RECENT_CAPTIONS = 60;
@@ -56,7 +61,7 @@ export async function fetchReel(
   config = reelConfig(),
   fetchImpl: typeof fetch = fetch,
   timeoutMs = config?.timeoutMs ?? DEFAULT_REEL_TIMEOUT_MS,
-): Promise<Reel | null> {
+): Promise<Reel | typeof NO_REEL | null> {
   if (!config) return null;
   try {
     // Cloud Run's IAM reads Authorization; the service's own token then rides in X-Reel-Token.
@@ -80,7 +85,7 @@ export async function fetchReel(
     const data = (await res.json()) as { gif?: string; contentType?: string; filename?: string; error?: string; captions?: unknown };
     if (typeof data?.gif !== 'string' || !data.gif) {
       if (data?.error) console.warn(`Reel skipped for game ${gameId}: ${data.error}`);
-      return null;
+      return NO_REEL;
     }
     const captions = Array.isArray(data.captions) ? data.captions.filter((c): c is string => typeof c === 'string') : [];
     return { dataB64: data.gif, contentType: data.contentType || 'image/gif', filename: data.filename || `reel-${gameId}.gif`, captions };

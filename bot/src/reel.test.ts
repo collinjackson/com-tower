@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { failWhale, fetchReel, reelConfig, rememberCaptions } from './reel.ts';
+import { failWhale, fetchReel, NO_REEL, reelConfig, rememberCaptions } from './reel.ts';
 
 test('off without a URL', async () => {
   assert.equal(reelConfig({}), null);
@@ -20,11 +20,12 @@ test('returns the GIF and sends the token, day and player count', async () => {
   assert.deepEqual(JSON.parse(seen!.body as string), { gameId: 42, day: 3, players: 2 });
 });
 
-test('falls back on errors, a missing gif and exceptions', async () => {
+test('null on failures, NO_REEL when the service has nothing to record', async () => {
   const cfg = { url: 'http://x/reel' };
   const ok = (body: unknown, status = 200) => (async () => new Response(JSON.stringify(body), { status })) as unknown as typeof fetch;
   assert.equal(await fetchReel(1, {}, cfg, ok({}, 500)), null);
-  assert.equal(await fetchReel(1, {}, cfg, ok({ error: 'no finished turn found' })), null);
+  assert.equal(await fetchReel(1, {}, cfg, ok({ error: 'no finished turn found' })), NO_REEL);
+  assert.equal(await fetchReel(1, {}, cfg, ok({})), NO_REEL);
   assert.equal(await fetchReel(1, {}, cfg, (async () => { throw new Error('down'); }) as unknown as typeof fetch), null);
 });
 

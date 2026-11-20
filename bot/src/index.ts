@@ -13,7 +13,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { createOwnership, type Ownership, type LeaseStore } from './ownership.js';
 import { parseTurnStats, recordTurnStats, type TurnStats } from './stats.js';
 import { fetchStrategyNote } from './strategy-note.js';
-import { failWhale, fetchReel, reelConfig, rememberCaptions } from './reel.js';
+import { failWhale, fetchReel, NO_REEL, reelConfig, rememberCaptions } from './reel.js';
 import { languageOf, parseLanguage } from './language.js';
 import { SendRetries, sameTurn } from './retry.js';
 import {
@@ -452,7 +452,8 @@ async function resolveCurrentPlayerName(gameId: string): Promise<string | undefi
 /** The ping, with the turn's highlight reel (REEL_URL) as its image when the service has one;
  *  fetched alongside the rest, and any failure keeps the usual image. Reminders keep theirs.
  *  With a reel the text is only the game link (the picture says the rest: "cut the text entirely because
- *  a picture tells 1000 words"). If the reel can't be shown, the text is a fail whale instead. */
+ *  a picture tells 1000 words"). If the reel failed, the text is a fail whale instead; if the service
+ *  had no finished turn to record (day 1, before anyone has moved), the plain ping goes out with no image. */
 async function buildMessage(
   gameId: string,
   meta: NextTurnMeta,
@@ -463,6 +464,7 @@ async function buildMessage(
   const reel = meta.reminderElapsed ? Promise.resolve(null) : reelWithMemory(gameId, meta);
   const [base, r] = await Promise.all([buildMessageBase(gameId, meta, army, unit, co), reel]);
   if (meta.reminderElapsed || !reelConfig()) return base;
+  if (r === NO_REEL) return { ...base, imageUrl: undefined, imageData: undefined };
   const whale = failWhale(gameLink(gameId), meta.playerName || meta.socketPlayerName);
   return r ? { ...base, text: gameLink(gameId), fallbackText: whale, imageUrl: undefined, imageData: r.dataB64, imageContentType: r.contentType, imageFilename: r.filename }
     : { ...base, text: whale, leadMention: true };
@@ -475,7 +477,7 @@ async function reelWithMemory(gameId: string, meta: NextTurnMeta) {
   const ref = getFirestore().collection('reelCaptions').doc(String(gameId));
   const recent = await ref.get().then((d) => (d.exists ? ((d.data()?.lines as string[]) || []) : [])).catch(() => [] as string[]);
   const r = await fetchReel(gameId, { day: meta.day, players: meta.players?.length || undefined, recent, language: meta.language });
-  if (r?.captions.length) {
+  if (r && r !== NO_REEL && r.captions.length) {
     await ref.set({ lines: rememberCaptions(recent, r.captions), updatedAt: FieldValue.serverTimestamp() })
       .catch((err) => console.warn(`reelCaptions ${gameId}: not saved`, err));
   }
