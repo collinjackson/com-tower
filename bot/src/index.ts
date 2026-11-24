@@ -14,7 +14,7 @@ import { createOwnership, type Ownership, type LeaseStore } from './ownership.js
 import { parseTurnStats, recordTurnStats, type TurnStats } from './stats.js';
 import { fetchStrategyNote } from './strategy-note.js';
 import { failWhale, fetchReel, NO_REEL, reelConfig, rememberCaptions } from './reel.js';
-import { languageOf, parseLanguage } from './language.js';
+import { languageOf, languagesOf, parseLanguage } from './language.js';
 import { SendRetries, sameTurn } from './retry.js';
 import {
   backfillFromReplay,
@@ -65,8 +65,10 @@ type NextTurnMeta = {
   funEnabled?: boolean;
   inviterUid?: string;
   reminderElapsed?: string; // set for turn reminders → the text becomes a "still your move" nudge
-  /** The player to move's /language: the reel's captions are written in it. */
+  /** The player to move's /language (older reel services: every caption is written in it). */
   language?: string;
+  /** Every claimed player's /language: the reel's commentator speaks the player to move's, each CO its own player's. */
+  languages?: Record<string, string>;
 };
 type RenderPayload = {
   text: string;
@@ -476,7 +478,7 @@ async function reelWithMemory(gameId: string, meta: NextTurnMeta) {
   if (!reelConfig()) return null;
   const ref = getFirestore().collection('reelCaptions').doc(String(gameId));
   const recent = await ref.get().then((d) => (d.exists ? ((d.data()?.lines as string[]) || []) : [])).catch(() => [] as string[]);
-  const r = await fetchReel(gameId, { day: meta.day, players: meta.players?.length || undefined, recent, language: meta.language });
+  const r = await fetchReel(gameId, { day: meta.day, players: meta.players?.length || undefined, recent, language: meta.language, languages: meta.languages, toMove: meta.playerName || meta.socketPlayerName });
   if (r && r !== NO_REEL && r.captions.length) {
     await ref.set({ lines: rememberCaptions(recent, r.captions), updatedAt: FieldValue.serverTimestamp() })
       .catch((err) => console.warn(`reelCaptions ${gameId}: not saved`, err));
@@ -1457,7 +1459,7 @@ const HELP_TEXT =
   '📋 Com Tower — AWBW turn alerts\n' +
   '/game <link>         — watch an AWBW game (mod)\n' +
   '/iam <awbw_name>     — get an @ping on your turn (optional)\n' +
-  '/language <lang|off> — captions on your turn videos in another language (after /iam)\n' +
+  '/language <lang|off> — your turn pings\' commentator and your CO talk in it (after /iam)\n' +
   '/setplayer @x <name> — @ping a member on their turn (mod, optional)\n' +
   '/unsetplayer @x      — remove a mapping (mod)\n' +
   '/players             — show the roster\n' +
@@ -1478,7 +1480,7 @@ type PlayerMapping = {
   displayName?: string;
   claimedBy: 'self' | 'mod';
   claimedAt?: any;
-  /** /language: the captions on this player's turn videos (any language or style; English when unset). */
+  /** /language: the commentator on this player's turn pings and their CO's lines (any language or style; English when unset). */
   language?: string;
 };
 type GroupGame = {
@@ -1691,15 +1693,15 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
     }
     const arg = args.join(' ').trim();
     if (!arg) {
-      await reply(`🗣️ ${key}'s turn video captions: ${players[key].language || 'English'}.\n`
-        + 'Set with /language <language>: Spanish, French, Japanese, Esperanto, Pirate, Yoda… /language off for English.');
+      await reply(`🗣️ ${key}'s language: ${players[key].language || 'English'} (the commentator on your turn pings, and your CO's lines).\n`
+        + 'Set with /language <language>: Spanish, French, Japanese, Esperanto, Pirate, Yoda, emoji… /language off for English.');
       return;
     }
     const lang = parseLanguage(arg);
     if (lang) players[key].language = lang;
     else delete players[key].language;
     await ggRef(groupId).update({ players, updatedAt: FieldValue.serverTimestamp() });
-    await reply(`🗣️ ${key} → ${lang || 'English'}.${lang ? ' Captions on your turn videos will be in it (best effort).' : ''}`);
+    await reply(`🗣️ ${key} → ${lang || 'English'}.${lang ? ' The commentator on your turn pings and your CO will talk in it (best effort); other players\' COs keep theirs.' : ''}`);
     return;
   }
 
@@ -2373,6 +2375,7 @@ async function onGroupGameNextTurn(
       gameName,
       funEnabled: gg.funEnabled,
       language: languageOf(gg.players, currentPlayer),
+      languages: languagesOf(gg.players),
     },
     army,
     unitInfo,

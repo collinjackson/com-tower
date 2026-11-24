@@ -86,4 +86,17 @@ test('sends the language when there is one', async () => {
   assert.equal(body.language, 'Klingon');
   await fetchReel(5, {}, { url: 'https://r.example/reel' }, f);
   assert.equal('language' in body, false);
+  assert.equal('languages' in body, false);
+});
+
+test('sends every player\'s language and who is to move', async () => {
+  let body: any;
+  const f = (async (u: string, init: RequestInit) => {
+    if (String(u).includes('metadata')) throw new Error('off cloud');
+    body = JSON.parse(String(init.body));
+    return new Response(JSON.stringify({ gif: 'R0lG' }), { status: 200 });
+  }) as typeof fetch;
+  await fetchReel(5, { language: 'Yoda', languages: { bob: 'Yoda' }, toMove: 'bob' }, { url: 'https://r.example/reel' }, f);
+  assert.deepEqual(body.languages, { bob: 'Yoda' });
+  assert.equal(body.toMove, 'bob');
 });

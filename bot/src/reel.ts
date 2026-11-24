@@ -57,7 +57,7 @@ export async function identityToken(audience: string, fetchImpl: typeof fetch = 
 
 export async function fetchReel(
   gameId: string | number,
-  opts: { day?: number; players?: number; recent?: string[]; language?: string },
+  opts: { day?: number; players?: number; recent?: string[]; language?: string; languages?: Record<string, string>; toMove?: string },
   config = reelConfig(),
   fetchImpl: typeof fetch = fetch,
   timeoutMs = config?.timeoutMs ?? DEFAULT_REEL_TIMEOUT_MS,
@@ -75,7 +75,8 @@ export async function fetchReel(
     const res = await fetchImpl(config.url, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ gameId: Number(gameId), day: opts.day, players: opts.players, recent: opts.recent?.length ? opts.recent : undefined, language: opts.language || undefined }),
+      body: JSON.stringify({ gameId: Number(gameId), day: opts.day, players: opts.players, recent: opts.recent?.length ? opts.recent : undefined, language: opts.language || undefined,
+        languages: opts.languages, toMove: opts.languages ? opts.toMove : undefined }),
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) {
