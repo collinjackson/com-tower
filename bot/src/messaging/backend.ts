@@ -50,6 +50,10 @@ export interface MessagingBackend {
   startReceiving(onItem: (item: IncomingItem) => Promise<void>): Promise<void>;
   stopReceiving(): void;
   receiverDiagnostics(): ReceiverDiagnostics;
+
+  /** Whether the bot may post in this group on its own (turn pings), when the platform makes
+   *  that a per-group permission. Undefined, or absent, when it always may or can't tell. */
+  postsUnprompted?(groupId: string): Promise<boolean | undefined>;
 }
 
 /** The platform a stored group game belongs to. Games bound before platforms were recorded are
@@ -58,7 +62,9 @@ export function platformOf(doc: { platform?: string } | undefined): string {
   return doc?.platform || 'signal';
 }
 
-/** The platform this worker serves: MESSAGING_PLATFORM, default "signal". */
+/** The platform this worker serves: MESSAGING_PLATFORM, default "peachy" for the peachy-bot
+ *  backend and "signal" otherwise. */
 export function messagingPlatform(env: NodeJS.ProcessEnv = process.env): string {
-  return (env.MESSAGING_PLATFORM || 'signal').trim().toLowerCase();
+  const fallback = (env.MESSAGING_BACKEND || '').trim().toLowerCase() === 'peachy-bot' ? 'peachy' : 'signal';
+  return (env.MESSAGING_PLATFORM || fallback).trim().toLowerCase();
 }

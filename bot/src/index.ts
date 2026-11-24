@@ -85,7 +85,7 @@ type RenderPayload = {
 const PLATFORM = messagingPlatform();
 const messaging: MessagingBackend | null = createBackendFromEnv();
 function requireMessaging(): MessagingBackend {
-  if (!messaging) throw new Error('Messaging bridge not configured (SIGNAL_CLI_URL / SIGNAL_BOT_NUMBER)');
+  if (!messaging) throw new Error('Messaging not configured (SIGNAL_CLI_URL / SIGNAL_BOT_NUMBER, or PEACHY_BOT_STORE_KEY)');
   return messaging;
 }
 /** The signal-cli-rest bridge, for endpoints outside the backend interface; null otherwise. */
@@ -1648,6 +1648,10 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
     msg +=
       `I'll post here each turn. To get a personal @ping on your turn, run /iam <your_awbw_name> ` +
       `(optional — or just turn on notifications for this group).`;
+    // Peachy: turn pings are the bot posting on its own, which a group grants separately.
+    const mayPost = await requireMessaging().postsUnprompted?.(groupId).catch(() => undefined);
+    if (mayPost === false)
+      msg += `\n⚠️ I can't post turn pings here yet: Peachy needs this group to let Com Tower post on its own, and to let everyone send messages.`;
     await reply(msg);
     console.log(`[gg] /game ${gameId} set for group ${groupId.substring(0, 16)}`);
     applyGroupGameWatch(groupId, { ...gg, groupId, gameId, status: 'active' } as GroupGame, 'modified');

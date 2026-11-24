@@ -45,3 +45,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Peachy bot: the store key and the encrypted store
+.peachy-store-key*
+bot/data/
