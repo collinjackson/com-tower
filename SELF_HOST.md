@@ -131,11 +131,17 @@ Deploy `dashboard/firestore.rules` to your Firebase project. Ensure composite in
 
 ## Peachy
 
-The same worker can serve [Peachy](https://pchy.app) group chats. On Peachy the bridge is
-`peachy daemon` from [peachy-go](https://github.com/collinjackson/peachy-go), which answers
-signal-cli-rest-api's HTTP API; the worker runs with `MESSAGING_PLATFORM=peachy`, and can share
-your Firebase project with a Signal worker. [deploy/peachy/](deploy/peachy/README.md) has the
-setup: a systemd unit and install script for the daemon, and the worker's settings.
+The same worker can serve [Peachy](https://pchy.app) group chats, as a Peachy bot: with
+`MESSAGING_BACKEND=peachy-bot` it runs Peachy's bot SDK, `@peachysocial/bot`, in its own process,
+and can share your Firebase project with a Signal worker. You create the bot in the Peachy app,
+make a store key (`npx @peachysocial/bot keygen`), and link the store with the bot's one-time
+Connect code. The bot's encrypted store must outlive the process, so it runs as one instance on
+a VM with a disk, or on Cloud Run with a Postgres store; Cloud Run's own filesystem won't do.
+[deploy/peachy/](deploy/peachy/README.md) has the steps and settings.
+
+The older option, `peachy daemon` from [peachy-go](https://github.com/collinjackson/peachy-go)
+(it answers signal-cli-rest-api's HTTP API, so the worker runs with `MESSAGING_PLATFORM=peachy` and
+`SIGNAL_CLI_URL` pointed at it), is still described there too.
 
 ## Verify it works
 

@@ -15,6 +15,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
 # MESSAGING_BACKEND=peachy-bot keeps the bot's encrypted store here: mount a volume on it.
+ENV PEACHY_BOT_DB=/data/bot.db
 RUN mkdir -p /data && chown node:node /data && chmod 0700 /data
 EXPOSE 8080
 USER node
