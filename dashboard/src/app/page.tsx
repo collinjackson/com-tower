@@ -11,13 +11,13 @@ const SELF_HOST_GUIDE =
 // How people reach the bot: its Signal username, never its phone number. Overridable per
 // deployment (self-hosters run their own bot account).
 //
-// TODO(owner): fill in the shared instance's Signal username (e.g. "comtower.01"), here or via
-// NEXT_PUBLIC_SIGNAL_USERNAME on Vercel. Until then the page says the username is coming soon.
-const SIGNAL_USERNAME = process.env.NEXT_PUBLIC_SIGNAL_USERNAME || '';
+// The shared instance's account by default; NEXT_PUBLIC_SIGNAL_USERNAME overrides it.
+const SIGNAL_USERNAME = process.env.NEXT_PUBLIC_SIGNAL_USERNAME || 'comtower.01';
 // The account's username link, copied from Signal (Profile > Username > QR code or link). It looks
 // like https://signal.me/#eu/<opaque code>: Signal makes the code, so it can't be built from the
 // username. Optional; without it the username is shown as plain text.
-const SIGNAL_USERNAME_LINK = process.env.NEXT_PUBLIC_SIGNAL_USERNAME_LINK || '';
+const SIGNAL_USERNAME_LINK = process.env.NEXT_PUBLIC_SIGNAL_USERNAME_LINK ||
+  (process.env.NEXT_PUBLIC_SIGNAL_USERNAME ? '' : 'https://signal.me/#eu/_qvH915Zu34ee1YymxZDhCnh8G1j8DwGfbkC7iUxXNsGdmO7pflJs4MVKsF0GtgE');
 
 const BOT_CONTACT: React.ReactNode = !SIGNAL_USERNAME ? (
   <span className="text-[#7c2d12] font-semibold">Com Tower</span>
