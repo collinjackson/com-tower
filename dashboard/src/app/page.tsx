@@ -8,10 +8,31 @@ import { FieldOrders } from './components/FieldOrders';
 const SELF_HOST_GUIDE =
   'https://github.com/collinjackson/com-tower/blob/main/SELF_HOST.md';
 
-// Overridable per deployment (self-hosters run their own Signal number), but the shared
-// instance's number is public and printed on this page anyway — so it falls back rather than
-// rendering an empty "Com Tower ()" if the env var is missing.
-const BOT_NUMBER = process.env.NEXT_PUBLIC_BOT_NUMBER || '+1 555-555-0100';
+// How people reach the bot: its Signal username, never its phone number. Overridable per
+// deployment (self-hosters run their own bot account).
+//
+// TODO(owner): fill in the shared instance's Signal username (e.g. "comtower.01"), here or via
+// NEXT_PUBLIC_SIGNAL_USERNAME on Vercel. Until then the page says the username is coming soon.
+const SIGNAL_USERNAME = process.env.NEXT_PUBLIC_SIGNAL_USERNAME || '';
+// The account's username link, copied from Signal (Profile > Username > QR code or link). It looks
+// like https://signal.me/#eu/<opaque code>: Signal makes the code, so it can't be built from the
+// username. Optional; without it the username is shown as plain text.
+const SIGNAL_USERNAME_LINK = process.env.NEXT_PUBLIC_SIGNAL_USERNAME_LINK || '';
+
+const BOT_CONTACT: React.ReactNode = !SIGNAL_USERNAME ? (
+  <span className="text-[#7c2d12] font-semibold">Com Tower</span>
+) : SIGNAL_USERNAME_LINK ? (
+  <a
+    href={SIGNAL_USERNAME_LINK}
+    target="_blank"
+    rel="noopener noreferrer"
+    className="text-[#7c2d12] font-semibold no-underline hover:text-[#a8481a] transition-colors"
+  >
+    Com Tower ({SIGNAL_USERNAME})
+  </a>
+) : (
+  <span className="text-[#7c2d12] font-semibold">Com Tower ({SIGNAL_USERNAME})</span>
+);
 
 // Short roster only — /help points to the rest.
 const COMMANDS: Array<[string, string]> = [
@@ -23,7 +44,7 @@ const COMMANDS: Array<[string, string]> = [
 ];
 
 const STEPS: Array<[string, React.ReactNode]> = [
-  ['1', <>Add <span className="text-[#7c2d12] font-semibold">Com Tower ({BOT_NUMBER})</span> to your game&rsquo;s Signal group chat — or just DM it; a one-on-one chat works too.</>],
+  ['1', <>Message {BOT_CONTACT} on Signal{SIGNAL_USERNAME ? '' : ' (username coming soon)'}, then add it to your game&rsquo;s Signal group chat — or just keep the one-on-one chat; that works too.</>],
   ['2', <>In that chat, run <code className="text-[#7c2d12] font-bold">/game &lt;AWBW link&gt;</code> to bind the game. Whoever runs it first becomes the <span className="text-[#2b2412] font-semibold">mod</span>.</>],
   ['3', 'Com Tower watches the game and posts to the chat on every turn.'],
   ['4', <><span className="text-[#6b5a35]">Optional:</span> a player runs <code className="text-[#7c2d12] font-bold">/iam &lt;awbw_username&gt;</code> for a personal @ping on their turn.</>],
@@ -100,7 +121,7 @@ export default function Home() {
             >
               Host your own Com Tower
             </a>{' '}
-            — fork the repo, set your env vars, and use your own Signal number.
+            — fork the repo, set your env vars, and run your own Signal account.
           </p>
         </div>
       </main>

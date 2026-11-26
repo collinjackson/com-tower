@@ -16,7 +16,7 @@ Day 12. ExamplePlayer, you’re up. https://awbw.amarriner.com/game.php?games_id
 
 Com Tower is a Signal bot. Add it to your AWBW game’s group chat (or DM it one-on-one), bind your game, and it posts when turns change.
 
-1. **Add Com Tower** to your game’s Signal group — the bot number is on the [homepage](https://com-tower.vercel.app). A DM works too.
+1. **Message Com Tower on Signal** — its Signal username is on the [homepage](https://com-tower.vercel.app). Then add it to your game’s Signal group, or just keep the one-on-one chat.
 2. **Bind the game** — in that chat, run `/game <AWBW link>`. Whoever runs it first becomes the **mod**.
 3. **Turn on notifications** for the group in Signal (or run `/iam <your_awbw_name>` for a personal @ping on your turn).
 4. **Play** — Com Tower watches the game and posts each turn. By default each post carries a hologram of one of your units (or your CO).
@@ -47,11 +47,11 @@ Send `/help` in the group for the full command list.
 
 ## Host your own Com Tower
 
-The hosted app at [com-tower.vercel.app](https://com-tower.vercel.app) is a **shared instance** — one Signal number, one worker, one database. That’s great for trying Com Tower or running a single game, but every group routes through the same bot.
+The hosted app at [com-tower.vercel.app](https://com-tower.vercel.app) is a **shared instance** — one Signal account, one worker, one database. That’s great for trying Com Tower or running a single game, but every group routes through the same bot.
 
 **Self-hosting** gives you your own stack:
 
-- **Your own Signal number** — your games don’t add load to the shared bot
+- **Your own Signal account** — your games don’t add load to the shared bot
 - **Your own data** — isolated Firebase project, your players and games only
 - **Same experience** — players still add the bot to a group and run `/game`; all the same commands
 - **Fork-friendly** — Com Tower is AGPL; fork the repo, set env vars, deploy

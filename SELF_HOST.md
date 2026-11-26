@@ -12,7 +12,7 @@ Each self-hosted instance is fully isolated: your Firebase, your bot worker, you
 4. [ ] Run a Signal bridge (signal-cli REST) and register a dedicated phone number
 5. [ ] Deploy `bot/` to Cloud Run with env vars below
 6. [ ] Deploy Firestore rules from `dashboard/firestore.rules`
-7. [ ] Set `NEXT_PUBLIC_BOT_NUMBER` on the dashboard to match your Signal number
+7. [ ] Give the bot's Signal account a username, and set `NEXT_PUBLIC_SIGNAL_USERNAME` (plus, optionally, `NEXT_PUBLIC_SIGNAL_USERNAME_LINK`) on the dashboard
 8. [ ] Verify: add your bot to a Signal group → `/game <awbw link>` → `/status` shows watching
 
 ## How the pieces connect
@@ -30,7 +30,7 @@ Signal group  ←→  signal-cli REST (SIGNAL_CLI_URL)
 | Bot → dashboard | Render API | `NOTIFY_RENDER_URL` = `https://<your-dashboard>/api/notify/render` |
 | Dashboard → bot | Worker URL | `COM_TOWER_WORKER_URL` = `https://<your-worker>.run.app` |
 | Dashboard ↔ bot | Shared secret | `INVITE_SHARED_SECRET` — **same value on both** (invite/captcha flow) |
-| Dashboard UI | Bot number | `NEXT_PUBLIC_BOT_NUMBER` — display format of `SIGNAL_BOT_NUMBER` |
+| Dashboard UI | Bot contact | `NEXT_PUBLIC_SIGNAL_USERNAME` — the Signal username of the `SIGNAL_BOT_NUMBER` account |
 
 ## Environment variables
 
@@ -47,7 +47,8 @@ Signal group  ←→  signal-cli REST (SIGNAL_CLI_URL)
 | `FIREBASE_PROJECT_ID` | yes | Service account (server APIs) |
 | `FIREBASE_CLIENT_EMAIL` | yes | |
 | `FIREBASE_PRIVATE_KEY` | yes | Use `\n` for newlines in Vercel |
-| `NEXT_PUBLIC_BOT_NUMBER` | yes | Shown on homepage; match your Signal number |
+| `NEXT_PUBLIC_SIGNAL_USERNAME` | yes | The bot's Signal username (e.g. `mytower.01`), shown on the homepage. Players reach the bot by username, so the phone number stays private |
+| `NEXT_PUBLIC_SIGNAL_USERNAME_LINK` | optional | The username's `https://signal.me/#eu/...` link, copied from Signal; makes the homepage name a link |
 | `COM_TOWER_WORKER_URL` | yes | Your Cloud Run bot URL |
 | `INVITE_SHARED_SECRET` | yes | Random string; copy to bot env |
 | `NEXT_PUBLIC_SITE_URL` | recommended | `https://your-app.vercel.app` (invite links) |
@@ -95,7 +96,7 @@ Deploy to Vercel with **Root Directory** = `dashboard`. Set the same env vars in
 
 ## 3. Signal bridge
 
-Run [signal-cli](https://github.com/AsamK/signal-cli) with its REST API. Register a dedicated phone number for the bot identity. Set `SIGNAL_CLI_URL` to the bridge base URL and `SIGNAL_BOT_NUMBER` to that number.
+Run [signal-cli](https://github.com/AsamK/signal-cli) with its REST API. Register a dedicated phone number for the bot identity. Set `SIGNAL_CLI_URL` to the bridge base URL and `SIGNAL_BOT_NUMBER` to that number. Then give the account a Signal username (Signal requires a dot and at least two digits at the end, e.g. `mytower.01`): with signal-cli, `signal-cli -a +<number> updateAccount --username mytower.01`, or with signal-cli-rest-api, `POST /v1/accounts/<number>/username` with `{"username": "mytower.01"}`. Either prints the username and its `signal.me` link. Publish the username, not the number.
 
 For a minimal setup, run signal-cli locally or in a container on a VM. The production reference uses Cloud Run + GCS for the identity; self-hosters can start simpler.
 
