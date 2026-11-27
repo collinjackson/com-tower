@@ -20,8 +20,10 @@ export type TurnTimeRow = {
   army?: string;
   eliminated?: boolean;
   turnsMs: number[];
-  /** Time on the clock so far, if it is this player's turn now. */
+  /** How long their turn in progress has taken so far, if it is this player's turn now. */
   currentMs?: number;
+  /** What's left on their AWBW clock now, if it is their turn. */
+  clockLeftMs?: number;
 };
 
 const HOUR = 3600_000;
@@ -205,8 +207,10 @@ export function buildTurnTimePng(opts: {
       ctx.stroke();
       ctx.font = `10px ${FONT}`;
       ctx.fillStyle = color;
-      ctx.textAlign = cx > x1 - 60 ? 'right' : 'center';
-      ctx.fillText(`now ${fmtSpan(r.currentMs)}`, cx, cy - 13);
+      const label = `now ${fmtSpan(r.currentMs)}${r.clockLeftMs !== undefined ? ` · ${fmtSpan(r.clockLeftMs)} left` : ''}`;
+      const half = ctx.measureText(label).width / 2;   // kept inside the plot at either end
+      ctx.textAlign = cx + half > x1 ? 'right' : cx - half < x0 ? 'left' : 'center';
+      ctx.fillText(label, cx + (ctx.textAlign === 'right' ? 7 : ctx.textAlign === 'left' ? -7 : 0), cy - 13);
     }
 
     // Numbers on the right: average leads, since that is the ranking.

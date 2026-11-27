@@ -807,6 +807,7 @@ async function buildTurnTimeReport(
             eliminated: p.eliminated,
             turnsMs: p.turns.map((t) => t.ms),
             currentMs: p.currentMs,
+            clockLeftMs: p.clockLeftMs,
           })),
         }),
       });
@@ -823,6 +824,9 @@ async function buildTurnTimeReport(
       console.warn('[turntime] render fetch failed', err);
     }
   }
+  // With the chart, the caption is just its heading and the link: the chart says the rest. The
+  // full text is for when it can't be drawn.
+  if (attachment) return { caption: `⏱️ Turn time (${span})\n${gameLink(gameId)}`, attachment };
   return { caption, attachment };
 }
 

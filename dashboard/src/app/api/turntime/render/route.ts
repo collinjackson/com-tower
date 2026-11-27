@@ -19,6 +19,7 @@ export async function POST(req: Request) {
     eliminated: p?.eliminated === true,
     turnsMs: (Array.isArray(p?.turnsMs) ? p.turnsMs : []).map(num).filter((v): v is number => v !== undefined).slice(0, 1000),
     currentMs: num(p?.currentMs),
+    clockLeftMs: num(p?.clockLeftMs),
   }));
   try {
     const png = buildTurnTimePng({
