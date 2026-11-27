@@ -71,6 +71,9 @@ Copy `dashboard/.env.local.example` to `.env.local` and fill in values.
 | `REEL_URL` | optional | A turn-video service (see [Turn videos](#turn-videos-optional)); unset: the usual image |
 | `REEL_TOKEN` | optional | Bearer token sent to `REEL_URL` |
 | `REEL_TIMEOUT_MS` | optional | How long a ping waits for its video (default `100000`) |
+| `POSTHOG_KEY` | optional | Your PostHog project key: usage counts go to your PostHog (README "Analytics"). Unset: none are sent |
+| `POSTHOG_HOST` | optional | PostHog's ingest host (default `https://us.i.posthog.com`; EU: `https://eu.i.posthog.com`) |
+| `ANALYTICS_SALT` | optional | Salt for the hashed group ids (default: the key) |
 
 See `bot/deploy.sh` for Cloud Run deploy with Secret Manager or plain env vars.
 

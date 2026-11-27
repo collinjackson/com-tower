@@ -14,6 +14,7 @@ import { createOwnership, type Ownership, type LeaseStore } from './ownership.js
 import { parseTurnStats, recordTurnStats, type TurnStats } from './stats.js';
 import { fetchStrategyNote } from './strategy-note.js';
 import { failWhale, fetchRecap, fetchReel, NO_REEL, reelConfig, rememberCaptions } from './reel.js';
+import { commandName, track } from './analytics.js';
 import { languageList, languageOf, languagesOf, parseLanguage } from './language.js';
 import { SendRetries, sameTurn } from './retry.js';
 import {
@@ -465,6 +466,9 @@ async function buildMessage(
 ): Promise<RenderPayload> {
   const reel = meta.reminderElapsed ? Promise.resolve(null) : reelWithMemory(gameId, meta);
   const [base, r] = await Promise.all([buildMessageBase(gameId, meta, army, unit, co), reel]);
+  // One per alert built: whether its turn video came back (or why not).
+  void track('turn alert', { game: gameId }, { kind: meta.reminderElapsed ? 'reminder' : 'turn',
+    video: meta.reminderElapsed ? 'none' : !reelConfig() ? 'off' : r === NO_REEL ? 'nothing yet' : r ? 'reel' : 'failed' });
   if (meta.reminderElapsed || !reelConfig()) return base;
   if (r === NO_REEL) return { ...base, imageUrl: undefined, imageData: undefined };
   const whale = failWhale(gameLink(gameId), meta.playerName || meta.socketPlayerName);
@@ -1545,6 +1549,8 @@ function logBindingEvent(groupId: string, event: string, data: Record<string, un
     .collection('bindingEvents')
     .add({ groupId, event, at: FieldValue.serverTimestamp(), ...data })
     .catch((e) => console.error('[audit] bindingEvent write failed', e));
+  // bound | rebound | stopped | ended | reminder_config (the actor and settings stay in Firestore).
+  void track('game ' + event, { group: groupId }, { gameId: typeof data.gameId === 'string' || typeof data.gameId === 'number' ? String(data.gameId) : undefined });
 }
 
 // Turn-reminder helpers.
@@ -1589,6 +1595,7 @@ function isGgMod(gg: GroupGame | undefined, aci?: string): boolean {
 async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
   const { groupId, cmd, args, senderAci, senderNumber, senderName, mentions } = ctx;
   const reply = (t: string) => sendGroupReply(groupId, t);
+  void track('command', { group: groupId }, { command: commandName(cmd) });
 
   if (cmd === '/ping') {
     await reply('🟢 pong — Com Tower can hear this group. Receiving is working.');
@@ -2025,6 +2032,7 @@ async function handleDmCommand(env: any, text: string): Promise<void> {
   const args = parts.slice(1);
   const reply = (msg: string) => sendDirect(to, msg).catch(() => undefined);
   console.log(`[dm] command "${cmd}" from ${env.sourceName || to}`);
+  void track('dm command', { dm: to }, { command: commandName(cmd) });
 
   if (cmd === '/ping') {
     await reply('🛰️ Com Tower online.');
@@ -2182,7 +2190,10 @@ function stopGGSocket(groupId: string, reason: string) {
 /** Posts the game's highlight recap (fetchRecap) to the group: on /recap, and when a watched game
  *  ends. Runs in the background (a recap takes minutes); `quiet` sends nothing when there's no recap. */
 async function postRecap(groupId: string, gameId: string, gg: GroupGame | undefined, opts: { over?: boolean; result?: string; fresh?: boolean; quiet?: boolean } = {}) {
+  const t0 = Date.now();
   const r = await fetchRecap(gameId, { languages: languagesOf(gg?.players), result: opts.result, over: opts.over, fresh: opts.fresh });
+  void track('recap', { group: groupId }, { gameId, auto: !!opts.quiet, over: !!opts.over, result: !r ? 'failed' : r === NO_REEL ? 'nothing yet' : 'sent',
+    seconds: Math.round((Date.now() - t0) / 1000) });
   if (!r || r === NO_REEL) {
     if (!opts.quiet)
       await sendGroupRaw(groupId, r === NO_REEL ? 'Nothing to recap yet: no turn has finished.' : "Couldn't cut the recap this time. Try /recap again later.")
