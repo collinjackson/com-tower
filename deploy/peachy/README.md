@@ -135,9 +135,11 @@ The worker's settings are the ones in [SELF_HOST.md](../../SELF_HOST.md), withou
 | `PEACHY_BOT_STORE_KEY` | The store key. A secret. Or `PEACHY_BOT_STORE_KEY_FILE`: a 0600 file holding it. |
 | `PEACHY_BOT_DB` | The SQLite store's path. Default `./data/bot.db`; `/data/bot.db` in the image. |
 | `PEACHY_BOT_DATABASE_URL` | Optional. A Postgres store instead of SQLite. A secret. |
-| `PEACHY_BOT_CHATS_FILE` | Optional. Where the worker keeps the ids of the chats it is in, for `/list-groups`. Default `chats.json` beside the SQLite store; none with Postgres (then it lists only the chats heard from since it started). |
 | `PEACHY_CONNECT_CODE` | Optional. A Connect code for a first start with an empty store. Remove it after. |
 | `SCALING_MODE` | `singleton` (the default). |
+
+The worker lists the chats the bot is in from the SDK's store, so it keeps no file of its own: a
+`chats.json` that an earlier worker left beside the store is no longer read and can be deleted.
 
 The SDK needs Node.js 22.13 or newer; the worker's image has it. If the bot stops for good
 (another copy took over, its token was revoked, its keys were reset), the worker exits non-zero
@@ -155,20 +157,23 @@ What's different from Signal, because of Peachy's rules for bots:
   which a group grants it (and a group where only admins may send messages refuses it whatever it
   grants). Without it the send fails, and the worker logs it as a failed send. `/game` says
   so when the group doesn't let the bot post.
+- **When Peachy can't take a send.** While Peachy is out of reach, or the bot's copy of a chat is
+  behind, a send fails with `UnavailableError`. The worker tries it again after 2 and 8 seconds;
+  a turn ping that still can't go is retried in minutes, as any failed ping is.
 - **Replies.** The bot answers a command in the command's thread and also in the main chat. A
   command picked from the picker, or with `@<bot>` in front, always gets its answer. A bare
   `/command` typed without the `@` gets one only where the bot has Post; elsewhere it still runs,
   silently.
 - **Who the bot hears.** Peachy hands the bot the messages of members who added it or said OK to
   it (a member's first `@<bot>` asks them). Someone who hasn't can't run its commands.
-- **Mentions are text.** A turn ping names the player as `@handle`, as words: the SDK has no way
-  for a bot to send a real mention, so it doesn't notify the player beyond the group's own
-  notification. Players who want a ping should have notifications on for the group.
-- **Naming a member** (`/setplayer @member`, `/addmod @member`): the SDK hands over the words only,
-  so the bot looks the `@handle` up among the group's members. Type the handle; a person's name
-  works when it is one word.
-- **A group that removes the bot and adds it again** is a new chat to the bot, with a new id: run
-  `/game` again there.
+- **Mentions.** A turn ping or a reminder mentions the player who has claimed their slot (`/iam`,
+  `/setplayer`) as a real Peachy mention: their `@handle` shows in the message and their phone
+  notifies them, even with the group on "Mentions only". Only the players the bot means are
+  mentioned; any other `@word` in its text stays words.
+- **Naming a member** (`/setplayer @member`, `/addmod @member`): pick them from the `@` list, or
+  type their handle, as for any mention.
+- **A group that removes the bot and adds it again** keeps its id, so the game it watched, its
+  players and its mods carry on; it only needs to grant Post again if the new add doesn't.
 - The dashboard's invite and captcha pages, and joining a group by link, are Signal-only.
 - People are Peachy accounts, not phone numbers. A DM to someone who never wrote to the bot lands
   as a message request.
