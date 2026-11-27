@@ -474,11 +474,11 @@ async function buildMessage(
 
 /** The game's reel, sent the caption lines its earlier reels showed (Firestore reelCaptions/{gameId})
  *  so the commentator doesn't repeat itself; the lines this one shows are added to them. */
-async function reelWithMemory(gameId: string, meta: NextTurnMeta) {
+async function reelWithMemory(gameId: string, meta: NextTurnMeta, fresh = false) {
   if (!reelConfig()) return null;
   const ref = getFirestore().collection('reelCaptions').doc(String(gameId));
   const recent = await ref.get().then((d) => (d.exists ? ((d.data()?.lines as string[]) || []) : [])).catch(() => [] as string[]);
-  const r = await fetchReel(gameId, { day: meta.day, players: meta.players?.length || undefined, recent, language: meta.language, languages: meta.languages, toMove: meta.playerName || meta.socketPlayerName });
+  const r = await fetchReel(gameId, { day: meta.day, players: meta.players?.length || undefined, recent, language: meta.language, languages: meta.languages, toMove: meta.playerName || meta.socketPlayerName, fresh });
   if (r && r !== NO_REEL && r.captions.length) {
     await ref.set({ lines: rememberCaptions(recent, r.captions), updatedAt: FieldValue.serverTimestamp() })
       .catch((err) => console.warn(`reelCaptions ${gameId}: not saved`, err));
@@ -1474,6 +1474,7 @@ const HELP_TEXT =
   '/turntime            — how long each player takes per turn, slowest first\n' +
   '/status              — current state\n' +
   '/sync                — check AWBW now and post if we missed a turn\n' +
+  '/reel                — record the last turn\'s video again and post it (after a fix)\n' +
   '/stop                — stop watching (mod)\n' +
   '/ping                — connectivity check';
 
@@ -1941,6 +1942,39 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
     } else {
       await reply('Not watching an active game.');
     }
+    return;
+  }
+
+  // Re-record the last finished turn's reel and post it (2026-11-27: to see a fix to the reel on
+  // the turn that showed the problem). The service skips its cache; nobody is @-pinged.
+  if (cmd === '/reel' || cmd === '/retry') {
+    if (!reelConfig()) {
+      await reply('Turn videos are off on this Com Tower.');
+      return;
+    }
+    await reply("🎬 Recording the last turn's video again (about a minute)…");
+    const [info, current] = await Promise.all([
+      loadPlayers(gg.gameId).catch(() => ({ players: [] as string[], countries: [] as string[] })),
+      resolveCurrentTurn(gg.gameId).catch(() => undefined),
+    ]);
+    const meta: NextTurnMeta = {
+      day: current?.day ?? gg.lastTurn?.day ?? undefined,
+      playerName: current?.username,
+      players: info.players,
+      language: languageOf(gg.players, current?.username),
+      languages: languagesOf(gg.players),
+    };
+    const r = await reelWithMemory(gg.gameId, meta, true);
+    if (r === NO_REEL) {
+      await reply('No finished turn to record yet.');
+      return;
+    }
+    if (!r) {
+      await reply("Couldn't record the video this time. Try again in a minute.");
+      return;
+    }
+    await sendGroupRaw(groupId, `🔁 Re-recorded: ${gameLink(gg.gameId)}`, undefined,
+      { dataB64: r.dataB64, contentType: r.contentType, filename: r.filename });
     return;
   }
 
