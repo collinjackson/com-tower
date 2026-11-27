@@ -736,7 +736,8 @@ async function fetchReplayTurn(gameId: string, index: number): Promise<ClockSnap
  *  (when the renderer is reachable) a chart in each player's army colour. */
 async function buildTurnTimeReport(
   gameId: string,
-  referenceMs: number | null = DEFAULT_REMINDER_MS
+  referenceMs: number | null = DEFAULT_REMINDER_MS,
+  { final = false }: { final?: boolean } = {}
 ): Promise<
   | { caption: string; attachment?: { dataB64: string; contentType: string; filename: string } }
   | undefined
@@ -766,6 +767,8 @@ async function buildTurnTimeReport(
   }
 
   const report = computeTurnTimes([...snaps, ...added], Date.now());
+  // A finished game has nobody on the clock.
+  if (final) for (const p of report.players) delete p.currentMs;
   if (report.timedTurns === 0 && !report.players.some((p) => p.currentMs)) return undefined;
   const ranked = rankBySlowest(report.players);
 
@@ -2143,10 +2146,21 @@ async function announceGameEnded(
     .catch(() => {});
   logBindingEvent(groupId, 'ended', { gameId });
   const headline = message || `Game ${gameId} is over.`;
-  await sendGroupReply(
-    groupId,
-    `🏁 ${headline}\nI've stopped watching it — run /game <link> when the next one starts.`
-  ).catch((e) => console.error('[gg] end-of-game announce failed', e));
+  const text = `🏁 ${headline}\nI've stopped watching it — run /game <link> when the next one starts.`;
+  // The game ended while watched (not /stopped): the summary carries the turn-time chart.
+  const gg = snap?.exists ? (snap.data() as GroupGame) : undefined;
+  const report =
+    status === 'stopped'
+      ? undefined
+      : await buildTurnTimeReport(gameId, gg ? reminderThresholdMs(gg) : DEFAULT_REMINDER_MS, { final: true }).catch(
+          (err) => {
+            console.warn('[turntime] end-of-game report failed', err);
+            return undefined;
+          }
+        );
+  await sendGroupRaw(groupId, report ? `${text}\n\n${report.caption}` : text, undefined, report?.attachment).catch(
+    (e) => console.error('[gg] end-of-game announce failed', e)
+  );
 }
 
 function startGroupGameSocket(groupId: string, gameId: string) {
