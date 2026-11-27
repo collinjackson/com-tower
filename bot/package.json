@@ -10,7 +10,7 @@
     "test": "node --test 'src/**/*.test.ts'"
   },
   "dependencies": {
-    "@peachysocial/bot": "^1.0.0",
+    "@peachysocial/bot": "^1.2.1",
     "firebase-admin": "^12.0.0",
     "google-auth-library": "^9.7.0",
     "ws": "^8.15.1"

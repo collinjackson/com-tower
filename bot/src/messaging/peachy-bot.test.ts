@@ -1,8 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 import { FakePeachy } from '@peachysocial/bot/testing';
 // The leaf module, as .ts: tests run the sources directly.
 import { PEACHY_COMMANDS, PeachyBotBackend } from './peachy-bot.ts';
@@ -12,10 +9,14 @@ import type { IncomingItem, MessagingBackend } from './backend.ts';
  *  item and may send through the backend, as Com Tower's command handlers do. */
 async function start(
   answer: (item: IncomingItem, backend: MessagingBackend) => Promise<void> = async () => {},
-  opts: { chatsFile?: string } = {}
+  opts: { unavailableRetryMs?: number[] } = {}
 ) {
   const peachy = new FakePeachy({ handle: 'comtower', name: 'Com Tower' });
-  const backend = new PeachyBotBackend({ platform: 'peachy', bot: peachy.bot({ logger: false }), chatsFile: opts.chatsFile });
+  const backend = new PeachyBotBackend({
+    platform: 'peachy',
+    bot: peachy.bot({ logger: false }),
+    unavailableRetryMs: opts.unavailableRetryMs ?? [10, 10],
+  });
   const got: IncomingItem[] = [];
   await backend.startReceiving(async (item) => {
     got.push(item);
@@ -81,17 +82,17 @@ test('members a command names with @ come through as mentions; ordinary chat nev
   const { peachy, got, alice, bob } = await start();
   const group = await peachy.addToChat({ by: alice, members: [bob], grants: ['post'] });
   await group.say(alice, 'anyone up for a game?');
-  await group.say(alice, '@comtower /setplayer @bob some_player', { mentionsBot: true });
+  await group.say(alice, '@comtower /setplayer @bob some_player', { mentionsBot: true, mentions: [bob] });
   await group.say(alice, '/who');
 
   assert.deepEqual(got.map((i) => i.envelope.dataMessage.message), ['/setplayer @bob some_player', '/who']);
-  const [m] = got[0].envelope.dataMessage.mentions;
-  assert.equal(m.uuid, bob.actorId);
-  assert.equal(m.name, 'Bob');
+  assert.deepEqual(got[0].envelope.dataMessage.mentions, [
+    { uuid: bob.actorId, number: null, name: 'Bob', handle: 'bob', start: '/setplayer '.length, length: '@bob'.length },
+  ]);
   assert.equal(got[1].envelope.dataMessage.mentions, undefined);
 });
 
-test('a turn ping posts to the group, its mention as the player\'s @handle', async () => {
+test('a turn ping posts to the group and mentions the player for real', async () => {
   const { peachy, backend, alice, bob } = await start();
   const group = await peachy.addToChat({ by: alice, members: [bob], grants: ['post'] });
   const text = "It's Bob's turn (day 3).";
@@ -100,7 +101,60 @@ test('a turn ping posts to the group, its mention as the player\'s @handle', asy
     mentions: [{ author: bob.actorId, start: text.length + 1, length: 1 }],
   });
   assert.ok(typeof ts === 'number' && ts > 0);
-  assert.deepEqual(group.posts.map((p) => [p.kind, p.text]), [['post', "It's Bob's turn (day 3). @bob"]]);
+  assert.deepEqual(
+    group.posts.map((p) => [p.kind, p.text, p.mentions?.map((m) => m.actorId)]),
+    [['post', "It's Bob's turn (day 3). @bob", [bob.actorId]]]
+  );
+});
+
+test('only the people the bot means are mentioned; a placeholder for someone gone is dropped', async () => {
+  const { peachy, backend, alice, bob } = await start();
+  const carol = peachy.person('Carol', 'carol');
+  const group = await peachy.addToChat({ by: alice, members: [bob], grants: ['post'] });
+  // Typed @handles stay words; a mention of someone not in the chat leaves no stray "@".
+  await backend.sendToGroup(group.id, {
+    message: 'Ask @bob about it. @',
+    mentions: [{ author: carol.actorId, start: 'Ask @bob about it. '.length, length: 1 }],
+  });
+  await backend.sendToGroup(group.id, { message: 'Roster: @alice, @bob' });
+  assert.deepEqual(
+    group.posts.map((p) => [p.text, p.mentions?.length ?? 0]),
+    [['Ask @bob about it.', 0], ['Roster: @alice, @bob', 0]]
+  );
+});
+
+test('a reply to a command mentions the members it names', async () => {
+  const { peachy, got, alice, bob } = await start(async (item, backend) => {
+    const groupId = item.envelope.dataMessage.groupInfo.groupId;
+    const [m] = item.envelope.dataMessage.mentions;
+    const text = 'Mapped ';
+    await backend.sendToGroup(groupId, {
+      message: `${text}@ to some_player.`,
+      mentions: [{ author: m.uuid, start: text.length, length: 1 }],
+    });
+  });
+  const group = await peachy.addToChat({ by: alice, members: [bob], grants: ['post'] });
+  await group.say(alice, '@comtower /setplayer @bob some_player', { mentionsBot: true, mentions: [bob] });
+  assert.equal(got.length, 1);
+  assert.deepEqual(
+    group.posts.map((p) => [p.kind, p.text, p.mentions?.map((m) => m.actorId)]),
+    [['reply', 'Mapped @bob to some_player.', [bob.actorId]]]
+  );
+});
+
+test('a send Peachy cannot take right now is tried again, then left to the caller', async () => {
+  const { peachy, backend, alice } = await start(undefined, { unavailableRetryMs: [50, 50] });
+  const group = await peachy.addToChat({ by: alice, grants: ['post'] });
+  await peachy.setReachable(false);
+  const sent = backend.sendToGroup(group.id, { message: 'Day 5' });
+  setTimeout(() => void peachy.setReachable(true), 20);
+  await sent;
+  assert.deepEqual(group.posts.map((p) => p.text), ['Day 5']);
+
+  await peachy.setReachable(false);
+  await assert.rejects(backend.sendToGroup(group.id, { message: 'Day 6' }), { name: 'UnavailableError' });
+  await peachy.setReachable(true);
+  assert.deepEqual(group.posts.map((p) => p.text), ['Day 5']);
 });
 
 test('a turn ping in a group without the post grant is refused, and the bot is told it may not post', async () => {
@@ -150,22 +204,21 @@ test('a DM to someone outside a handler writes to them first', async () => {
   assert.deepEqual(peachy.dmPosts(bob).map((p) => [p.text, p.request]), [['Your turn', true]]);
 });
 
-test('listGroups lists the chats the bot is in, and keeps their ids in the chats file', async () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'peachy-bot-test-'));
-  try {
-    const chatsFile = path.join(dir, 'chats.json');
-    const { peachy, backend, alice, bob } = await start(undefined, { chatsFile });
-    const one = await peachy.addToChat({ by: alice, name: 'One', grants: ['post'] });
-    const two = await peachy.addToChat({ by: bob, name: 'Two' });
-    const groups = await backend.listGroups();
-    assert.deepEqual(
-      groups.map((g) => [g.id, g.name, g.mayPost, g.grants]),
-      [[one.id, 'One', true, ['post']], [two.id, 'Two', true, []]]
-    );
-    await two.remove();
-    assert.deepEqual((await backend.listGroups()).map((g) => g.id), [one.id]);
-    assert.deepEqual(JSON.parse(readFileSync(chatsFile, 'utf8')), [one.id]);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+test('listGroups lists the chats the bot is in, and a chat that adds it again keeps its id', async () => {
+  const { peachy, backend, alice, bob } = await start();
+  const one = await peachy.addToChat({ by: alice, name: 'One', grants: ['post'] });
+  const two = await peachy.addToChat({ by: bob, name: 'Two' });
+  const groups = await backend.listGroups();
+  assert.deepEqual(
+    groups.map((g) => [g.id, g.name, g.mayPost, g.grants]).sort(),
+    [[one.id, 'One', true, ['post']], [two.id, 'Two', true, []]].sort()
+  );
+  await two.remove();
+  assert.deepEqual((await backend.listGroups()).map((g) => g.id), [one.id]);
+
+  // Added back, it is the same chat: the game bound to its id carries on.
+  await two.addAgain({ grants: ['post'] });
+  assert.deepEqual((await backend.listGroups()).map((g) => g.id).sort(), [one.id, two.id].sort());
+  await backend.sendToGroup(two.id, { message: 'Still watching' });
+  assert.deepEqual(two.posts.map((p) => p.text), ['Still watching']);
 });

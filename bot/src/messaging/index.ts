@@ -17,13 +17,10 @@
 //   PEACHY_BOT_STORE_KEY_FILE  a 0600 file holding it
 //   PEACHY_BOT_DB              the SQLite store's path (default ./data/bot.db), or
 //   PEACHY_BOT_DATABASE_URL    a Postgres store instead (needs the optional `pg` package)
-//   PEACHY_BOT_CHATS_FILE      the chats the bot is in, for listGroups (default: next to the
-//                              SQLite store; none with Postgres)
 //   PEACHY_CONNECT_CODE        a one-time Connect code, for a first start with an empty store
 //
 // To add a platform with its own API, write a MessagingBackend and add a case below.
 
-import path from 'node:path';
 import { Bot } from '@peachysocial/bot';
 import { messagingPlatform, type MessagingBackend } from './backend.js';
 import { PeachyBotBackend } from './peachy-bot.js';
@@ -67,13 +64,9 @@ export function createBackendFromEnv(env: NodeJS.ProcessEnv = process.env): Mess
         // A slow chart shouldn't count as a failed try: a retry would run the command again.
         handlerTimeoutMs: 600_000,
       });
-      const chatsFile =
-        env.PEACHY_BOT_CHATS_FILE ||
-        (env.PEACHY_BOT_DATABASE_URL ? undefined : path.join(path.dirname(dbPath), 'chats.json'));
       return new PeachyBotBackend({
         platform,
         bot,
-        chatsFile,
         onFatal: (err) => {
           console.error(`[${platform}] the Peachy bot stopped: ${err.message}`);
           // Let the host restart the process (or say so): nothing more arrives.
