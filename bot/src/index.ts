@@ -705,6 +705,7 @@ function turnStatsToClock(s: TurnStats): Omit<ClockSnapshot, 'source'> {
       order: p.order,
       eliminated: p.eliminated,
       turnStart: p.turnStart,
+      turnClock: p.turnClock,
     };
   }
   return { day: s.day, turnPlayerId: s.turnPlayerId, players };
@@ -770,7 +771,12 @@ async function buildTurnTimeReport(
     const nums = s
       ? `avg ${formatSpan(s.mean)} · med ${formatSpan(s.median)} · min ${formatSpan(s.min)} · max ${formatSpan(s.max)} · ${s.count} turn${s.count === 1 ? '' : 's'}`
       : 'no finished turns timed';
-    const now = p.currentMs !== undefined ? `\n   ⏳ on the clock ${formatSpan(p.currentMs)}` : '';
+    // Their turn now: how long it has taken so far, and what's left on their AWBW clock.
+    const parts = [
+      p.currentMs !== undefined ? `this turn so far ${formatSpan(p.currentMs)}` : '',
+      p.clockLeftMs !== undefined ? `${formatSpan(p.clockLeftMs)} left on the clock` : '',
+    ].filter(Boolean);
+    const now = parts.length ? `\n   ⏳ ${parts.join(' · ')}` : '';
     return `${who}\n   ${nums}${now}`;
   });
   const span =

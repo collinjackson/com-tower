@@ -20,6 +20,8 @@ export type ClockPlayer = {
   eliminated?: boolean;
   /** AWBW players_turn_start, server time ("2026-10-30 19:39:06", US Eastern). */
   turnStart?: string;
+  /** AWBW players_turn_clock: seconds left on their clock when their turn began. */
+  turnClock?: number;
 };
 
 /** One reading of the game: whose turn it was on which day, and everyone's last turn start. */
@@ -41,8 +43,10 @@ export type PlayerTurnTimes = {
   coName?: string;
   eliminated: boolean;
   turns: TurnTime[];
-  /** How long they have been on the clock right now, if it is their turn. */
+  /** How long their turn in progress has taken so far, if it is their turn. */
   currentMs?: number;
+  /** What's left on their AWBW clock now (it runs down during their turn), if it is their turn. */
+  clockLeftMs?: number;
 };
 
 export type TurnTimesReport = {
@@ -204,6 +208,10 @@ export function computeTurnTimes(snaps: ClockSnapshot[], nowMs: number): TurnTim
   }
 
   const currentStart = starts.get(slotKey(currentDay, currentPid));
+  // The clock the player to move started their turn with: from the newest reading of this turn.
+  const clockAtStart = snaps
+    .filter((s) => s.day === currentDay && String(s.turnPlayerId) === currentPid && s.players[currentPid]?.turnClock !== undefined)
+    .sort((a, b) => (b.source === 'live' ? 1 : 0) - (a.source === 'live' ? 1 : 0))[0]?.players[currentPid]?.turnClock;
   const players: PlayerTurnTimes[] = order.map((pid) => {
     const m = meta.get(pid)!;
     return {
@@ -216,6 +224,10 @@ export function computeTurnTimes(snaps: ClockSnapshot[], nowMs: number): TurnTim
       currentMs:
         pid === currentPid && currentStart !== undefined && nowMs > currentStart
           ? nowMs - currentStart
+          : undefined,
+      clockLeftMs:
+        pid === currentPid && clockAtStart !== undefined
+          ? Math.max(0, clockAtStart * 1000 - (currentStart !== undefined && nowMs > currentStart ? nowMs - currentStart : 0))
           : undefined,
     };
   });
@@ -279,6 +291,7 @@ export function replayToSnapshot(data: any): ClockSnapshot | undefined {
       order: Number(p?.players_order) || undefined,
       eliminated: p?.players_eliminated === 'Y',
       turnStart: typeof p?.players_turn_start === 'string' ? p.players_turn_start : undefined,
+      turnClock: Number.isFinite(Number(p?.players_turn_clock)) ? Number(p.players_turn_clock) : undefined,
     };
   }
   return { day, turnPlayerId: String(gs.currentTurnPId), players, source: 'replay' };

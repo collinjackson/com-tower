@@ -187,3 +187,19 @@ test('backfill stops at its request budget', async () => {
   await backfillFromReplay(snaps, fetchTurn, { delayMs: 0, maxRequests: 5 });
   assert.equal(requested.length, 5);
 });
+
+test("the player to move: this turn so far, and what's left on their AWBW clock", () => {
+  // AWBW's players_turn_clock is the clock when the turn began; it runs down while they play.
+  const start = '2026-11-26 10:00:00';
+  const snap: ClockSnapshot = {
+    day: 12, turnPlayerId: 'b', source: 'live',
+    players: roster({ a: { turnStart: '2026-11-25 20:00:00' }, b: { turnStart: start, turnClock: 6 * 24 * 3600 } }) as any,
+  };
+  const now = awbwTimeToMs(start)! + 8.5 * H;
+  const r = computeTurnTimes([snap], now);
+  const b = r.players.find((p) => p.pid === 'b')!;
+  assert.equal(b.currentMs, 8.5 * H);
+  assert.equal(b.clockLeftMs, 6 * 24 * H - 8.5 * H);
+  assert.equal(formatSpan(b.clockLeftMs!), '5d 15h');
+  assert.equal(r.players.find((p) => p.pid === 'a')!.clockLeftMs, undefined, 'only for the player to move');
+});

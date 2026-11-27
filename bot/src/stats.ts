@@ -28,6 +28,8 @@ export type PlayerStats = {
    *  time (US Eastern, no zone marker). Every sample carries it for every player, so one
    *  sample times the whole round before it — see turn-times.ts. */
   turnStart?: string;
+  /** AWBW's players_turn_clock: the seconds left on this player's clock when their turn began. */
+  turnClock?: number;
 };
 
 /** A whole-game sample: every player's standing at the moment one player's turn began. */
@@ -94,6 +96,7 @@ export function parseTurnStats(html: string, currentPlayerId?: string): TurnStat
         coMaxPower: num(p?.players_co_max_power),
         coMaxSpower: num(p?.players_co_max_spower),
         turnStart: typeof p?.players_turn_start === 'string' ? p.players_turn_start : undefined,
+        turnClock: Number.isFinite(Number(p?.players_turn_clock)) ? Number(p.players_turn_clock) : undefined,
       };
     }
     if (Object.keys(players).length === 0) return undefined;
