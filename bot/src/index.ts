@@ -14,7 +14,7 @@ import { createOwnership, type Ownership, type LeaseStore } from './ownership.js
 import { parseTurnStats, recordTurnStats, type TurnStats } from './stats.js';
 import { fetchStrategyNote } from './strategy-note.js';
 import { failWhale, fetchReel, NO_REEL, reelConfig, rememberCaptions } from './reel.js';
-import { languageOf, languagesOf, parseLanguage } from './language.js';
+import { languageList, languageOf, languagesOf, parseLanguage } from './language.js';
 import { SendRetries, sameTurn } from './retry.js';
 import {
   backfillFromReplay,
@@ -1462,7 +1462,7 @@ const HELP_TEXT =
   '📋 Com Tower — AWBW turn alerts\n' +
   '/game <link>         — watch an AWBW game (mod)\n' +
   '/iam <awbw_name>     — get an @ping on your turn (optional)\n' +
-  '/language <lang|off> — your turn pings\' commentator and your CO talk in it (after /iam)\n' +
+  '/language [lang|off] — list everyone\'s; or set yours: the commentator on your turn pings and your CO talk in it (after /iam)\n' +
   '/setplayer @x <name> — @ping a member on their turn (mod, optional)\n' +
   '/unsetplayer @x      — remove a mapping (mod)\n' +
   '/players             — show the roster\n' +
@@ -1690,14 +1690,15 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
     }
     const players = gg.players || {};
     const key = Object.keys(players).find((k) => players[k]?.aci === senderAci);
-    if (!key) {
-      await reply('First claim your player with /iam <your_awbw_username>, then set /language.');
-      return;
-    }
     const arg = args.join(' ').trim();
     if (!arg) {
-      await reply(`🗣️ ${key}'s language: ${players[key].language || 'English'} (the commentator on your turn pings, and your CO's lines).\n`
-        + 'Set with /language <language>: Spanish, French, Japanese, Esperanto, Pirate, Yoda, emoji… /language off for English.');
+      // Everyone's, so a mixed-up caption can be traced.
+      await reply(`🗣️ Languages (a turn video's commentator speaks the player to move's; each CO speaks its own player's):\n${languageList(players, key)}\n\n`
+        + 'Set yours with /language <language>: Spanish, French, Japanese, Esperanto, Pirate, Yoda, emoji… /language off for English.');
+      return;
+    }
+    if (!key) {
+      await reply('First claim your player with /iam <your_awbw_username>, then set /language.');
       return;
     }
     const lang = parseLanguage(arg);

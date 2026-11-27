@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { languageOf, languagesOf, parseLanguage } from './language.ts';
+import { languageList, languageOf, languagesOf, parseLanguage } from './language.ts';
 
 test('/language off, english or nothing means English', () => {
   for (const a of ['', 'off', 'English', ' en ', 'default']) assert.equal(parseLanguage(a), undefined);
@@ -31,4 +31,9 @@ test('the languages map leaves out English players', () => {
   assert.deepEqual(languagesOf({ Alice: { language: 'Yoda' }, bob: {} }), { Alice: 'Yoda' });
   assert.equal(languagesOf({ bob: {} }), undefined);
   assert.equal(languagesOf(undefined), undefined);
+});
+
+test('/language lists every player', () => {
+  assert.equal(languageList({ Alice: { language: 'Yoda' }, Bob: {} }, 'Bob'), 'Alice: Yoda\nBob (you): English');
+  assert.match(languageList({}), /Nobody/);
 });

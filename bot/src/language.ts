@@ -25,3 +25,10 @@ export function languagesOf(players: Record<string, { language?: string }> | und
   for (const [k, p] of Object.entries(players || {})) if (p?.language) out[k] = p.language;
   return Object.keys(out).length ? out : undefined;
 }
+
+/** /language with no argument: every claimed player's caption language. */
+export function languageList(players: Record<string, { language?: string }> | undefined, you?: string): string {
+  const names = Object.keys(players || {});
+  if (!names.length) return 'Nobody has claimed a player yet (/iam <awbw_username>).';
+  return names.map((n) => `${n}${n === you ? ' (you)' : ''}: ${players![n].language || 'English'}`).join('\n');
+}
