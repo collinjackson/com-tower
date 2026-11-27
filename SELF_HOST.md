@@ -68,6 +68,9 @@ Copy `dashboard/.env.local.example` to `.env.local` and fill in values.
 | `INVITE_SHARED_SECRET` | yes | Same as dashboard |
 | `AWBW_WS_BASE` | optional | Default `wss://awbw.amarriner.com` |
 | `RENDER_BYPASS_TOKEN` | optional | Auth for render endpoint |
+| `REEL_URL` | optional | A turn-video service (see [Turn videos](#turn-videos-optional)); unset: the usual image |
+| `REEL_TOKEN` | optional | Bearer token sent to `REEL_URL` |
+| `REEL_TIMEOUT_MS` | optional | How long a ping waits for its video (default `100000`) |
 
 See `bot/deploy.sh` for Cloud Run deploy with Secret Manager or plain env vars.
 
@@ -143,6 +146,48 @@ a VM with a disk, or on Cloud Run with a Postgres store; Cloud Run's own filesys
 The older option, `peachy daemon` from [peachy-go](https://github.com/collinjackson/peachy-go)
 (it answers signal-cli-rest-api's HTTP API, so the worker runs with `MESSAGING_PLATFORM=peachy` and
 `SIGNAL_CLI_URL` pointed at it), is still described there too.
+
+## Turn videos (optional)
+
+The shared Com Tower posts a short video of the turn that just ended with each ping (the
+"newscast"). It comes from a separate service that isn't part of this repo and only answers the
+shared bot, so a self-hosted Com Tower sends its usual image instead. To get videos on your own,
+point `REEL_URL` at any service that speaks this contract:
+
+```
+POST $REEL_URL
+Authorization: Bearer $REEL_TOKEN
+Content-Type: application/json
+
+{
+  "gameId": 1766972,            // the AWBW game
+  "day": 8,                     // the current day, a hint for finding the turn
+  "players": 5,                 // how many players, likewise
+  "recent": ["..."],            // caption lines this game has already shown (avoid repeating them)
+  "language": "Japanese",       // the player to move's /language
+  "languages": {"alice": "Yoda"},  // every player's /language that isn't English (AWBW names)
+  "toMove": "bob",              // the player to move
+  "fresh": true                 // record again even if cached (the /reel command)
+}
+```
+
+Every field but `gameId` may be missing. The video is of the **last finished turn**, which the
+service finds itself (AWBW's replay data). Answer `200` with:
+
+```
+{"gif": "<base64>", "contentType": "image/gif", "filename": "day8-bob.gif", "captions": ["..."]}
+```
+
+`captions` (the lines the video shows) are remembered and sent back as `recent` next time.
+An answer without `gif` (say `{"error": "no finished turn found"}` on day 1) means there was
+nothing to record: the ping goes out with no image. A non-2xx answer, an exception or a timeout
+(`REEL_TIMEOUT_MS`) is a failure: the ping says the newscast got lost and links the game.
+A square GIF of a few seconds, under a few MB, previews best in chats. Fetch from AWBW gently:
+one game's turn at a time, each replay once.
+
+[libaw](https://github.com/collinjackson/libaw) has the pieces for a basic service: an AWBW
+replay checker that turns a turn into a storyboard, and a browser replay player with a camera that
+follows the action and ghost input, which its `web/capture.mjs` records to a GIF.
 
 ## Verify it works
 

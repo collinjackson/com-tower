@@ -34,6 +34,9 @@ Send `/help` in the group for the full command list.
 | `/fun [on\|off]` | mod | Toggle the hologram image |
 | `/status` | anyone | Current watch state |
 | `/sync` | anyone | Check AWBW now; post if a turn was missed |
+| `/reel` | anyone | Record the last turn's video again and post it |
+| `/language [lang\|off]` | anyone | List everyone's caption language, or set yours (after `/iam`) |
+| `/turntime` | anyone | How long each player takes per turn |
 | `/stop` | mod | Stop watching |
 | `/ping` | anyone | Connectivity check |
 

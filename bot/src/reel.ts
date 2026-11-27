@@ -2,10 +2,14 @@
  * Optional highlight reel of the turn that just ended, from an external service (REEL_URL, with a
  * bearer token in REEL_TOKEN). When set, a "your turn" notification carries the reel as its image
  * (a GIF) in place of the usual chart. The service is anything that answers
- *   POST {url}  {"gameId": number, "day"?: number, "players"?: number, "recent"?: string[], "language"?: string, "fresh"?: true}
+ *   POST {url}  {"gameId": number, "day"?: number, "players"?: number, "recent"?: string[], "language"?: string,
+ *                "languages"?: {[awbwName]: string}, "toMove"?: string, "fresh"?: true}
  *     ->  {"gif": base64, "contentType"?: string, "filename"?: string, "captions"?: string[]}
  * `recent` is the caption lines already shown in this game (the service avoids repeating them);
- * `captions` is the lines this reel shows, for the caller to remember.
+ * `captions` is the lines this reel shows, for the caller to remember. `languages` is every player's
+ * /language and `toMove` the player to move (the commentator speaks theirs, each CO its own player's);
+ * `language` alone is the player to move's, for services that write every line in one.
+ * SELF_HOST.md ("Turn videos") documents the contract for anyone writing their own service.
  * An answer without a gif (e.g. {"error": "no finished turn found"} on day 1, before anyone has
  * moved) returns NO_REEL: there was nothing to record, so the caller sends its usual ping.
  * A real failure (bad status, timeout, exception) returns null, and the caller sends a fail whale.
