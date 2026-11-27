@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { failWhale, fetchReel, NO_REEL, reelConfig, rememberCaptions } from './reel.ts';
+import { failWhale, fetchRecap, fetchReel, NO_REEL, reelConfig, rememberCaptions } from './reel.ts';
 
 test('off without a URL', async () => {
   assert.equal(reelConfig({}), null);
@@ -99,4 +99,19 @@ test('sends every player\'s language and who is to move', async () => {
   await fetchReel(5, { language: 'Yoda', languages: { bob: 'Yoda' }, toMove: 'bob' }, { url: 'https://r.example/reel' }, f);
   assert.deepEqual(body.languages, { bob: 'Yoda' });
   assert.equal(body.toMove, 'bob');
+});
+
+test('a recap comes from /recap beside the reel URL, with the result and the game over', async () => {
+  let url = '', seen: RequestInit | undefined;
+  const f = (async (u: string, init: RequestInit) => {
+    if (String(u).includes('metadata.google.internal')) throw new Error('not on GCP');
+    url = String(u); seen = init; return new Response(JSON.stringify({ video: 'AAAA', captions: ['a'] }));
+  }) as unknown as typeof fetch;
+  const r = await fetchRecap(42, { result: 'Red wins', over: true }, { url: 'http://x/reel', token: 't' }, f);
+  assert.equal(url, 'http://x/recap');
+  assert.deepEqual(r, { dataB64: 'AAAA', contentType: 'video/mp4', filename: 'recap-42.mp4', captions: ['a'] });
+  assert.deepEqual(JSON.parse(seen!.body as string), { gameId: 42, result: 'Red wins', over: true });
+  const ok = (body: unknown, status = 200) => (async () => new Response(JSON.stringify(body), { status })) as unknown as typeof fetch;
+  assert.equal(await fetchRecap(1, {}, { url: 'http://x/reel' }, ok({ error: 'no finished turn found' })), NO_REEL);
+  assert.equal(await fetchRecap(1, {}, { url: 'http://x/reel' }, ok({}, 504)), null);
 });

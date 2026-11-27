@@ -101,3 +101,50 @@ export async function fetchReel(
     return null;
   }
 }
+
+/** A recap takes minutes to cut (every turn's storyboard, then a clip per moment), so it waits up to 14. */
+export const RECAP_TIMEOUT_MS = 14 * 60_000;
+
+/** The game so far (or the whole game, `over`) as one video of its biggest moments, from the reel
+ *  service's /recap (beside REEL_URL; see SELF_HOST.md). `result` ("A and B win") ends it on a card.
+ *  NO_REEL: nothing to recap yet; null: a failure. */
+export async function fetchRecap(
+  gameId: string | number,
+  opts: { languages?: Record<string, string>; toMove?: string; result?: string; over?: boolean; fresh?: boolean },
+  config = reelConfig(),
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs = RECAP_TIMEOUT_MS,
+): Promise<Reel | typeof NO_REEL | null> {
+  if (!config) return null;
+  try {
+    const url = new URL('/recap', config.url).toString();
+    const id = await identityToken(new URL(config.url).origin, fetchImpl);
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (id) headers.Authorization = `Bearer ${id}`;
+    if (config.token) {
+      headers['X-Reel-Token'] = config.token;
+      if (!id) headers.Authorization = `Bearer ${config.token}`;
+    }
+    const res = await fetchImpl(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ gameId: Number(gameId), languages: opts.languages, toMove: opts.languages ? opts.toMove : undefined,
+        result: opts.result || undefined, over: opts.over || undefined, fresh: opts.fresh || undefined }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) {
+      console.warn(`Recap failed for game ${gameId}: ${res.status}`);
+      return null;
+    }
+    const data = (await res.json()) as { video?: string; contentType?: string; filename?: string; error?: string; captions?: unknown };
+    if (typeof data?.video !== 'string' || !data.video) {
+      if (data?.error) console.warn(`Recap skipped for game ${gameId}: ${data.error}`);
+      return NO_REEL;
+    }
+    const captions = Array.isArray(data.captions) ? data.captions.filter((c): c is string => typeof c === 'string') : [];
+    return { dataB64: data.video, contentType: data.contentType || 'video/mp4', filename: data.filename || `recap-${gameId}.mp4`, captions };
+  } catch (err) {
+    console.warn(`Recap failed for game ${gameId}:`, err instanceof Error ? err.message : err);
+    return null;
+  }
+}

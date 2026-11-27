@@ -13,7 +13,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { createOwnership, type Ownership, type LeaseStore } from './ownership.js';
 import { parseTurnStats, recordTurnStats, type TurnStats } from './stats.js';
 import { fetchStrategyNote } from './strategy-note.js';
-import { failWhale, fetchReel, NO_REEL, reelConfig, rememberCaptions } from './reel.js';
+import { failWhale, fetchRecap, fetchReel, NO_REEL, reelConfig, rememberCaptions } from './reel.js';
 import { languageList, languageOf, languagesOf, parseLanguage } from './language.js';
 import { SendRetries, sameTurn } from './retry.js';
 import {
@@ -1475,6 +1475,7 @@ const HELP_TEXT =
   '/status              — current state\n' +
   '/sync                — check AWBW now and post if we missed a turn\n' +
   '/reel                — record the last turn\'s video again and post it (after a fix)\n' +
+  '/recap               — the game so far in its biggest moments, as one video (a few minutes)\n' +
   '/stop                — stop watching (mod)\n' +
   '/ping                — connectivity check';
 
@@ -1978,6 +1979,18 @@ async function handleSignalCommand(ctx: CmdCtx): Promise<void> {
     return;
   }
 
+  // The game so far as one video of its biggest moments (2026-11-27). Takes a few minutes; it posts
+  // when it's ready, and the group can carry on meanwhile.
+  if (cmd === '/recap') {
+    if (!reelConfig()) {
+      await reply('Videos are off on this Com Tower.');
+      return;
+    }
+    await reply('🎞️ Cutting the highlights of the game so far. It takes a few minutes; I\'ll post it here.');
+    void postRecap(groupId, gg.gameId, gg, { fresh: args[0] === 'fresh', over: gg.status === 'ended' });
+    return;
+  }
+
   if (cmd === '/stop' || cmd === '/unwatch') {
     if (!isGgMod(gg, senderAci)) {
       await reply('Only a mod can stop watching.');
@@ -2166,6 +2179,20 @@ function stopGGSocket(groupId: string, reason: string) {
 /** Announce the end of a watched game to the group, mark it ended, and stop watching.
  *  Safe to call from both detection paths (page check + websocket) — the status guard
  *  keeps a second detection from re-announcing. */
+/** Posts the game's highlight recap (fetchRecap) to the group: on /recap, and when a watched game
+ *  ends. Runs in the background (a recap takes minutes); `quiet` sends nothing when there's no recap. */
+async function postRecap(groupId: string, gameId: string, gg: GroupGame | undefined, opts: { over?: boolean; result?: string; fresh?: boolean; quiet?: boolean } = {}) {
+  const r = await fetchRecap(gameId, { languages: languagesOf(gg?.players), result: opts.result, over: opts.over, fresh: opts.fresh });
+  if (!r || r === NO_REEL) {
+    if (!opts.quiet)
+      await sendGroupRaw(groupId, r === NO_REEL ? 'Nothing to recap yet: no turn has finished.' : "Couldn't cut the recap this time. Try /recap again later.")
+        .catch(() => {});
+    return;
+  }
+  await sendGroupRaw(groupId, `🎞️ ${opts.over ? 'The game' : 'The game so far'}, in its biggest moments: ${gameLink(gameId)}`, undefined,
+    { dataB64: r.dataB64, contentType: r.contentType, filename: r.filename }).catch((e) => console.error('[gg] recap send failed', e));
+}
+
 async function announceGameEnded(
   groupId: string,
   gameId: string,
@@ -2196,6 +2223,8 @@ async function announceGameEnded(
   await sendGroupRaw(groupId, report ? `${text}\n\n${report.caption}` : text, undefined, report?.attachment).catch(
     (e) => console.error('[gg] end-of-game announce failed', e)
   );
+  // Then the game's highlight recap, ending on its result (a game that ended while watched).
+  if (status !== 'stopped' && reelConfig()) void postRecap(groupId, gameId, gg, { over: true, result: message, quiet: true });
 }
 
 function startGroupGameSocket(groupId: string, gameId: string) {

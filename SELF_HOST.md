@@ -185,6 +185,18 @@ nothing to record: the ping goes out with no image. A non-2xx answer, an excepti
 A square GIF of a few seconds, under a few MB, previews best in chats. Fetch from AWBW gently:
 one game's turn at a time, each replay once.
 
+**Recaps (optional).** `/recap`, and the end of a watched game, ask the same service's `/recap`
+(beside `REEL_URL`: `https://host/reel` -> `https://host/recap`) for the game in its biggest moments:
+
+```
+POST /recap   {"gameId": 1766972, "languages": {...}, "result": "Red wins", "over": true, "fresh": true}
+-> 200 {"video": "<base64 MP4>", "contentType": "video/mp4", "filename": "recap-1766972.mp4"}
+```
+
+`result` (how the game ended) and `over` (the game is finished) come at the end of a game; `fresh`
+from `/recap fresh`. Com Tower waits up to 14 minutes. No `video` means nothing to recap yet; a
+service without `/recap` just means no recaps.
+
 [libaw](https://github.com/collinjackson/libaw) has the pieces for a basic service: an AWBW
 replay checker that turns a turn into a storyboard, and a browser replay player with a camera that
 follows the action and ghost input, which its `web/capture.mjs` records to a GIF.
