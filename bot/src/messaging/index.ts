@@ -5,8 +5,8 @@
 //   MESSAGING_BACKEND   the implementation. Default "signal-cli-rest", which serves any bridge
 //                       answering signal-cli-rest-api's HTTP API (Signal, or Peachy's older
 //                       `peachy daemon`). "peachy-bot" runs Peachy's bot SDK in this process.
-//                       "discord" is a Discord bot; with no Signal bridge set,
-//                       DISCORD_TOKEN alone picks it.
+//                       "discord" and "slack" are those platforms' bots; with no Signal bridge
+//                       set, DISCORD_TOKEN or SLACK_BOT_TOKEN alone picks one.
 //
 // signal-cli-rest settings:
 //   SIGNAL_CLI_URL      bridge base URL
@@ -28,12 +28,19 @@
 //   DISCORD_REGISTER_COMMANDS  "0" to skip registering them at start
 //   DISCORD_MAX_UPLOAD_BYTES   optional; default 10 MiB
 //
+// slack settings (see SELF_HOST.md "Slack"):
+//   SLACK_BOT_TOKEN            the bot token, xoxb-… (a secret)
+//   SLACK_APP_TOKEN            an app-level token, xapp-…, with connections:write (Socket Mode)
+//   SLACK_COMMAND              optional; the slash command's name (default /comtower)
+//
 // To add a platform with its own API, write a MessagingBackend and add a case below.
 
 import { Bot } from '@peachysocial/bot';
 import { backendKind, messagingPlatform, type MessagingBackend } from './backend.js';
 import { DiscordBackend } from './discord.js';
 import { discordGateway, discordRest } from './discord-live.js';
+import { SlackBackend } from './slack.js';
+import { slackClient, slackReceiver } from './slack-live.js';
 import { PeachyBotBackend } from './peachy-bot.js';
 import { SignalCliRestBackend } from './signal-cli-rest.js';
 
@@ -41,6 +48,7 @@ export * from './backend.js';
 export { SignalCliRestBackend } from './signal-cli-rest.js';
 export { PeachyBotBackend } from './peachy-bot.js';
 export { DiscordBackend } from './discord.js';
+export { SlackBackend } from './slack.js';
 
 /** The configured backend, or null when it isn't configured (the worker then only watches
  *  games and can't send). */
@@ -99,6 +107,18 @@ export function createBackendFromEnv(env: NodeJS.ProcessEnv = process.env): Mess
         guildId: env.DISCORD_GUILD_ID?.trim() || undefined,
         registerCommands: env.DISCORD_REGISTER_COMMANDS !== '0',
         maxUploadBytes: Number.isFinite(max) && max > 0 ? max : undefined,
+      });
+    }
+    case 'slack': {
+      const token = env.SLACK_BOT_TOKEN?.trim();
+      if (!token) return null;
+      const appToken = env.SLACK_APP_TOKEN?.trim();
+      if (!appToken) console.warn(`[${platform}] SLACK_APP_TOKEN not set: turn pings go out, but commands aren't received`);
+      return new SlackBackend({
+        platform,
+        client: slackClient(token),
+        receiver: appToken ? () => slackReceiver(token, appToken, platform) : undefined,
+        command: env.SLACK_COMMAND?.trim() || undefined,
       });
     }
     default:
