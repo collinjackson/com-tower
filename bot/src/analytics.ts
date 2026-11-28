@@ -1,8 +1,9 @@
 // Usage counts for the operator (PostHog), off unless POSTHOG_KEY is set (2026-11-27).
 //
-// What's sent: an event name, a one-way hash of the Signal group's id (never the id itself), the
-// AWBW game id (public), and small counts or labels (which command, whether a turn video came
-// back). Never message text, phone numbers, Signal account ids or names. A self-hosted Com Tower
+// What's sent: an event name, a one-way hash of the chat's id (never the id itself), the AWBW game
+// id (public), the chat platform (signal, discord, slack…), and small counts or labels (which
+// command, whether a turn video came back). Never message text, phone numbers, account ids or
+// names. A self-hosted Com Tower
 // sends nothing unless its operator sets POSTHOG_KEY. See README.md "Analytics".
 //
 // Fire and forget: an analytics failure is logged once in a while and never affects a message.
@@ -34,6 +35,19 @@ export const commandName = (cmd: string) => (COMMANDS.has(cmd) ? cmd : 'other');
 
 let failures = 0;
 
+// The platform this worker serves (index.ts sets it at startup); "signal" until then.
+let workerPlatform = 'signal';
+export function setAnalyticsPlatform(platform: string): void {
+  workerPlatform = platform;
+}
+
+/** The platform an event is about: the namespace of a Discord or Slack id ("discord:<channel>",
+ *  "slack:<team>:<channel>"), else this worker's. */
+export function platformOfId(id: string | undefined, fallback = workerPlatform): string {
+  const m = id?.match(/^(discord|slack):/);
+  return m ? m[1] : fallback;
+}
+
 /** Sends one event. who: {group} or {dm} (hashed here) or {game} (a public AWBW game id). */
 export function track(
   event: string,
@@ -50,7 +64,7 @@ export function track(
     api_key: config.key,
     event,
     distinct_id: distinct,
-    properties: { ...props, source: 'com-tower' },
+    properties: { ...props, platform: platformOfId(who.group ?? who.dm), source: 'com-tower' },
     timestamp: new Date().toISOString(),
   };
   return fetchImpl(`${config.host}/i/v0/e/`, {

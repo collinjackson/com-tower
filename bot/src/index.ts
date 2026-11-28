@@ -14,7 +14,7 @@ import { createOwnership, type Ownership, type LeaseStore } from './ownership.js
 import { parseTurnStats, recordTurnStats, type TurnStats } from './stats.js';
 import { fetchStrategyNote } from './strategy-note.js';
 import { failWhale, fetchRecap, fetchReel, NO_REEL, reelConfig, rememberCaptions } from './reel.js';
-import { commandName, track } from './analytics.js';
+import { commandName, setAnalyticsPlatform, track } from './analytics.js';
 import { languageList, languageOf, languagesOf, parseLanguage } from './language.js';
 import { SendRetries, sameTurn } from './retry.js';
 import {
@@ -86,6 +86,7 @@ type RenderPayload = {
 // The chat platform this worker serves (MESSAGING_PLATFORM, default "signal"), and how it reaches
 // it. Group games carry the platform that bound them; this worker only watches its own.
 const PLATFORM = messagingPlatform();
+setAnalyticsPlatform(PLATFORM);
 const messaging: MessagingBackend | null = createBackendFromEnv();
 function requireMessaging(): MessagingBackend {
   if (!messaging) throw new Error('Messaging not configured (SIGNAL_CLI_URL / SIGNAL_BOT_NUMBER, or PEACHY_BOT_STORE_KEY)');

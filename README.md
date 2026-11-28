@@ -89,9 +89,10 @@ The **Signal bridge** (signal-cli REST) is separate infrastructure — the bot r
 
 The hosted Com Tower counts how it's used, with [PostHog](https://posthog.com), so we can tell what's
 worth building next: which commands are used, how many games groups watch, and whether turn
-videos and recaps come back. Each event carries a one-way hash of the group's id (never the id
-itself), the public AWBW game id, and small labels (which command, whether a video came back).
-**Never** message text, phone numbers, Signal account ids or names. Commands we don't recognise are
+videos and recaps come back. Each event carries a one-way hash of the group's or channel's id (never
+the id itself), the public AWBW game id, the chat platform (`signal`, `discord`, `slack`…), and small
+labels (which command, whether a video came back).
+**Never** message text, phone numbers, Signal, Discord or Slack account ids, or names. Commands we don't recognise are
 counted as "other". The code is [`bot/src/analytics.ts`](bot/src/analytics.ts).
 
 A self-hosted Com Tower sends nothing: analytics is on only when its operator sets `POSTHOG_KEY`.

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { analyticsConfig, anonId, commandName, track } from './analytics.ts';
+import { analyticsConfig, anonId, commandName, setAnalyticsPlatform, track } from './analytics.ts';
 
 test('off without a key', async () => {
   assert.equal(analyticsConfig({}), null);
@@ -29,4 +29,19 @@ test('unknown commands are reported as other, and failures never throw', async (
   const cfg = analyticsConfig({ POSTHOG_KEY: 'k', POSTHOG_HOST: 'https://eu.i.posthog.com/' })!;
   assert.equal(cfg.host, 'https://eu.i.posthog.com');
   await track('x', { game: 1 }, {}, cfg, (async () => { throw new Error('down'); }) as unknown as typeof fetch);
+});
+
+test('every event says its platform: from a namespaced id, else the worker\'s', async () => {
+  const bodies: any[] = [];
+  const f = (async (_u: string, init: RequestInit) => { bodies.push(JSON.parse(init.body as string)); return new Response('{}'); }) as unknown as typeof fetch;
+  const cfg = analyticsConfig({ POSTHOG_KEY: 'k' })!;
+  await track('command', { group: 'signal-group==' }, {}, cfg, f);
+  await track('command', { group: 'discord:123456789' }, {}, cfg, f);
+  await track('dm command', { dm: 'slack:T1:U2' }, {}, cfg, f);
+  setAnalyticsPlatform('peachy');
+  await track('turn alert', { game: 7 }, {}, cfg, f);
+  setAnalyticsPlatform('signal');
+  assert.deepEqual(bodies.map((b) => b.properties.platform), ['signal', 'discord', 'slack', 'peachy']);
+  assert.ok(!JSON.stringify(bodies).includes('123456789'));
+  assert.ok(!JSON.stringify(bodies).includes('U2'));
 });
