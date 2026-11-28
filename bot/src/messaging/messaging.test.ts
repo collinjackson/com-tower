@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 // The leaf modules, as .ts: tests run the sources directly (index.ts imports siblings as .js).
-import { messagingPlatform, platformOf } from './backend.ts';
+import { backendKind, messagingPlatform, platformOf } from './backend.ts';
 import { groupRecipient, SignalCliRestBackend } from './signal-cli-rest.ts';
 
 test('games bound before platforms were recorded are Signal games', () => {
@@ -15,6 +15,17 @@ test('games bound before platforms were recorded are Signal games', () => {
 test('platform comes from MESSAGING_PLATFORM, default signal', () => {
   assert.equal(messagingPlatform({}), 'signal');
   assert.equal(messagingPlatform({ MESSAGING_PLATFORM: ' Other ' }), 'other');
+});
+
+test('Discord or Slack turns on only from its own env, and never displaces a Signal bridge', () => {
+  assert.equal(backendKind({}), 'signal-cli-rest');
+  assert.equal(backendKind({ SIGNAL_CLI_URL: 'http://b', SIGNAL_BOT_NUMBER: '+1', DISCORD_TOKEN: 't' }), 'signal-cli-rest');
+  assert.equal(backendKind({ DISCORD_TOKEN: 't', DISCORD_APP_ID: '1' }), 'discord');
+  assert.equal(backendKind({ SLACK_BOT_TOKEN: 'xoxb' }), 'slack');
+  assert.equal(backendKind({ MESSAGING_BACKEND: 'Slack', DISCORD_TOKEN: 't' }), 'slack');
+  assert.equal(messagingPlatform({ DISCORD_TOKEN: 't' }), 'discord');
+  assert.equal(messagingPlatform({ SLACK_BOT_TOKEN: 'x' }), 'slack');
+  assert.equal(messagingPlatform({ MESSAGING_BACKEND: 'peachy-bot' }), 'peachy');
 });
 
 test('group ids become signal-cli group recipients', () => {

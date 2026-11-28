@@ -22,7 +22,7 @@
 // To add a platform with its own API, write a MessagingBackend and add a case below.
 
 import { Bot } from '@peachysocial/bot';
-import { messagingPlatform, type MessagingBackend } from './backend.js';
+import { backendKind, messagingPlatform, type MessagingBackend } from './backend.js';
 import { PeachyBotBackend } from './peachy-bot.js';
 import { SignalCliRestBackend } from './signal-cli-rest.js';
 
@@ -34,7 +34,7 @@ export { PeachyBotBackend } from './peachy-bot.js';
  *  games and can't send). */
 export function createBackendFromEnv(env: NodeJS.ProcessEnv = process.env): MessagingBackend | null {
   const platform = messagingPlatform(env);
-  const kind = (env.MESSAGING_BACKEND || 'signal-cli-rest').trim().toLowerCase();
+  const kind = backendKind(env);
   switch (kind) {
     case 'signal-cli-rest': {
       if (!env.SIGNAL_CLI_URL || !env.SIGNAL_BOT_NUMBER) return null;
