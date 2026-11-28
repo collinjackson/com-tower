@@ -5,6 +5,8 @@
 //   MESSAGING_BACKEND   the implementation. Default "signal-cli-rest", which serves any bridge
 //                       answering signal-cli-rest-api's HTTP API (Signal, or Peachy's older
 //                       `peachy daemon`). "peachy-bot" runs Peachy's bot SDK in this process.
+//                       "discord" is a Discord bot; with no Signal bridge set,
+//                       DISCORD_TOKEN alone picks it.
 //
 // signal-cli-rest settings:
 //   SIGNAL_CLI_URL      bridge base URL
@@ -19,16 +21,26 @@
 //   PEACHY_BOT_DATABASE_URL    a Postgres store instead (needs the optional `pg` package)
 //   PEACHY_CONNECT_CODE        a one-time Connect code, for a first start with an empty store
 //
+// discord settings (see SELF_HOST.md "Discord"):
+//   DISCORD_TOKEN              the bot token (a secret)
+//   DISCORD_APP_ID             the application id
+//   DISCORD_GUILD_ID           optional; register the slash commands in this one server (instant)
+//   DISCORD_REGISTER_COMMANDS  "0" to skip registering them at start
+//   DISCORD_MAX_UPLOAD_BYTES   optional; default 10 MiB
+//
 // To add a platform with its own API, write a MessagingBackend and add a case below.
 
 import { Bot } from '@peachysocial/bot';
 import { backendKind, messagingPlatform, type MessagingBackend } from './backend.js';
+import { DiscordBackend } from './discord.js';
+import { discordGateway, discordRest } from './discord-live.js';
 import { PeachyBotBackend } from './peachy-bot.js';
 import { SignalCliRestBackend } from './signal-cli-rest.js';
 
 export * from './backend.js';
 export { SignalCliRestBackend } from './signal-cli-rest.js';
 export { PeachyBotBackend } from './peachy-bot.js';
+export { DiscordBackend } from './discord.js';
 
 /** The configured backend, or null when it isn't configured (the worker then only watches
  *  games and can't send). */
@@ -72,6 +84,21 @@ export function createBackendFromEnv(env: NodeJS.ProcessEnv = process.env): Mess
           // Let the host restart the process (or say so): nothing more arrives.
           process.exit(1);
         },
+      });
+    }
+    case 'discord': {
+      const token = env.DISCORD_TOKEN?.trim();
+      const appId = env.DISCORD_APP_ID?.trim();
+      if (!token || !appId) return null;
+      const max = Number(env.DISCORD_MAX_UPLOAD_BYTES);
+      return new DiscordBackend({
+        platform,
+        appId,
+        rest: discordRest(token),
+        gateway: () => discordGateway(token, platform),
+        guildId: env.DISCORD_GUILD_ID?.trim() || undefined,
+        registerCommands: env.DISCORD_REGISTER_COMMANDS !== '0',
+        maxUploadBytes: Number.isFinite(max) && max > 0 ? max : undefined,
       });
     }
     default:
