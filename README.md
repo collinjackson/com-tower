@@ -2,7 +2,7 @@
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-**Turn notifications for [Advance Wars By Web](https://awbw.amarriner.com)** — get Signal alerts when it’s your turn.
+**Turn notifications for [Advance Wars By Web](https://awbw.amarriner.com)** — get a Signal, Discord or Slack alert when it’s your turn.
 
 ```
 Day 12. ExamplePlayer, you’re up. https://awbw.amarriner.com/game.php?games_id=123456
@@ -12,7 +12,22 @@ Day 12. ExamplePlayer, you’re up. https://awbw.amarriner.com/game.php?games_id
 
 ---
 
+## Platforms
+
+| Platform | Status | How it works |
+|----------|--------|--------------|
+| **Signal** | supported; the shared instance runs it | Add the bot to the game's Signal group (or DM it); commands are typed: `/game <link>` |
+| **Discord** | supported (self-host: [SELF_HOST.md › Discord](SELF_HOST.md#discord)) | Invite the bot to a server; use its slash commands in a channel: `/game link:<link>`, `/iam awbw_name:<name>`. Turn pings mention your Discord account, and turn videos upload as files (up to 10 MB) |
+| **Slack** | supported (self-host: [SELF_HOST.md › Slack](SELF_HOST.md#slack)) | Add the app to a channel; type `/comtower game <link>`, or mention it: `@Com Tower game <link>`. Turn pings mention your Slack account and upload the video |
+| **Peachy** | supported (self-host: [deploy/peachy](deploy/peachy/README.md)) | Add the bot to a group; pick commands from Peachy's command picker |
+
+Every platform has the same commands, game watching and alert text. Each runs as its own worker
+against the same database; a channel's id carries its platform (`discord:…`, `slack:…`), so
+nothing mixes.
+
 ## Get started
+
+The steps below are for Signal; on Discord and Slack it's the same commands, typed as above.
 
 Com Tower is a Signal bot. Add it to your AWBW game’s group chat (or DM it one-on-one), bind your game, and it posts when turns change.
 
@@ -40,6 +55,9 @@ Send `/help` in the group for the full command list.
 | `/turntime` | anyone | How long each player takes per turn |
 | `/stop` | mod | Stop watching |
 | `/ping` | anyone | Connectivity check |
+
+On Discord each command is a slash command with named fields (`/setplayer member:@x awbw_name:<name>`);
+on Slack it follows `/comtower` (`/comtower setplayer @x <name>`).
 
 **Mods** can change the game, stop watching, toggle the hologram image, and manage player mappings. The first person to run `/game` in a group is the mod; mods can add others with `/addmod @x`.
 
@@ -70,7 +88,7 @@ Good fit if you run a league, juggle many concurrent games, or want full control
 
 Com Tower is **primarily a bot**. Two deployables:
 
-- **`bot/`** — the core service (Cloud Run). Holds long-lived AWBW websocket connections, triggers on turn change, asks the dashboard for notification text/art, and sends via a **Signal bridge** (signal-cli). Handles in-Signal `/game`, `/iam`, `/fun`, `/status`, etc.
+- **`bot/`** — the core service (Cloud Run). Holds long-lived AWBW websocket connections, triggers on turn change, asks the dashboard for notification text/art, and sends via a messaging backend (`bot/src/messaging/`): a **Signal bridge** (signal-cli), Peachy's bot SDK, a **Discord** bot (discord.js, Gateway) or a **Slack** app (Bolt, Socket Mode). One worker serves one platform. Handles in-chat `/game`, `/iam`, `/fun`, `/status`, etc.
 - **`dashboard/`** — companion web app (Next.js on Vercel). Google auth, patch management, invite/CAPTCHA flow, activity feed, and `/api/notify/render` (message text + hologram image).
 
 | Directory     | Purpose |

@@ -14,6 +14,7 @@ Each self-hosted instance is fully isolated: your Firebase, your bot worker, you
 6. [ ] Deploy Firestore rules from `dashboard/firestore.rules`
 7. [ ] Give the bot's Signal account a username, and set `NEXT_PUBLIC_SIGNAL_USERNAME` (plus, optionally, `NEXT_PUBLIC_SIGNAL_USERNAME_LINK`) on the dashboard
 8. [ ] Verify: add your bot to a Signal group → `/game <awbw link>` → `/status` shows watching
+9. [ ] Optional: a [Discord](#discord) or [Slack](#slack) worker beside it (same Firebase)
 
 ## How the pieces connect
 
@@ -74,6 +75,18 @@ Copy `dashboard/.env.local.example` to `.env.local` and fill in values.
 | `POSTHOG_KEY` | optional | Your PostHog project key: usage counts go to your PostHog (README "Analytics"). Unset: none are sent |
 | `POSTHOG_HOST` | optional | PostHog's ingest host (default `https://us.i.posthog.com`; EU: `https://eu.i.posthog.com`) |
 | `ANALYTICS_SALT` | optional | Salt for the hashed group ids (default: the key) |
+| `MESSAGING_BACKEND` | optional | `signal-cli-rest` (default), `peachy-bot`, `discord` or `slack`. With no `SIGNAL_CLI_URL`, `DISCORD_TOKEN` or `SLACK_BOT_TOKEN` alone picks Discord or Slack |
+| `DISCORD_TOKEN` | Discord | The bot's token (a secret) |
+| `DISCORD_APP_ID` | Discord | The application id |
+| `DISCORD_GUILD_ID` | optional | Register the slash commands in this one server only (they show at once; for testing). Unset: everywhere, which can take a little while the first time |
+| `DISCORD_REGISTER_COMMANDS` | optional | `0` to not register the slash commands at start |
+| `DISCORD_MAX_UPLOAD_BYTES` | optional | Largest video to upload (default 10 MiB, Discord's limit without server boosts); a bigger one is left off with a note |
+| `SLACK_BOT_TOKEN` | Slack | The Bot User OAuth Token, `xoxb-…` (a secret) |
+| `SLACK_APP_TOKEN` | Slack | An app-level token, `xapp-…`, with `connections:write` (Socket Mode; a secret). Without it turn pings still go out, but no commands come in |
+| `SLACK_COMMAND` | optional | The slash command's name (default `/comtower`; match the app's manifest) |
+
+A Discord or Slack worker needs no `SIGNAL_*` variables. Leave `SLACK_SIGNING_SECRET` unset: Socket
+Mode doesn't use it.
 
 See `bot/deploy.sh` for Cloud Run deploy with Secret Manager or plain env vars.
 
@@ -135,6 +148,91 @@ Then set `COM_TOWER_WORKER_URL` on the dashboard to the Cloud Run service URL.
 ## 5. Firestore rules and indexes
 
 Deploy `dashboard/firestore.rules` to your Firebase project. Ensure composite indexes exist for queries in `dashboard/src/app/api/game/[id]/activity/route.ts` and admin/captcha routes (Firebase Console will prompt with create links on first failure).
+
+## Discord
+
+A Discord worker is the same `bot/` with `MESSAGING_BACKEND=discord`, as its own service beside a
+Signal worker on the same Firebase project (each group game records its platform; a worker watches
+only its own). It connects to Discord's Gateway with discord.js, so it needs no public URL, and it
+reads only slash commands: no privileged intents, no message content.
+
+**Why the Gateway and not HTTP interactions:** the worker is already a long-running process (one
+instance at least) that holds AWBW websockets, and one replica runs the receiver. A Gateway
+connection fits that as it is: nothing to expose or signature-check on Cloud Run, and it works on
+a home server behind NAT. Sends (turn pings, from whichever replica owns the game) go over Discord's
+REST API.
+
+1. **Create the application.** [discord.com/developers/applications](https://discord.com/developers/applications)
+   → **New Application**, name it (e.g. "Com Tower").
+2. **General Information:** copy the **Application ID** → `DISCORD_APP_ID`. Leave **Interactions
+   Endpoint URL** empty (if set, Discord sends commands there instead of over the Gateway).
+3. **Bot:** **Reset Token** and copy it → `DISCORD_TOKEN` (a secret; put it in Secret Manager).
+   Leave all three **Privileged Gateway Intents** off. Turn **Public Bot** off if only you should
+   invite it.
+4. **Installation:** **Installation Contexts**: **Guild Install** only. **Install Link**: Discord
+   Provided Link, with scopes `bot` and `applications.commands`, and these bot permissions, which are
+   all it needs:
+   - View Channels
+   - Send Messages
+   - Send Messages in Threads
+   - Attach Files
+
+   That's permissions integer `274877942784`, so the invite URL is
+   `https://discord.com/oauth2/authorize?client_id=<DISCORD_APP_ID>&scope=bot+applications.commands&permissions=274877942784`.
+5. **Deploy the worker** (from `bot/`, a separate Cloud Run service; CPU always on, since the
+   Gateway is a background connection):
+   ```bash
+   SERVICE_NAME=com-tower-discord MESSAGING_BACKEND=discord \
+     SECRET_DISCORD_TOKEN=discord-token DISCORD_APP_ID=<id> \
+     SECRET_FIREBASE_PROJECT_ID=... SECRET_FIREBASE_CLIENT_EMAIL=... SECRET_FIREBASE_PRIVATE_KEY=... \
+     ./deploy.sh --no-cpu-throttling
+   ```
+   Keep `SCALING_MODE` at its default (`singleton`) or `leader`: one replica runs the Gateway. At
+   start it registers the slash commands (all of Com Tower's; `DISCORD_GUILD_ID` puts them in one
+   server only, at once, for testing).
+6. **Use it:** open the invite URL, pick a server, then in a channel: `/game link:<AWBW link>`, and
+   each player `/iam awbw_name:<name>`. Turn pings mention the player's Discord account. If the bot
+   can't post in that channel, `/game` says which permissions to give it.
+
+Turn videos go up as files when they fit `DISCORD_MAX_UPLOAD_BYTES`; a bigger one is left off and
+the ping says so (the game link is still there). Commands answer through the slash command itself
+(Discord's "thinking…", then the answer); turn pings and late answers (a recap, minutes later) are
+ordinary channel messages. `/stats` and `/turntime` also work in a DM with the bot, with a `game`
+field.
+
+## Slack
+
+A Slack worker is the same `bot/` with `MESSAGING_BACKEND=slack`, as its own service. It uses Bolt
+in **Socket Mode**: the worker connects out to Slack, so there's no request URL to expose. Slack
+slash-command names are workspace-wide, so Com Tower has one, `/comtower`, and every command follows
+it: `/comtower game <link>`. Mentioning the app works too: `@Com Tower iam <name>`.
+
+1. **Create the app from the manifest.** [api.slack.com/apps](https://api.slack.com/apps) →
+   **Create New App** → **From a manifest** → pick the workspace → paste
+   [`deploy/slack/manifest.yml`](deploy/slack/manifest.yml) → **Create**. It sets the bot user, the
+   `/comtower` command (with "escape users" on, so `@mentions` reach the bot as ids), the
+   `app_mention` event, Socket Mode, and these bot scopes, which are all it needs:
+   `commands`, `app_mentions:read`, `chat:write`, `files:write`, `channels:read`, `groups:read`,
+   `channels:join`, `im:write`.
+2. **App-level token:** **Basic Information** → **App-Level Tokens** → **Generate Token and
+   Scopes**, scope `connections:write` → copy the `xapp-…` token → `SLACK_APP_TOKEN` (a secret).
+3. **Install:** **Install App** → **Install to Workspace** → allow → copy the **Bot User OAuth
+   Token** (`xoxb-…`) → `SLACK_BOT_TOKEN` (a secret).
+4. **Deploy the worker** (from `bot/`, a separate Cloud Run service, CPU always on):
+   ```bash
+   SERVICE_NAME=com-tower-slack MESSAGING_BACKEND=slack \
+     SECRET_SLACK_BOT_TOKEN=slack-bot-token SECRET_SLACK_APP_TOKEN=slack-app-token \
+     SECRET_FIREBASE_PROJECT_ID=... SECRET_FIREBASE_CLIENT_EMAIL=... SECRET_FIREBASE_PRIVATE_KEY=... \
+     ./deploy.sh --no-cpu-throttling
+   ```
+   One replica runs the Socket Mode connection (`SCALING_MODE` `singleton` or `leader`).
+5. **Use it:** in a channel, `/comtower game <AWBW link>`; each player `/comtower iam <name>`. In a
+   public channel the app joins by itself; in a private one, `/invite @Com Tower` first (until then
+   `/game` answers but warns that turn pings can't post). Turn pings mention the player's Slack
+   account, with the turn video uploaded beside them.
+
+One app is one workspace (its bot token). For several workspaces, make an app in each and a worker
+for each, or add Slack's OAuth install flow (not built yet).
 
 ## Peachy
 

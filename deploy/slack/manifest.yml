@@ -1,0 +1,39 @@
+# Slack app manifest for a Com Tower worker with MESSAGING_BACKEND=slack (SELF_HOST.md "Slack").
+# api.slack.com/apps -> Create New App -> From a manifest -> paste this.
+# Socket Mode: the worker connects out to Slack, so there is no request URL to set.
+display_information:
+  name: Com Tower
+  description: Advance Wars By Web turn alerts
+features:
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  bot_user:
+    display_name: Com Tower
+    always_online: true
+  slash_commands:
+    - command: /comtower
+      description: "AWBW turn alerts: /comtower game <link>, /comtower iam <name>, /comtower help"
+      usage_hint: "game <AWBW link> | iam <AWBW name> | help"
+      should_escape: true
+oauth_config:
+  scopes:
+    bot:
+      - commands          # the /comtower command
+      - app_mentions:read # "@Com Tower game <link>"
+      - chat:write        # replies and turn pings
+      - files:write       # turn videos, charts
+      - channels:read     # is the app in this public channel? (/game warns if it can't post)
+      - groups:read       # the same for private channels
+      - channels:join     # join a public channel on /game, so turn pings can post
+      - im:write          # answer DM commands (/comtower stats <game>)
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+  interactivity:
+    is_enabled: false
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false

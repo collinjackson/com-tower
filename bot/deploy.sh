@@ -51,12 +51,51 @@ add_secret_or_env() {
   fi
 }
 
+# Optional config: passed on only when set (as a secret, SECRET_<VAR>, or a plain value).
+add_optional() {
+  local var="$1"
+  local secret_var="SECRET_${var}"
+  if [[ -n "${!secret_var:-}" ]]; then
+    flags+=(--set-secrets "${var}=${!secret_var}:latest")
+  elif [[ -n "${!var:-}" ]]; then
+    flags+=(--set-env-vars "${var}=${!var}")
+  fi
+}
+
+# Which chat platform this worker serves. A Discord or Slack worker is its own service, e.g.
+#   SERVICE_NAME=com-tower-discord MESSAGING_BACKEND=discord SECRET_DISCORD_TOKEN=discord-token \
+#     DISCORD_APP_ID=123... ./deploy.sh --no-cpu-throttling
+#   SERVICE_NAME=com-tower-slack MESSAGING_BACKEND=slack SECRET_SLACK_BOT_TOKEN=slack-bot-token \
+#     SECRET_SLACK_APP_TOKEN=slack-app-token ./deploy.sh --no-cpu-throttling
+# (SELF_HOST.md "Discord" and "Slack"). Unset, it's a Signal worker, as before.
+BACKEND="$(echo "${MESSAGING_BACKEND:-signal-cli-rest}" | tr '[:upper:]' '[:lower:]')"
+
 missing=0
 add_secret_or_env "FIREBASE_PROJECT_ID"
 add_secret_or_env "FIREBASE_CLIENT_EMAIL"
 add_secret_or_env "FIREBASE_PRIVATE_KEY"
-add_secret_or_env "SIGNAL_CLI_URL"
-add_secret_or_env "SIGNAL_BOT_NUMBER"
+case "$BACKEND" in
+  signal-cli-rest)
+    add_secret_or_env "SIGNAL_CLI_URL"
+    add_secret_or_env "SIGNAL_BOT_NUMBER"
+    ;;
+  discord)
+    flags+=(--set-env-vars "MESSAGING_BACKEND=discord")
+    add_secret_or_env "DISCORD_TOKEN"
+    add_secret_or_env "DISCORD_APP_ID"
+    add_optional "DISCORD_GUILD_ID"
+    add_optional "DISCORD_MAX_UPLOAD_BYTES"
+    ;;
+  slack)
+    flags+=(--set-env-vars "MESSAGING_BACKEND=slack")
+    add_secret_or_env "SLACK_BOT_TOKEN"
+    add_secret_or_env "SLACK_APP_TOKEN"
+    add_optional "SLACK_COMMAND"
+    ;;
+  *)
+    flags+=(--set-env-vars "MESSAGING_BACKEND=${BACKEND}")
+    ;;
+esac
 
 # Optional configs
 if [[ -n "${SECRET_NOTIFY_RENDER_URL:-}" ]]; then
